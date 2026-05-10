@@ -1,0 +1,13 @@
+[package]
+name = "minibwa-rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+flate2 = "1"
+libc = "0.2"
+libm = "0.2"
+libsais-rs = { path = "../libsais" }
