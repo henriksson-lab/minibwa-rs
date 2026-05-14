@@ -26,6 +26,166 @@ But:
 This blurb might be out of date. Go to [this page](https://github.com/henriksson-lab/rustification) for the latest information and further information about how we approach translation
 
 
+## Cargo Features
+
+`minibwa-rs` is a library crate by default. The command-line binary is optional
+and is disabled unless the `cli` feature is requested.
+
+```toml
+[dependencies]
+minibwa-rs = "0.1"
+```
+
+To build or install the CLI, enable the feature explicitly:
+
+```sh
+cargo build --release --features cli
+cargo install minibwa-rs --features cli
+```
+
+The same feature also exposes `minibwa_rs::cli` for library users that want to
+embed the command dispatcher instead of spawning a process.
+
+For local development from this repository:
+
+```sh
+cargo run --release --features cli -- map -t 4 ref_prefix reads.fq > out.paf
+```
+
+## Library Examples
+
+The most stable library entry points are currently close to the translated C
+surface. For CLI-compatible behavior from Rust code, call the subcommand
+functions directly and provide the argument vector that would normally follow
+the executable name.
+
+```rust
+use std::io::BufWriter;
+
+fn main() {
+    let mut out = BufWriter::new(Vec::new());
+    let args = vec![
+        "map".to_string(),
+        "-t".to_string(),
+        "4".to_string(),
+        "ref_prefix".to_string(),
+        "reads.fq".to_string(),
+    ];
+
+    let (status, message) = minibwa_rs::map_main::main_map_write(&args, &mut out);
+    assert_eq!(status, 0, "{message}");
+
+    let paf = String::from_utf8(out.into_inner().unwrap()).unwrap();
+    println!("{paf}");
+}
+```
+
+Call indexing the same way when you want command-compatible indexing from a
+library context:
+
+```rust
+fn main() {
+    let args = vec![
+        "index".to_string(),
+        "-t".to_string(),
+        "4".to_string(),
+        "reference.fa".to_string(),
+        "ref_prefix".to_string(),
+    ];
+
+    let (status, message) = minibwa_rs::index::main_index(&args);
+    assert_eq!(status, 0, "{message}");
+}
+```
+
+If you specifically want the CLI dispatcher from a library, enable the `cli`
+feature and pass an argv vector including the executable name:
+
+```toml
+[dependencies]
+minibwa-rs = { version = "0.1", features = ["cli"] }
+```
+
+```rust
+fn main() {
+    let argv = vec![
+        "minibwa-rs".to_string(),
+        "version".to_string(),
+    ];
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    let status = minibwa_rs::cli::run_with_writers(&argv, &mut stdout, &mut stderr)
+        .expect("failed to run minibwa CLI dispatcher");
+    assert_eq!(status, 0);
+}
+```
+
+For long-running applications, load the index once and pass your own Rayon pool
+down to mapping. This avoids rebuilding a thread pool for every call and lets
+the embedding application own scheduling.
+
+```rust
+use minibwa_rs::{map_main, mbidx, options};
+use rayon::ThreadPoolBuilder;
+
+fn main() {
+    let mut opt = options::mb_opt_t::default();
+    options::mb_opt_init(&mut opt);
+    opt.n_threads = 4;
+
+    let idx = mbidx::mb_idx_load("ref_prefix", 0).expect("failed to load index");
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(opt.n_threads as usize)
+        .build()
+        .unwrap();
+
+    let mut out = Vec::new();
+    pool.install(|| {
+        map_main::mb_map_file_with_pool(
+            &idx,
+            &mut opt,
+            1,
+            &["reads.fq"],
+            &mut out,
+            Some(&pool),
+        );
+    });
+}
+```
+
+## CLI Examples
+
+Build the binary with the optional feature:
+
+```sh
+cargo build --release --features cli
+```
+
+Build an index:
+
+```sh
+target/release/minibwa-rs index -t 4 reference.fa ref_prefix
+```
+
+Map reads to PAF:
+
+```sh
+target/release/minibwa-rs map -t 4 ref_prefix reads.fq > reads.paf
+```
+
+Map paired-end reads to SAM:
+
+```sh
+target/release/minibwa-rs map -a -t 4 ref_prefix reads_R1.fq reads_R2.fq > reads.sam
+```
+
+Run long-read chaining presets:
+
+```sh
+target/release/minibwa-rs map -x lr --chain-only -t 4 ref_prefix reads.fq > chains.paf
+```
+
 
 # Citing
 

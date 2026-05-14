@@ -2,15 +2,48 @@
 name = "minibwa-rs"
 version = "0.1.0"
 edition = "2021"
+description = "Rust translation of minibwa for BWT indexing and sequence alignment"
+readme = "README.md"
+license-file = "LICENSE"
+repository = "https://github.com/henriksson-lab/minibwa-rs"
+homepage = "https://github.com/henriksson-lab/minibwa-rs"
+documentation = "https://docs.rs/minibwa-rs"
+keywords = ["bioinformatics", "alignment", "bwt", "sequencing"]
+categories = ["science", "command-line-utilities"]
+autobins = false
+autotests = false
+include = [
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE.minibwa",
+    "/build.rs",
+    "/c/**",
+    "/src/lib.rs",
+    "/src/main.rs",
+]
+
+[features]
+default = []
+cli = []
 
 [lib]
 path = "src/lib.rs"
+
+[[bin]]
+name = "minibwa-rs"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "cli"
+path = "tests/cli.rs"
+required-features = ["cli"]
 
 [dependencies]
 flate2 = "1"
 libc = "0.2"
 libm = "0.2"
-libsais-rs = { path = "../libsais" }
+libsais-rs = { version = "0.1.1", path = "../libsais" }
 rayon = "1.10"
 
 [build-dependencies]
