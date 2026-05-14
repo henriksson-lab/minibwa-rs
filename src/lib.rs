@@ -1,8 +1,8 @@
 //! Rust translation of the original minibwa C surface.
 //!
 //! Source inventory was extracted with `ccc-rs analyze` from the upstream `minibwa` tree.
-//! Vendored `libsais` is provided by the local `libsais-rs` dependency, and vendored
-//! KSW/mimalloc C shims used by the build live under `c/`.
+//! Vendored `libsais` is provided by the local `libsais-rs` dependency, and KSW
+//! C shims used by the build live under `c/`.
 #![allow(
     clippy::absurd_extreme_comparisons,
     clippy::almost_swapped,
@@ -1179,35 +1179,23 @@ pub mod align {
             }
             let mut q_off = 0;
             let mut t_off = 0;
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            {
-                if let Some(c_score) = crate::ksw2_c_sse::maybe_ll_i16(
-                    q_len,
-                    &qseq2,
-                    mat,
-                    t_len,
-                    &tseq[pos[0][0] as usize..],
-                    opt.q,
-                    opt.e,
-                    &mut q_off,
-                    &mut t_off,
-                ) {
-                    score = c_score;
-                } else {
-                    let qp = ksw_ll_qinit(km, 2, q_len, &qseq2, 5, mat);
-                    score = ksw_ll_i16(
-                        &qp,
-                        t_len,
-                        &tseq[pos[0][0] as usize..],
-                        opt.q,
-                        opt.e,
-                        &mut q_off,
-                        &mut t_off,
-                    );
-                }
-            }
-            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-            {
+            #[cfg(all(feature = "c-ksw2", any(target_arch = "x86", target_arch = "x86_64")))]
+            let c_score = crate::ksw2_c_sse::maybe_ll_i16(
+                q_len,
+                &qseq2,
+                mat,
+                t_len,
+                &tseq[pos[0][0] as usize..],
+                opt.q,
+                opt.e,
+                &mut q_off,
+                &mut t_off,
+            );
+            #[cfg(not(all(feature = "c-ksw2", any(target_arch = "x86", target_arch = "x86_64"))))]
+            let c_score = None;
+            if let Some(c_score) = c_score {
+                score = c_score;
+            } else {
                 let qp = ksw_ll_qinit(km, 2, q_len, &qseq2, 5, mat);
                 score = ksw_ll_i16(
                     &qp,
@@ -2600,22 +2588,16 @@ pub mod align {
         mb_seq_rev(tl as u32, tseq);
         let mut q_off = 0;
         let mut t_off = 0;
-        let score;
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        {
-            score = crate::ksw2_c_sse::maybe_ll_i16(
-                ql, qseq, mat, tl, tseq, opt.q, opt.e, &mut q_off, &mut t_off,
-            )
-            .unwrap_or_else(|| {
-                let qp = ksw_ll_qinit(km, 2, ql, qseq, 5, mat);
-                ksw_ll_i16(&qp, tl, tseq, opt.q, opt.e, &mut q_off, &mut t_off)
-            });
-        }
-        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-        {
+        #[cfg(all(feature = "c-ksw2", any(target_arch = "x86", target_arch = "x86_64")))]
+        let c_score = crate::ksw2_c_sse::maybe_ll_i16(
+            ql, qseq, mat, tl, tseq, opt.q, opt.e, &mut q_off, &mut t_off,
+        );
+        #[cfg(not(all(feature = "c-ksw2", any(target_arch = "x86", target_arch = "x86_64"))))]
+        let c_score = None;
+        let score = c_score.unwrap_or_else(|| {
             let qp = ksw_ll_qinit(km, 2, ql, qseq, 5, mat);
-            score = ksw_ll_i16(&qp, tl, tseq, opt.q, opt.e, &mut q_off, &mut t_off);
-        }
+            ksw_ll_i16(&qp, tl, tseq, opt.q, opt.e, &mut q_off, &mut t_off)
+        });
         mb_seq_rev(ql as u32, qseq);
         mb_seq_rev(tl as u32, tseq);
         if score < opt.min_dp_max * opt.a {
@@ -11675,7 +11657,7 @@ pub mod ksw2 {
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(all(feature = "c-ksw2", any(target_arch = "x86", target_arch = "x86_64")))]
 pub mod ksw2_c_sse {
     use crate::ksw2::ksw_extz_t;
     use crate::ksw2_ll_sse::ksw_llrst_t;
@@ -12095,7 +12077,7 @@ pub mod ksw2_extd2_sse {
         flag: i32,
         ez: &mut ksw_extz_t,
     ) {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(all(feature = "c-ksw2", any(target_arch = "x86", target_arch = "x86_64")))]
         if crate::ksw2_c_sse::maybe_extd2(
             qlen, query, tlen, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag, ez,
         ) {
@@ -12949,7 +12931,7 @@ pub mod ksw2_extz2_sse {
         flag: i32,
         ez: &mut ksw_extz_t,
     ) {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(all(feature = "c-ksw2", any(target_arch = "x86", target_arch = "x86_64")))]
         if crate::ksw2_c_sse::maybe_extz2(
             qlen, query, tlen, target, m, mat, q, e, w, zdrop, end_bonus, flag, ez,
         ) {
@@ -21160,9 +21142,12 @@ pub mod pe {
         ksw_gen_nt4_mat(&mut mat, 1, b_mm as i8, b_ts as i8, b_ambi as i8);
         let sz = if max_sc < 255 - b_mm { 1 } else { 2 };
         let xtra = KSW_LL_SUBO | opt.min_len;
-        let rst = if let Some(rst) =
-            crate::ksw2_c_sse::maybe_ll_core(sz, qlen, qseq, &mat, tlen, tseq, gapo, gape, xtra)
-        {
+        #[cfg(all(feature = "c-ksw2", any(target_arch = "x86", target_arch = "x86_64")))]
+        let c_rst =
+            crate::ksw2_c_sse::maybe_ll_core(sz, qlen, qseq, &mat, tlen, tseq, gapo, gape, xtra);
+        #[cfg(not(all(feature = "c-ksw2", any(target_arch = "x86", target_arch = "x86_64"))))]
+        let c_rst = None;
+        let rst = if let Some(rst) = c_rst {
             rst
         } else {
             let qp = ksw_ll_qinit(km, sz, qlen, qseq, 5, &mat);

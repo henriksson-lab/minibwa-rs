@@ -17,7 +17,7 @@ include = [
     "/README.md",
     "/LICENSE.minibwa",
     "/build.rs",
-    "/c/**",
+    "/c/ksw2/**",
     "/src/lib.rs",
     "/src/main.rs",
 ]
@@ -25,6 +25,7 @@ include = [
 [features]
 default = []
 cli = []
+c-ksw2 = []
 
 [lib]
 path = "src/lib.rs"
