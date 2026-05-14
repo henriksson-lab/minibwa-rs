@@ -2582,3 +2582,94 @@ fn cli_index_meth_outputs_match_original_for_small_fasta() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+#[ignore = "requires .tmp/compare-yeast-now fixtures prepared from the real yeast conformance data"]
+fn cli_genbwt_threaded_matches_original_on_yeast() {
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture_dir = std::path::Path::new(manifest_dir).join(".tmp/compare-yeast-now");
+    let l2b = fixture_dir.join("ref.split.rust.l2b");
+    let original_l2b = fixture_dir.join("ref.split.orig.l2b");
+    let original_bwt = fixture_dir.join("ref.split.orig.mbw");
+    let rust_bwt = fixture_dir.join("ref.split.rust.t4.test.mbw");
+
+    assert!(l2b.exists(), "missing fixture {}", l2b.display());
+    if !original_bwt.exists() {
+        let original_input = if original_l2b.exists() {
+            &original_l2b
+        } else {
+            &l2b
+        };
+        let original = Command::new(original_bin)
+            .args([
+                "genbwt",
+                "-u",
+                "2",
+                "-t",
+                "4",
+                &original_input.to_string_lossy(),
+                &original_bwt.to_string_lossy(),
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(original.status.code(), Some(0));
+    }
+
+    let rust = Command::new(rust_bin)
+        .args([
+            "genbwt",
+            "-u",
+            "2",
+            "-t",
+            "4",
+            &l2b.to_string_lossy(),
+            &rust_bwt.to_string_lossy(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(rust.status.code(), Some(0));
+    assert_eq!(
+        std::fs::read(&rust_bwt).unwrap(),
+        std::fs::read(&original_bwt).unwrap()
+    );
+}
+
+#[test]
+#[ignore = "requires .tmp/large-real/yeast fixtures and the external yeast FASTQ"]
+fn cli_map_full_alignment_matches_original_on_yeast_10k_subset() {
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let index = format!("{manifest_dir}/.tmp/large-real/yeast/ref.orig");
+    let reads_src = "/data/henriksson/github/claude/star/.tmp/yeast_conformance/SRR10143877.fastq";
+    let reads = std::path::Path::new(manifest_dir).join(".tmp/large-real/yeast/reads_10k.fq");
+
+    if !reads.exists() {
+        let data = std::fs::read_to_string(reads_src).expect("read external yeast FASTQ");
+        let subset = data.lines().take(40_000).collect::<Vec<_>>().join("\n") + "\n";
+        std::fs::write(&reads, subset).expect("write yeast subset");
+    }
+    for extra in [Vec::<&str>::new(), vec!["-a"]] {
+        let mut args = vec!["map"];
+        args.extend(extra);
+        args.extend([
+            "-t",
+            "1",
+            "-K",
+            "1m,1m",
+            &index,
+            reads.to_str().expect("utf8 path"),
+        ]);
+        let rust = Command::new(rust_bin).args(&args).output().unwrap();
+        let original = Command::new(original_bin).args(&args).output().unwrap();
+        assert_eq!(rust.status.code(), Some(0), "rust status for {args:?}");
+        assert_eq!(
+            original.status.code(),
+            Some(0),
+            "original status for {args:?}"
+        );
+        assert_eq!(rust.stdout, original.stdout, "stdout for {args:?}");
+    }
+}

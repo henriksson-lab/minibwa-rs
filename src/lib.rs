@@ -2,7 +2,7 @@
 //!
 //! Source inventory was extracted with `ccc-rs analyze` from the sibling `minibwa/` tree.
 //! Vendored `libsais` is provided by the local `libsais-rs` dependency, and vendored
-//! `mimalloc` is intentionally excluded.
+//! `mimalloc` is linked by the CLI for parity with the original C build.
 #![allow(
     clippy::absurd_extreme_comparisons,
     clippy::almost_swapped,
@@ -459,7 +459,6 @@ pub mod QSufSort {
 
 #[cfg(test)]
 mod ksw_original_c_conformance {
-    use std::path::PathBuf;
     use std::process::Command;
 
     use crate::ksw2::ksw_extz_t;
@@ -478,26 +477,6 @@ mod ksw_original_c_conformance {
         7, -3, -3, -3, -2, -3, 7, -3, -3, -2, -3, -3, 7, -3, -2, -3, -3, -3, 7, -2, -2, -2, -2, -2,
         -2,
     ];
-    #[derive(Clone, Debug)]
-    struct Case {
-        kind: String,
-        line: String,
-        mat_id: i32,
-        qlen: i32,
-        tlen: i32,
-        q: i8,
-        e: i8,
-        q2: i8,
-        e2: i8,
-        w: i32,
-        zdrop: i32,
-        end_bonus: i32,
-        flag: i32,
-        query: Vec<u8>,
-        target: Vec<u8>,
-        expected: Observed,
-    }
-
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Observed {
         max: u32,
@@ -515,28 +494,15 @@ mod ksw_original_c_conformance {
         cigar: Vec<u32>,
     }
 
-    impl From<&ksw_extz_t> for Observed {
-        fn from(ez: &ksw_extz_t) -> Self {
-            Self {
-                max: ez.max,
-                zdropped: ez.zdropped,
-                max_q: ez.max_q,
-                max_t: ez.max_t,
-                mqe: ez.mqe,
-                mqe_t: ez.mqe_t,
-                mte: ez.mte,
-                mte_q: ez.mte_q,
-                score: ez.score,
-                m_cigar: ez.m_cigar,
-                n_cigar: ez.n_cigar,
-                reach_end: ez.reach_end,
-                cigar: ez.cigar[..ez.n_cigar.max(0) as usize].to_vec(),
-            }
+    #[test]
+    #[ignore = "strict original-C ksw verifier; requires gcc, original C sources, and x86 SSE4.1"]
+    fn ksw_original_c_conformance_harness() {
+        if !cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
+            eprintln!("skipping original ksw SSE harness on non-x86 target");
+            return;
         }
-    }
 
-    fn compile_c_harness() -> PathBuf {
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let exe = std::env::temp_dir().join(format!(
             "minibwa_ksw_conformance_{}_{}",
             std::process::id(),
@@ -564,43 +530,54 @@ mod ksw_original_c_conformance {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        exe
-    }
-
-    fn parse_seq(s: &str) -> Vec<u8> {
-        s.bytes()
-            .map(|b| {
-                assert!((b'0'..=b'4').contains(&b), "bad sequence digit in {s}");
-                b - b'0'
-            })
-            .collect()
-    }
-
-    fn parse_line(line: &str) -> Case {
-        let parts = line.split_whitespace().collect::<Vec<_>>();
-        assert!(parts.len() >= 27, "short harness line: {line}");
-        let n_cigar = parts[25].parse::<i32>().expect("n_cigar");
+        let output = Command::new(&exe)
+            .output()
+            .expect("failed to run original ksw harness");
         assert!(
-            parts.len() == 27 + n_cigar.max(0) as usize,
-            "bad cigar field count in harness line: {line}"
+            output.status.success(),
+            "original ksw harness failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
-        Case {
-            kind: parts[0].to_string(),
-            line: line.to_string(),
-            mat_id: parts[2].parse().expect("mat_id"),
-            qlen: parts[3].parse().expect("qlen"),
-            tlen: parts[4].parse().expect("tlen"),
-            q: parts[5].parse().expect("q"),
-            e: parts[6].parse().expect("e"),
-            q2: parts[7].parse().expect("q2"),
-            e2: parts[8].parse().expect("e2"),
-            w: parts[9].parse().expect("w"),
-            zdrop: parts[10].parse().expect("zdrop"),
-            end_bonus: parts[11].parse().expect("end_bonus"),
-            flag: parts[12].parse().expect("flag"),
-            query: parse_seq(parts[13]),
-            target: parse_seq(parts[14]),
-            expected: Observed {
+
+        let stdout = String::from_utf8(output.stdout).expect("harness output is not UTF-8");
+        let mut total = 0usize;
+        let mut mismatches = Vec::new();
+        for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+            total += 1;
+            let parts = line.split_whitespace().collect::<Vec<_>>();
+            assert!(parts.len() >= 27, "short harness line: {line}");
+            let n_cigar = parts[25].parse::<i32>().expect("n_cigar");
+            assert!(
+                parts.len() == 27 + n_cigar.max(0) as usize,
+                "bad cigar field count in harness line: {line}"
+            );
+            let mat_id = parts[2].parse::<i32>().expect("mat_id");
+            let qlen = parts[3].parse::<i32>().expect("qlen");
+            let tlen = parts[4].parse::<i32>().expect("tlen");
+            let q = parts[5].parse::<i8>().expect("q");
+            let e = parts[6].parse::<i8>().expect("e");
+            let q2 = parts[7].parse::<i8>().expect("q2");
+            let e2 = parts[8].parse::<i8>().expect("e2");
+            let w = parts[9].parse::<i32>().expect("w");
+            let zdrop = parts[10].parse::<i32>().expect("zdrop");
+            let end_bonus = parts[11].parse::<i32>().expect("end_bonus");
+            let flag = parts[12].parse::<i32>().expect("flag");
+            let query = parts[13]
+                .bytes()
+                .map(|b| {
+                    assert!((b'0'..=b'4').contains(&b), "bad sequence digit in {line}");
+                    b - b'0'
+                })
+                .collect::<Vec<_>>();
+            let target = parts[14]
+                .bytes()
+                .map(|b| {
+                    assert!((b'0'..=b'4').contains(&b), "bad sequence digit in {line}");
+                    b - b'0'
+                })
+                .collect::<Vec<_>>();
+            let expected = Observed {
                 max: parts[15].parse().expect("max"),
                 zdropped: parts[16].parse().expect("zdropped"),
                 max_q: parts[17].parse().expect("max_q"),
@@ -617,88 +594,70 @@ mod ksw_original_c_conformance {
                     .iter()
                     .map(|s| s.parse().expect("cigar"))
                     .collect(),
-            },
-        }
-    }
-
-    fn run_rust(case: &Case) -> Observed {
-        let mut ez = ksw_extz_t::default();
-        let mat = match case.mat_id {
-            0 => &MAT,
-            1 => &ALT_MAT,
-            2 => &PEAK_MAT,
-            _ => panic!("unknown ksw conformance matrix in {}", case.line),
-        };
-        match case.kind.as_str() {
-            "z" => ksw_extz2_sse(
-                (),
-                case.qlen,
-                &case.query,
-                case.tlen,
-                &case.target,
-                5,
-                mat,
-                case.q,
-                case.e,
-                case.w,
-                case.zdrop,
-                case.end_bonus,
-                case.flag,
-                &mut ez,
-            ),
-            "d" => ksw_extd2_sse(
-                (),
-                case.qlen,
-                &case.query,
-                case.tlen,
-                &case.target,
-                5,
-                mat,
-                case.q,
-                case.e,
-                case.q2,
-                case.e2,
-                case.w,
-                case.zdrop,
-                case.end_bonus,
-                case.flag,
-                &mut ez,
-            ),
-            _ => panic!("unknown ksw conformance kind in {}", case.line),
-        }
-        Observed::from(&ez)
-    }
-
-    #[test]
-    #[ignore = "strict original-C ksw verifier; requires gcc, original C sources, and x86 SSE4.1"]
-    fn ksw_original_c_conformance_harness() {
-        if !cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
-            eprintln!("skipping original ksw SSE harness on non-x86 target");
-            return;
-        }
-
-        let exe = compile_c_harness();
-        let output = Command::new(&exe)
-            .output()
-            .expect("failed to run original ksw harness");
-        assert!(
-            output.status.success(),
-            "original ksw harness failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let stdout = String::from_utf8(output.stdout).expect("harness output is not UTF-8");
-        let mut total = 0usize;
-        let mut mismatches = Vec::new();
-        for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
-            total += 1;
-            let case = parse_line(line);
-            let actual = run_rust(&case);
-            if actual != case.expected {
+            };
+            let mut ez = ksw_extz_t::default();
+            let mat = match mat_id {
+                0 => &MAT,
+                1 => &ALT_MAT,
+                2 => &PEAK_MAT,
+                _ => panic!("unknown ksw conformance matrix in {line}"),
+            };
+            match parts[0] {
+                "z" => ksw_extz2_sse(
+                    (),
+                    qlen,
+                    &query,
+                    tlen,
+                    &target,
+                    5,
+                    mat,
+                    q,
+                    e,
+                    w,
+                    zdrop,
+                    end_bonus,
+                    flag,
+                    &mut ez,
+                ),
+                "d" => ksw_extd2_sse(
+                    (),
+                    qlen,
+                    &query,
+                    tlen,
+                    &target,
+                    5,
+                    mat,
+                    q,
+                    e,
+                    q2,
+                    e2,
+                    w,
+                    zdrop,
+                    end_bonus,
+                    flag,
+                    &mut ez,
+                ),
+                _ => panic!("unknown ksw conformance kind in {line}"),
+            }
+            let actual = Observed {
+                max: ez.max,
+                zdropped: ez.zdropped,
+                max_q: ez.max_q,
+                max_t: ez.max_t,
+                mqe: ez.mqe,
+                mqe_t: ez.mqe_t,
+                mte: ez.mte,
+                mte_q: ez.mte_q,
+                score: ez.score,
+                m_cigar: ez.m_cigar,
+                n_cigar: ez.n_cigar,
+                reach_end: ez.reach_end,
+                cigar: ez.cigar[..ez.n_cigar.max(0) as usize].to_vec(),
+            };
+            if actual != expected {
                 mismatches.push(format!(
                     "case line: {}\nexpected: {:?}\nactual:   {:?}",
-                    case.line, case.expected, actual
+                    line, expected, actual
                 ));
             }
         }
@@ -726,7 +685,6 @@ mod ksw_original_c_conformance {
 
 #[cfg(test)]
 mod ksw_ll_original_c_conformance {
-    use std::path::PathBuf;
     use std::process::Command;
 
     use crate::ksw2_ll_sse::{ksw_ll_i16_core, ksw_ll_qinit, ksw_ll_u8_core, ksw_llrst_t};
@@ -744,23 +702,15 @@ mod ksw_ll_original_c_conformance {
         -2,
     ];
 
-    #[derive(Clone, Debug)]
-    struct Case {
-        line: String,
-        mat_id: i32,
-        size: i32,
-        qlen: i32,
-        tlen: i32,
-        gapo: i32,
-        gape: i32,
-        xtra: i32,
-        query: Vec<u8>,
-        target: Vec<u8>,
-        expected: ksw_llrst_t,
-    }
+    #[test]
+    #[ignore = "strict original-C ksw ll verifier; requires gcc, original C sources, and x86 SSE2"]
+    fn ksw_ll_original_c_conformance_harness() {
+        if !cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
+            eprintln!("skipping original ksw ll SSE harness on non-x86 target");
+            return;
+        }
 
-    fn compile_c_harness() -> PathBuf {
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let exe = std::env::temp_dir().join(format!(
             "minibwa_ksw_ll_conformance_{}_{}",
             std::process::id(),
@@ -787,66 +737,6 @@ mod ksw_ll_original_c_conformance {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        exe
-    }
-
-    fn parse_seq(s: &str) -> Vec<u8> {
-        s.bytes()
-            .map(|b| {
-                assert!((b'0'..=b'4').contains(&b), "bad sequence digit in {s}");
-                b - b'0'
-            })
-            .collect()
-    }
-
-    fn parse_line(line: &str) -> Case {
-        let parts = line.split_whitespace().collect::<Vec<_>>();
-        assert_eq!(parts.len(), 15, "bad harness line: {line}");
-        Case {
-            line: line.to_string(),
-            mat_id: parts[1].parse().expect("mat_id"),
-            size: parts[2].parse().expect("size"),
-            qlen: parts[3].parse().expect("qlen"),
-            tlen: parts[4].parse().expect("tlen"),
-            gapo: parts[5].parse().expect("gapo"),
-            gape: parts[6].parse().expect("gape"),
-            xtra: parts[7].parse().expect("xtra"),
-            query: parse_seq(parts[8]),
-            target: parse_seq(parts[9]),
-            expected: ksw_llrst_t {
-                score: parts[10].parse().expect("score"),
-                te: parts[11].parse().expect("te"),
-                qe: parts[12].parse().expect("qe"),
-                score2: parts[13].parse().expect("score2"),
-                te2: parts[14].parse().expect("te2"),
-            },
-        }
-    }
-
-    fn run_rust(case: &Case) -> ksw_llrst_t {
-        let mat = match case.mat_id {
-            0 => &MAT,
-            1 => &ALT_MAT,
-            2 => &PEAK_MAT,
-            _ => panic!("unknown ksw ll conformance matrix in {}", case.line),
-        };
-        let q = ksw_ll_qinit((), case.size, case.qlen, &case.query, 5, mat);
-        if case.size == 1 {
-            ksw_ll_u8_core(&q, case.tlen, &case.target, case.gapo, case.gape, case.xtra)
-        } else {
-            ksw_ll_i16_core(&q, case.tlen, &case.target, case.gapo, case.gape, case.xtra)
-        }
-    }
-
-    #[test]
-    #[ignore = "strict original-C ksw ll verifier; requires gcc, original C sources, and x86 SSE2"]
-    fn ksw_ll_original_c_conformance_harness() {
-        if !cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
-            eprintln!("skipping original ksw ll SSE harness on non-x86 target");
-            return;
-        }
-
-        let exe = compile_c_harness();
         let output = Command::new(&exe)
             .output()
             .expect("failed to run original ksw ll harness");
@@ -862,12 +752,52 @@ mod ksw_ll_original_c_conformance {
         let mut mismatches = Vec::new();
         for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
             total += 1;
-            let case = parse_line(line);
-            let actual = run_rust(&case);
-            if actual != case.expected {
+            let parts = line.split_whitespace().collect::<Vec<_>>();
+            assert_eq!(parts.len(), 15, "bad harness line: {line}");
+            let mat_id = parts[1].parse::<i32>().expect("mat_id");
+            let size = parts[2].parse::<i32>().expect("size");
+            let qlen = parts[3].parse::<i32>().expect("qlen");
+            let tlen = parts[4].parse::<i32>().expect("tlen");
+            let gapo = parts[5].parse::<i32>().expect("gapo");
+            let gape = parts[6].parse::<i32>().expect("gape");
+            let xtra = parts[7].parse::<i32>().expect("xtra");
+            let query = parts[8]
+                .bytes()
+                .map(|b| {
+                    assert!((b'0'..=b'4').contains(&b), "bad sequence digit in {line}");
+                    b - b'0'
+                })
+                .collect::<Vec<_>>();
+            let target = parts[9]
+                .bytes()
+                .map(|b| {
+                    assert!((b'0'..=b'4').contains(&b), "bad sequence digit in {line}");
+                    b - b'0'
+                })
+                .collect::<Vec<_>>();
+            let expected = ksw_llrst_t {
+                score: parts[10].parse().expect("score"),
+                te: parts[11].parse().expect("te"),
+                qe: parts[12].parse().expect("qe"),
+                score2: parts[13].parse().expect("score2"),
+                te2: parts[14].parse().expect("te2"),
+            };
+            let mat = match mat_id {
+                0 => &MAT,
+                1 => &ALT_MAT,
+                2 => &PEAK_MAT,
+                _ => panic!("unknown ksw ll conformance matrix in {line}"),
+            };
+            let q = ksw_ll_qinit((), size, qlen, &query, 5, mat);
+            let actual = if size == 1 {
+                ksw_ll_u8_core(&q, tlen, &target, gapo, gape, xtra)
+            } else {
+                ksw_ll_i16_core(&q, tlen, &target, gapo, gape, xtra)
+            };
+            if actual != expected {
                 mismatches.push(format!(
                     "case line: {}\nexpected: {:?}\nactual:   {:?}",
-                    case.line, case.expected, actual
+                    line, expected, actual
                 ));
             }
         }
@@ -891,15 +821,16 @@ mod ksw_ll_original_c_conformance {
 
 #[cfg(test)]
 mod ksw_helpers_original_c_conformance {
-    use std::path::PathBuf;
     use std::process::Command;
 
     use crate::ksw2::{
         ksw_apply_zdrop, ksw_backtrack, ksw_extz_t, ksw_gen_nt4_mat, ksw_reset_extz, KSW_NEG_INF,
     };
 
-    fn compile_c_harness() -> PathBuf {
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    #[test]
+    #[ignore = "strict original-C ksw helper verifier; requires gcc and original C headers"]
+    fn ksw_helpers_original_c_conformance_harness() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let exe = std::env::temp_dir().join(format!(
             "minibwa_ksw_helpers_conformance_{}_{}",
             std::process::id(),
@@ -924,181 +855,6 @@ mod ksw_helpers_original_c_conformance {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        exe
-    }
-
-    fn parse_i32(s: &str) -> i32 {
-        s.parse().expect("i32 field")
-    }
-
-    fn parse_u32(s: &str) -> u32 {
-        s.parse().expect("u32 field")
-    }
-
-    fn check_mat(parts: &[&str], line: &str) {
-        assert_eq!(parts.len(), 31, "bad mat line: {line}");
-        let mut mat = [0i8; 25];
-        ksw_gen_nt4_mat(
-            &mut mat,
-            parse_i32(parts[2]) as i8,
-            parse_i32(parts[3]) as i8,
-            parse_i32(parts[4]) as i8,
-            parse_i32(parts[5]) as i8,
-        );
-        let expected = parts[6..]
-            .iter()
-            .map(|s| parse_i32(s) as i8)
-            .collect::<Vec<_>>();
-        assert_eq!(mat.to_vec(), expected, "mat mismatch for {line}");
-    }
-
-    fn check_reset(parts: &[&str], line: &str) {
-        assert_eq!(parts.len(), 13, "bad reset line: {line}");
-        let mut ez = ksw_extz_t {
-            max: 123,
-            zdropped: 1,
-            max_q: 7,
-            max_t: 8,
-            mqe: 9,
-            mqe_t: 10,
-            mte: 11,
-            mte_q: 12,
-            score: 13,
-            m_cigar: 14,
-            n_cigar: 15,
-            reach_end: 1,
-            cigar: Vec::new(),
-        };
-        ksw_reset_extz(&mut ez);
-        let actual = [
-            ez.max as i32,
-            ez.zdropped as i32,
-            ez.max_q,
-            ez.max_t,
-            ez.mqe,
-            ez.mqe_t,
-            ez.mte,
-            ez.mte_q,
-            ez.score,
-            ez.n_cigar,
-            ez.reach_end,
-        ];
-        let expected = parts[2..].iter().map(|s| parse_i32(s)).collect::<Vec<_>>();
-        assert_eq!(actual.to_vec(), expected, "reset mismatch for {line}");
-        assert_eq!(ez.score, KSW_NEG_INF);
-    }
-
-    fn check_zdrop(parts: &[&str], line: &str) {
-        assert_eq!(parts.len(), 16, "bad zdrop line: {line}");
-        let mut ez = ksw_extz_t {
-            max: parse_u32(parts[2]),
-            max_t: parse_i32(parts[3]),
-            max_q: parse_i32(parts[4]),
-            ..Default::default()
-        };
-        let ret = ksw_apply_zdrop(
-            &mut ez,
-            parse_i32(parts[5]),
-            parse_i32(parts[6]),
-            parse_i32(parts[7]),
-            parse_i32(parts[8]),
-            parse_i32(parts[9]),
-            parse_i32(parts[10]) as i8,
-        );
-        let actual = [
-            ret as i64,
-            ez.max as i64,
-            ez.zdropped as i64,
-            ez.max_t as i64,
-            ez.max_q as i64,
-        ];
-        let expected = parts[11..]
-            .iter()
-            .map(|s| s.parse::<i64>().expect("zdrop output"))
-            .collect::<Vec<_>>();
-        assert_eq!(actual.to_vec(), expected, "zdrop mismatch for {line}");
-    }
-
-    fn check_backtrack(parts: &[&str], line: &str) {
-        assert!(parts.len() >= 13, "short bt line: {line}");
-        let is_rot = parse_i32(parts[2]);
-        let is_rev = parse_i32(parts[3]);
-        let min_intron_len = parse_i32(parts[4]);
-        let n_col = parse_i32(parts[5]);
-        let i0 = parse_i32(parts[6]);
-        let j0 = parse_i32(parts[7]);
-        let off_len = parse_i32(parts[8]) as usize;
-        let p_len = parse_i32(parts[9]) as usize;
-        let mut pos = 10;
-        let off = parts[pos..pos + off_len]
-            .iter()
-            .map(|s| parse_i32(s))
-            .collect::<Vec<_>>();
-        pos += off_len;
-        let has_off_end = parse_i32(parts[pos]) != 0;
-        pos += 1;
-        let off_end = if has_off_end {
-            let v = parts[pos..pos + off_len]
-                .iter()
-                .map(|s| parse_i32(s))
-                .collect::<Vec<_>>();
-            pos += off_len;
-            Some(v)
-        } else {
-            None
-        };
-        let p = parts[pos..pos + p_len]
-            .iter()
-            .map(|s| parse_i32(s) as u8)
-            .collect::<Vec<_>>();
-        pos += p_len;
-        let expected_m = parse_i32(parts[pos]);
-        pos += 1;
-        let expected_n = parse_i32(parts[pos]);
-        pos += 1;
-        assert_eq!(
-            parts.len(),
-            pos + expected_n.max(0) as usize,
-            "bad bt cigar count: {line}"
-        );
-        let expected_cigar = parts[pos..]
-            .iter()
-            .map(|s| parse_u32(s))
-            .collect::<Vec<_>>();
-        let mut m = 0;
-        let mut n = 0;
-        let mut cigar = Vec::new();
-        ksw_backtrack(
-            (),
-            is_rot,
-            is_rev,
-            min_intron_len,
-            &p,
-            &off,
-            off_end.as_deref(),
-            n_col,
-            i0,
-            j0,
-            &mut m,
-            &mut n,
-            &mut cigar,
-        );
-        assert_eq!(
-            (m, n),
-            (expected_m, expected_n),
-            "bt sizes mismatch for {line}"
-        );
-        assert_eq!(
-            cigar[..n as usize].to_vec(),
-            expected_cigar,
-            "bt cigar mismatch for {line}"
-        );
-    }
-
-    #[test]
-    #[ignore = "strict original-C ksw helper verifier; requires gcc and original C headers"]
-    fn ksw_helpers_original_c_conformance_harness() {
-        let exe = compile_c_harness();
         let output = Command::new(&exe)
             .output()
             .expect("failed to run original ksw helper harness");
@@ -1114,10 +870,165 @@ mod ksw_helpers_original_c_conformance {
             total += 1;
             let parts = line.split_whitespace().collect::<Vec<_>>();
             match parts.first().copied() {
-                Some("mat") => check_mat(&parts, line),
-                Some("reset") => check_reset(&parts, line),
-                Some("zdrop") => check_zdrop(&parts, line),
-                Some("bt") => check_backtrack(&parts, line),
+                Some("mat") => {
+                    assert_eq!(parts.len(), 31, "bad mat line: {line}");
+                    let mut mat = [0i8; 25];
+                    ksw_gen_nt4_mat(
+                        &mut mat,
+                        parts[2].parse::<i32>().expect("match field") as i8,
+                        parts[3].parse::<i32>().expect("mismatch field") as i8,
+                        parts[4].parse::<i32>().expect("ambiguous field") as i8,
+                        parts[5].parse::<i32>().expect("wildcard field") as i8,
+                    );
+                    let expected = parts[6..]
+                        .iter()
+                        .map(|s| s.parse::<i32>().expect("mat field") as i8)
+                        .collect::<Vec<_>>();
+                    assert_eq!(mat.to_vec(), expected, "mat mismatch for {line}");
+                }
+                Some("reset") => {
+                    assert_eq!(parts.len(), 13, "bad reset line: {line}");
+                    let mut ez = ksw_extz_t {
+                        max: 123,
+                        zdropped: 1,
+                        max_q: 7,
+                        max_t: 8,
+                        mqe: 9,
+                        mqe_t: 10,
+                        mte: 11,
+                        mte_q: 12,
+                        score: 13,
+                        m_cigar: 14,
+                        n_cigar: 15,
+                        reach_end: 1,
+                        cigar: Vec::new(),
+                    };
+                    ksw_reset_extz(&mut ez);
+                    let actual = [
+                        ez.max as i32,
+                        ez.zdropped as i32,
+                        ez.max_q,
+                        ez.max_t,
+                        ez.mqe,
+                        ez.mqe_t,
+                        ez.mte,
+                        ez.mte_q,
+                        ez.score,
+                        ez.n_cigar,
+                        ez.reach_end,
+                    ];
+                    let expected = parts[2..]
+                        .iter()
+                        .map(|s| s.parse::<i32>().expect("reset field"))
+                        .collect::<Vec<_>>();
+                    assert_eq!(actual.to_vec(), expected, "reset mismatch for {line}");
+                    assert_eq!(ez.score, KSW_NEG_INF);
+                }
+                Some("zdrop") => {
+                    assert_eq!(parts.len(), 16, "bad zdrop line: {line}");
+                    let mut ez = ksw_extz_t {
+                        max: parts[2].parse().expect("max field"),
+                        max_t: parts[3].parse().expect("max_t field"),
+                        max_q: parts[4].parse().expect("max_q field"),
+                        ..Default::default()
+                    };
+                    let ret = ksw_apply_zdrop(
+                        &mut ez,
+                        parts[5].parse().expect("off field"),
+                        parts[6].parse().expect("e field"),
+                        parts[7].parse().expect("i field"),
+                        parts[8].parse().expect("score field"),
+                        parts[9].parse().expect("zdrop field"),
+                        parts[10].parse::<i32>().expect("e2 field") as i8,
+                    );
+                    let actual = [
+                        ret as i64,
+                        ez.max as i64,
+                        ez.zdropped as i64,
+                        ez.max_t as i64,
+                        ez.max_q as i64,
+                    ];
+                    let expected = parts[11..]
+                        .iter()
+                        .map(|s| s.parse::<i64>().expect("zdrop output"))
+                        .collect::<Vec<_>>();
+                    assert_eq!(actual.to_vec(), expected, "zdrop mismatch for {line}");
+                }
+                Some("bt") => {
+                    assert!(parts.len() >= 13, "short bt line: {line}");
+                    let is_rot = parts[2].parse::<i32>().expect("is_rot field");
+                    let is_rev = parts[3].parse::<i32>().expect("is_rev field");
+                    let min_intron_len = parts[4].parse::<i32>().expect("min_intron_len field");
+                    let n_col = parts[5].parse::<i32>().expect("n_col field");
+                    let i0 = parts[6].parse::<i32>().expect("i0 field");
+                    let j0 = parts[7].parse::<i32>().expect("j0 field");
+                    let off_len = parts[8].parse::<usize>().expect("off_len field");
+                    let p_len = parts[9].parse::<usize>().expect("p_len field");
+                    let mut pos = 10;
+                    let off = parts[pos..pos + off_len]
+                        .iter()
+                        .map(|s| s.parse::<i32>().expect("off field"))
+                        .collect::<Vec<_>>();
+                    pos += off_len;
+                    let has_off_end = parts[pos].parse::<i32>().expect("has_off_end field") != 0;
+                    pos += 1;
+                    let off_end = if has_off_end {
+                        let v = parts[pos..pos + off_len]
+                            .iter()
+                            .map(|s| s.parse::<i32>().expect("off_end field"))
+                            .collect::<Vec<_>>();
+                        pos += off_len;
+                        Some(v)
+                    } else {
+                        None
+                    };
+                    let p = parts[pos..pos + p_len]
+                        .iter()
+                        .map(|s| s.parse::<i32>().expect("p field") as u8)
+                        .collect::<Vec<_>>();
+                    pos += p_len;
+                    let expected_m = parts[pos].parse::<i32>().expect("expected_m field");
+                    pos += 1;
+                    let expected_n = parts[pos].parse::<i32>().expect("expected_n field");
+                    pos += 1;
+                    assert_eq!(
+                        parts.len(),
+                        pos + expected_n.max(0) as usize,
+                        "bad bt cigar count: {line}"
+                    );
+                    let expected_cigar = parts[pos..]
+                        .iter()
+                        .map(|s| s.parse::<u32>().expect("cigar field"))
+                        .collect::<Vec<_>>();
+                    let mut m = 0;
+                    let mut n = 0;
+                    let mut cigar = Vec::new();
+                    ksw_backtrack(
+                        (),
+                        is_rot,
+                        is_rev,
+                        min_intron_len,
+                        &p,
+                        &off,
+                        off_end.as_deref(),
+                        n_col,
+                        i0,
+                        j0,
+                        &mut m,
+                        &mut n,
+                        &mut cigar,
+                    );
+                    assert_eq!(
+                        (m, n),
+                        (expected_m, expected_n),
+                        "bt sizes mismatch for {line}"
+                    );
+                    assert_eq!(
+                        cigar[..n as usize].to_vec(),
+                        expected_cigar,
+                        "bt cigar mismatch for {line}"
+                    );
+                }
                 _ => panic!("unknown ksw helper harness line: {line}"),
             }
         }
@@ -1162,6 +1073,7 @@ pub mod align {
     pub const MB_CIGAR_EQ_MATCH: u32 = 7;
     pub const MB_CIGAR_X_MISMATCH: u32 = 8;
     pub const MB_CIGAR_STR: &str = "MIDNSHP=XB";
+
     pub const MB_SEED_LONG_JOIN: u32 = 0x1;
     pub const MB_SEED_IGNORE: u32 = 0x2;
 
@@ -1265,18 +1177,48 @@ pub mod align {
                 let c = qseq[pos[1][1] as usize - i - 1];
                 qseq2[i] = if c >= 4 { 4 } else { 3 - c };
             }
-            let qp = ksw_ll_qinit(km, 2, q_len, &qseq2, 5, mat);
             let mut q_off = 0;
             let mut t_off = 0;
-            score = ksw_ll_i16(
-                &qp,
-                t_len,
-                &tseq[pos[0][0] as usize..],
-                opt.q,
-                opt.e,
-                &mut q_off,
-                &mut t_off,
-            );
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            {
+                if let Some(c_score) = crate::ksw2_c_sse::maybe_ll_i16(
+                    q_len,
+                    &qseq2,
+                    mat,
+                    t_len,
+                    &tseq[pos[0][0] as usize..],
+                    opt.q,
+                    opt.e,
+                    &mut q_off,
+                    &mut t_off,
+                ) {
+                    score = c_score;
+                } else {
+                    let qp = ksw_ll_qinit(km, 2, q_len, &qseq2, 5, mat);
+                    score = ksw_ll_i16(
+                        &qp,
+                        t_len,
+                        &tseq[pos[0][0] as usize..],
+                        opt.q,
+                        opt.e,
+                        &mut q_off,
+                        &mut t_off,
+                    );
+                }
+            }
+            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+            {
+                let qp = ksw_ll_qinit(km, 2, q_len, &qseq2, 5, mat);
+                score = ksw_ll_i16(
+                    &qp,
+                    t_len,
+                    &tseq[pos[0][0] as usize..],
+                    opt.q,
+                    opt.e,
+                    &mut q_off,
+                    &mut t_off,
+                );
+            }
             if score >= opt.min_chain_score * opt.a && score >= opt.min_dp_max * opt.a {
                 return 2;
             }
@@ -1294,6 +1236,7 @@ pub mod align {
     ) {
         *qshift = 0;
         *tshift = 0;
+        let r_rev = r.rev();
         let Some(p) = r.p.as_mut() else {
             return;
         };
@@ -1304,8 +1247,8 @@ pub mod align {
             return;
         }
         for k in 0..p.n_cigar as usize {
-            let op = p.cigar[k] & 0xf;
-            let len = p.cigar[k] >> 4;
+            let op = p.cigar()[k] & 0xf;
+            let len = p.cigar()[k] >> 4;
             if len == 0 {
                 to_shrink = 1;
             }
@@ -1315,10 +1258,10 @@ pub mod align {
             } else if op == MB_CIGAR_INS || op == MB_CIGAR_DEL {
                 if k > 0
                     && k < p.n_cigar as usize - 1
-                    && (p.cigar[k - 1] & 0xf) == MB_CIGAR_MATCH
-                    && (p.cigar[k + 1] & 0xf) == MB_CIGAR_MATCH
+                    && (p.cigar()[k - 1] & 0xf) == MB_CIGAR_MATCH
+                    && (p.cigar()[k + 1] & 0xf) == MB_CIGAR_MATCH
                 {
-                    let prev_len = p.cigar[k - 1] >> 4;
+                    let prev_len = p.cigar()[k - 1] >> 4;
                     let mut l = 0u32;
                     if op == MB_CIGAR_INS {
                         while l < prev_len
@@ -1336,8 +1279,8 @@ pub mod align {
                         }
                     }
                     if l > 0 {
-                        p.cigar[k - 1] -= l << 4;
-                        p.cigar[k + 1] += l << 4;
+                        p.cigar_mut()[k - 1] -= l << 4;
+                        p.cigar_mut()[k + 1] += l << 4;
                         qoff -= l as i32;
                         toff -= l as i32;
                     }
@@ -1358,24 +1301,24 @@ pub mod align {
         assert_eq!(toff, (r.te - r.ts) as i32);
         let mut k = 0usize;
         while k + 2 < p.n_cigar as usize {
-            if (p.cigar[k] & 0xf) > 0 && (p.cigar[k] & 0xf) + (p.cigar[k + 1] & 0xf) == 3 {
+            if (p.cigar()[k] & 0xf) > 0 && (p.cigar()[k] & 0xf) + (p.cigar()[k + 1] & 0xf) == 3 {
                 let mut s = [0u32; 3];
                 let mut l = k;
                 while l < p.n_cigar as usize {
-                    let op = p.cigar[l] & 0xf;
-                    if op == MB_CIGAR_INS || op == MB_CIGAR_DEL || p.cigar[l] >> 4 == 0 {
-                        s[op as usize] += p.cigar[l] >> 4;
+                    let op = p.cigar()[l] & 0xf;
+                    if op == MB_CIGAR_INS || op == MB_CIGAR_DEL || p.cigar()[l] >> 4 == 0 {
+                        s[op as usize] += p.cigar()[l] >> 4;
                     } else {
                         break;
                     }
                     l += 1;
                 }
                 if s[1] > 0 && s[2] > 0 && l - k > 2 {
-                    p.cigar[k] = s[1] << 4 | MB_CIGAR_INS;
-                    p.cigar[k + 1] = s[2] << 4 | MB_CIGAR_DEL;
+                    p.cigar_mut()[k] = s[1] << 4 | MB_CIGAR_INS;
+                    p.cigar_mut()[k + 1] = s[2] << 4 | MB_CIGAR_DEL;
                     let mut kk = k + 2;
                     while kk < l {
-                        p.cigar[kk] &= 0xf;
+                        p.cigar_mut()[kk] &= 0xf;
                         kk += 1;
                     }
                     to_shrink = 1;
@@ -1386,7 +1329,7 @@ pub mod align {
         }
         if to_shrink != 0 {
             let mut new_cigar = Vec::new();
-            for &cg in p.cigar.iter().take(p.n_cigar as usize) {
+            for &cg in p.cigar().iter().take(p.n_cigar as usize) {
                 if cg >> 4 != 0 {
                     if let Some(last) = new_cigar.last_mut() {
                         if (*last & 0xf) == (cg & 0xf) {
@@ -1397,15 +1340,15 @@ pub mod align {
                     new_cigar.push(cg);
                 }
             }
-            p.cigar = new_cigar;
-            p.n_cigar = p.cigar.len() as i32;
+            p.set_cigar_from_vec(new_cigar);
+            p.cap = p.cap.max(p.n_cigar as u32);
         }
         if p.n_cigar > 0
-            && ((p.cigar[0] & 0xf) == MB_CIGAR_INS || (p.cigar[0] & 0xf) == MB_CIGAR_DEL)
+            && ((p.cigar()[0] & 0xf) == MB_CIGAR_INS || (p.cigar()[0] & 0xf) == MB_CIGAR_DEL)
         {
-            let l = (p.cigar[0] >> 4) as i32;
-            if (p.cigar[0] & 0xf) == MB_CIGAR_INS {
-                if r.rev != 0 {
+            let l = (p.cigar()[0] >> 4) as i32;
+            if (p.cigar()[0] & 0xf) == MB_CIGAR_INS {
+                if r_rev != 0 {
                     r.qe -= l;
                 } else {
                     r.qs += l;
@@ -1415,8 +1358,7 @@ pub mod align {
                 r.ts += l as i64;
                 *tshift = l;
             }
-            p.cigar.remove(0);
-            p.n_cigar -= 1;
+            p.remove_cigar(0);
         }
     }
 
@@ -1429,7 +1371,7 @@ pub mod align {
         let mut n_m = 0u32;
         let mut toff = 0usize;
         let mut qoff = 0usize;
-        for &cg in p0.cigar.iter().take(p0.n_cigar as usize) {
+        for &cg in p0.cigar().iter().take(p0.n_cigar as usize) {
             let op = cg & 0xf;
             let mut len = (cg >> 4) as usize;
             if op == MB_CIGAR_MATCH {
@@ -1464,7 +1406,8 @@ pub mod align {
         }
         let p = r.p.as_mut().unwrap();
         if n_eqx == n_m {
-            for cg in p.cigar.iter_mut().take(p.n_cigar as usize) {
+            let n_cigar = p.n_cigar as usize;
+            for cg in p.cigar_mut().iter_mut().take(n_cigar) {
                 let op = *cg & 0xf;
                 let len = *cg >> 4;
                 if op == MB_CIGAR_MATCH {
@@ -1473,7 +1416,7 @@ pub mod align {
             }
             return;
         }
-        let old = p.cigar[..p.n_cigar as usize].to_vec();
+        let old = p.cigar()[..p.n_cigar as usize].to_vec();
         let mut new_cigar = Vec::new();
         toff = 0;
         qoff = 0;
@@ -1512,8 +1455,7 @@ pub mod align {
                 new_cigar.push(cg);
             }
         }
-        p.cigar = new_cigar;
-        p.n_cigar = p.cigar.len() as i32;
+        p.set_cigar_from_vec(new_cigar);
         p.cap = p.cap.max(p.n_cigar as u32);
     }
 
@@ -1545,22 +1487,28 @@ pub mod align {
         r.mlen = 0;
         {
             let p = r.p.as_mut().unwrap();
-            p.n_ambi = 0;
-            for &cg in p.cigar.iter().take(p.n_cigar as usize) {
+            let mut total_n_ambi = 0u32;
+            let n_cigar = p.n_cigar.max(0) as usize;
+            let cigar = p.cigar().as_ptr();
+            for k in 0..n_cigar {
+                let cg = unsafe { *cigar.add(k) };
                 let op = cg & 0xf;
                 let len = (cg >> 4) as usize;
                 if op == MB_CIGAR_MATCH {
                     let mut n_ambi = 0i32;
                     let mut n_diff = 0i32;
+                    let qptr = unsafe { qseq.as_ptr().add(qoff) };
+                    let tptr = unsafe { tseq.as_ptr().add(toff) };
+                    let mat_ptr = mat.as_ptr();
                     for l in 0..len {
-                        let cq = qseq[qoff + l] as usize;
-                        let ct = tseq[toff + l] as usize;
+                        let cq = unsafe { *qptr.add(l) } as usize;
+                        let ct = unsafe { *tptr.add(l) } as usize;
                         if ct > 3 || cq > 3 {
                             n_ambi += 1;
                         } else if ct != cq {
                             n_diff += 1;
                         }
-                        s += mat[ct * 5 + cq] as f64;
+                        s += unsafe { *mat_ptr.add(ct * 5 + cq) } as f64;
                         if s < 0.0 {
                             s = 0.0;
                         } else if max < s {
@@ -1569,18 +1517,19 @@ pub mod align {
                     }
                     r.blen += len as i32 - n_ambi;
                     r.mlen += len as i32 - (n_ambi + n_diff);
-                    p.n_ambi += n_ambi as u32;
+                    total_n_ambi += n_ambi as u32;
                     toff += len;
                     qoff += len;
                 } else if op == MB_CIGAR_INS {
                     let mut n_ambi = 0i32;
+                    let qptr = unsafe { qseq.as_ptr().add(qoff) };
                     for l in 0..len {
-                        if qseq[qoff + l] > 3 {
+                        if unsafe { *qptr.add(l) } > 3 {
                             n_ambi += 1;
                         }
                     }
                     r.blen += len as i32 - n_ambi;
-                    p.n_ambi += n_ambi as u32;
+                    total_n_ambi += n_ambi as u32;
                     if log_gap != 0 {
                         s -= q as f64 + e as f64 * mb_log2(1.0 + len as f32) as f64;
                     } else {
@@ -1592,13 +1541,14 @@ pub mod align {
                     qoff += len;
                 } else if op == MB_CIGAR_DEL {
                     let mut n_ambi = 0i32;
+                    let tptr = unsafe { tseq.as_ptr().add(toff) };
                     for l in 0..len {
-                        if tseq[toff + l] > 3 {
+                        if unsafe { *tptr.add(l) } > 3 {
                             n_ambi += 1;
                         }
                     }
                     r.blen += len as i32 - n_ambi;
-                    p.n_ambi += n_ambi as u32;
+                    total_n_ambi += n_ambi as u32;
                     if log_gap != 0 {
                         s -= q as f64 + e as f64 * mb_log2(1.0 + len as f32) as f64;
                     } else {
@@ -1610,6 +1560,7 @@ pub mod align {
                     toff += len;
                 }
             }
+            p.set_n_ambi(total_n_ambi);
             p.dp_max0 = (max + 0.499) as i32;
             p.dp_max = p.dp_max0;
         }
@@ -1642,27 +1593,25 @@ pub mod align {
                 mb_write_MD(km, &mut s, tseq, qseq, r);
             }
             let p = r.p.as_mut().unwrap();
-            p.cs = 1;
-            let len4 = p.n_cigar as usize + ((s.l + 1 + 3) / 4);
-            p.cap = p.cap.max(len4 as u32);
-            p.cigar.truncate(p.n_cigar as usize);
+            p.set_cs(1);
+            p.truncate_cigar(p.n_cigar as usize);
+            let mut tag_words = Vec::with_capacity((s.l + 1).div_ceil(4));
             for chunk in s.s[..s.l + 1].chunks(4) {
                 let mut w = 0u32;
                 for (i, &b) in chunk.iter().enumerate() {
                     w |= (b as u32) << (i * 8);
                 }
-                p.cigar.push(w);
+                tag_words.push(w);
             }
+            p.set_tag_words_from_slice(&tag_words);
         }
     }
 
     /// Original C static function `mb_enlarge_cigar` from `minibwa/align.c:284`.
     pub fn mb_enlarge_cigar(r: &mut mb_hit_t, n_cigar: u32) {
-        if n_cigar == 0 {
-            return;
-        }
-        if r.p.is_none() {
-            let mut cap = n_cigar + 16;
+        const MB_EXTRA_WORDS: u32 = (std::mem::size_of::<crate::pe::mb_extra_t>() / 4) as u32;
+        fn cigar_capacity(n_cigar: u32) -> u32 {
+            let mut cap = n_cigar.saturating_add(MB_EXTRA_WORDS).max(1);
             cap -= 1;
             cap |= cap >> 1;
             cap |= cap >> 2;
@@ -1670,25 +1619,26 @@ pub mod align {
             cap |= cap >> 8;
             cap |= cap >> 16;
             cap += 1;
-            r.p = Some(crate::pe::mb_extra_t {
-                cap,
-                cigar: Vec::with_capacity(cap as usize),
-                ..Default::default()
-            });
+            cap.saturating_sub(MB_EXTRA_WORDS).max(n_cigar)
+        }
+        if n_cigar == 0 {
+            return;
+        }
+        if r.p.is_none() {
+            let cap = cigar_capacity(n_cigar);
+            r.p = Some(
+                crate::pe::mb_extra_t {
+                    cap,
+                    ..Default::default()
+                }
+                .boxed(),
+            );
         } else {
             let p = r.p.as_mut().unwrap();
-            if p.n_cigar as u32 + n_cigar + 16 > p.cap {
-                let mut cap = p.n_cigar as u32 + n_cigar + 16;
-                cap -= 1;
-                cap |= cap >> 1;
-                cap |= cap >> 2;
-                cap |= cap >> 4;
-                cap |= cap >> 8;
-                cap |= cap >> 16;
-                cap += 1;
-                p.cap = cap;
-                p.cigar
-                    .reserve((cap as usize).saturating_sub(p.cigar.capacity()));
+            let needed = p.n_cigar as u32 + n_cigar;
+            if needed > p.cap {
+                let cap = cigar_capacity(needed);
+                p.ensure_capacity(cap);
             }
         }
     }
@@ -1701,15 +1651,14 @@ pub mod align {
         mb_enlarge_cigar(r, n_cigar);
         let p = r.p.as_mut().unwrap();
         let n = n_cigar as usize;
-        if p.n_cigar > 0 && (p.cigar[p.n_cigar as usize - 1] & 0xf) == (cigar[0] & 0xf) {
-            p.cigar[p.n_cigar as usize - 1] += (cigar[0] >> 4) << 4;
+        if p.n_cigar > 0 && (p.cigar()[p.n_cigar as usize - 1] & 0xf) == (cigar[0] & 0xf) {
+            let last = p.n_cigar as usize - 1;
+            p.cigar_mut()[last] += (cigar[0] >> 4) << 4;
             if n > 1 {
-                p.cigar.extend_from_slice(&cigar[1..n]);
+                p.extend_cigar_from_slice(&cigar[1..n]);
             }
-            p.n_cigar += n_cigar as i32 - 1;
         } else {
-            p.cigar.extend_from_slice(&cigar[..n]);
-            p.n_cigar += n_cigar as i32;
+            p.extend_cigar_from_slice(&cigar[..n]);
         }
     }
 
@@ -2175,13 +2124,15 @@ pub mod align {
         opt: &mb_opt_t,
         mi: &mb_idx_t,
         qlen: i32,
-        qseq0: &mut [Vec<u8>; 2],
+        qseq0: &mut [&mut [u8]; 2],
         mut mt: l2b_meth_t,
         r: &mut mb_hit_t,
         r2: &mut mb_hit_t,
         n_a: i32,
         a: &mut [mb_anchor_t],
         ez: &mut ksw_extz_t,
+        tseq: &mut Vec<u8>,
+        mat: &[i8; 25],
     ) {
         let is_sr = mb_is_sr_mode(opt, qlen);
         let max_back = if is_sr != 0 { 0 } else { 10 };
@@ -2192,14 +2143,6 @@ pub mod align {
         let rev = a[r.as_ as usize].sid & 1;
         let tid = (a[r.as_ as usize].sid >> 1) as i64;
         let ctg_len = mi.l2b.ctg[tid as usize].len as i64;
-        let mut mat = [0i8; 25];
-        crate::ksw2::ksw_gen_nt4_mat(
-            &mut mat,
-            opt.a as i8,
-            opt.b as i8,
-            opt.b_ts as i8,
-            opt.b_ambi as i8,
-        );
         let bw = (opt.bw as f64 * 1.5 + 1.0) as i32;
         let bw_long = if is_sr == 0 {
             ((opt.bw_long as f64 * 1.5 + 1.0) as i32).max(bw)
@@ -2208,7 +2151,7 @@ pub mod align {
         };
         let mut dropped = 0;
         let ksw_flag = 0;
-        if r.rev != 0 {
+        if r.rev() != 0 {
             mt = l2b_meth_rev(mt);
         }
         let mut as1 = r.as_;
@@ -2310,7 +2253,8 @@ pub mod align {
         if te0 <= ts0 {
             return;
         }
-        let mut tseq = vec![0u8; (te0 - ts0) as usize];
+        tseq.clear();
+        tseq.resize((te0 - ts0) as usize, 0);
         r.p = None;
 
         let (ts1, qs1) = if qs > 0 && ts > 0 {
@@ -2326,10 +2270,10 @@ pub mod align {
                     qseq,
                     (ts - ts0) as i32,
                     &tseq[..(ts - ts0) as usize],
-                    &mat,
+                    mat,
                     bw,
                     opt.end_bonus,
-                    if r.split_inv != 0 {
+                    if r.split_inv() != 0 {
                         opt.zdrop_inv
                     } else {
                         opt.zdrop
@@ -2424,7 +2368,7 @@ pub mod align {
                     qseq,
                     (te - ts) as i32,
                     &tseq[..(te - ts) as usize],
-                    &mat,
+                    mat,
                     bw1,
                     -1,
                     opt.zdrop,
@@ -2438,7 +2382,7 @@ pub mod align {
                     &tseq[..(te - ts) as usize],
                     ez.n_cigar as u32,
                     &ez.cigar,
-                    &mat,
+                    mat,
                     is_sr,
                 );
                 if zdrop_code != 0 {
@@ -2449,7 +2393,7 @@ pub mod align {
                         qseq,
                         (te - ts) as i32,
                         &tseq[..(te - ts) as usize],
-                        &mat,
+                        mat,
                         bw1,
                         -1,
                         if zdrop_code == 2 {
@@ -2493,7 +2437,7 @@ pub mod align {
                     if mlen >= opt.min_chain_score {
                         mb_split_hit(r, r2, as1 + j + 1 - r.as_, qlen, a, &mi.l2b);
                         if zdrop_code == 2 {
-                            r2.split_inv = 1;
+                            r2.set_split_inv(1);
                         }
                     }
                     break;
@@ -2532,7 +2476,7 @@ pub mod align {
                 qseq,
                 (te0 - te1) as i32,
                 &tseq[..(te0 - te1) as usize],
-                &mat,
+                mat,
                 bw,
                 opt.end_bonus,
                 opt.zdrop,
@@ -2583,13 +2527,13 @@ pub mod align {
                 mt,
                 &mut tseq[..(te1 - ts1) as usize],
             );
-            let qslice = &qseq0[r.rev as usize][qs1 as usize..qe1 as usize];
+            let qslice = &qseq0[r.rev() as usize][qs1 as usize..qe1 as usize];
             mb_update_extra(
                 km,
                 r,
                 qslice,
                 &tseq[..(te1 - ts1) as usize],
-                &mat,
+                mat,
                 opt.q as i8,
                 opt.e as i8,
                 opt.flag,
@@ -2605,15 +2549,17 @@ pub mod align {
         opt: &mb_opt_t,
         mi: &mb_idx_t,
         qlen: i32,
-        qseq0: &mut [Vec<u8>; 2],
+        qseq0: &mut [&mut [u8]; 2],
         mut mt: l2b_meth_t,
         r1: &mb_hit_t,
         r2: &mb_hit_t,
         r_inv: &mut mb_hit_t,
         ez: &mut ksw_extz_t,
+        tseq: &mut Vec<u8>,
+        mat: &[i8; 25],
     ) -> i32 {
         *r_inv = mb_hit_t::default();
-        if (r1.split & 1) == 0 || (r2.split & 2) == 0 {
+        if (r1.split() & 1) == 0 || (r2.split() & 2) == 0 {
             return 0;
         }
         if r1.id != r1.parent && r1.parent != MB_PARENT_TMP_PRI {
@@ -2622,10 +2568,10 @@ pub mod align {
         if r2.id != r2.parent && r2.parent != MB_PARENT_TMP_PRI {
             return 0;
         }
-        if r1.tid != r2.tid || r1.rev != r2.rev {
+        if r1.tid != r2.tid || r1.rev() != r2.rev() {
             return 0;
         }
-        let ql = if r1.rev != 0 {
+        let ql = if r1.rev() != 0 {
             r1.qs - r2.qe
         } else {
             r2.qs - r1.qe
@@ -2638,33 +2584,40 @@ pub mod align {
         {
             return 0;
         }
-        let mut mat = [0i8; 25];
-        crate::ksw2::ksw_gen_nt4_mat(
-            &mut mat,
-            opt.a as i8,
-            opt.b as i8,
-            opt.b_ts as i8,
-            opt.b_ambi as i8,
-        );
-        let mut tseq = vec![0u8; tl as usize];
-        if r1.rev == 0 {
+        tseq.clear();
+        tseq.resize(tl as usize, 0);
+        if r1.rev() == 0 {
             mt = l2b_meth_rev(mt);
         }
-        l2b_getseq_meth(&mi.l2b, r1.tid, r1.te, r2.ts, mt, &mut tseq);
-        let qstart = if r1.rev != 0 {
+        l2b_getseq_meth(&mi.l2b, r1.tid, r1.te, r2.ts, mt, tseq);
+        let qstart = if r1.rev() != 0 {
             r2.qe as usize
         } else {
             (qlen - r2.qs) as usize
         };
-        let qseq = &mut qseq0[if r1.rev != 0 { 0 } else { 1 }][qstart..qstart + ql as usize];
+        let qseq = &mut qseq0[if r1.rev() != 0 { 0 } else { 1 }][qstart..qstart + ql as usize];
         mb_seq_rev(ql as u32, qseq);
-        mb_seq_rev(tl as u32, &mut tseq);
-        let qp = ksw_ll_qinit(km, 2, ql, qseq, 5, &mat);
+        mb_seq_rev(tl as u32, tseq);
         let mut q_off = 0;
         let mut t_off = 0;
-        let score = ksw_ll_i16(&qp, tl, &tseq, opt.q, opt.e, &mut q_off, &mut t_off);
+        let score;
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            score = crate::ksw2_c_sse::maybe_ll_i16(
+                ql, qseq, mat, tl, tseq, opt.q, opt.e, &mut q_off, &mut t_off,
+            )
+            .unwrap_or_else(|| {
+                let qp = ksw_ll_qinit(km, 2, ql, qseq, 5, mat);
+                ksw_ll_i16(&qp, tl, tseq, opt.q, opt.e, &mut q_off, &mut t_off)
+            });
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        {
+            let qp = ksw_ll_qinit(km, 2, ql, qseq, 5, mat);
+            score = ksw_ll_i16(&qp, tl, tseq, opt.q, opt.e, &mut q_off, &mut t_off);
+        }
         mb_seq_rev(ql as u32, qseq);
-        mb_seq_rev(tl as u32, &mut tseq);
+        mb_seq_rev(tl as u32, tseq);
         if score < opt.min_dp_max * opt.a {
             return 0;
         }
@@ -2677,7 +2630,7 @@ pub mod align {
             &qseq[q_off as usize..],
             tl - t_off,
             &tseq[t_off as usize..],
-            &mat,
+            mat,
             (opt.bw as f64 * 1.5) as i32,
             -1,
             opt.zdrop,
@@ -2693,10 +2646,10 @@ pub mod align {
         }
         r_inv.id = -1;
         r_inv.parent = MB_PARENT_UNSET;
-        r_inv.inv = 1;
-        r_inv.rev = (r1.rev == 0) as u32;
+        r_inv.set_inv(1);
+        r_inv.set_rev((r1.rev() == 0) as u8);
         r_inv.tid = r1.tid;
-        if r_inv.rev == 0 {
+        if r_inv.rev() == 0 {
             r_inv.qs = r2.qe + q_off;
             r_inv.qe = r_inv.qs + ez.max_q + 1;
         } else {
@@ -2710,7 +2663,7 @@ pub mod align {
             r_inv,
             &qseq[q_off as usize..],
             &tseq[t_off as usize..],
-            &mat,
+            mat,
             opt.q as i8,
             opt.e as i8,
             opt.flag,
@@ -2735,7 +2688,7 @@ pub mod align {
         };
         let mut n_gapo = 0;
         let mut n_gap = 0;
-        for &cg in p.cigar.iter().take(p.n_cigar as usize) {
+        for &cg in p.cigar().iter().take(p.n_cigar as usize) {
             let op = cg & 0xf;
             let len = cg >> 4;
             if op == MB_CIGAR_INS || op == MB_CIGAR_DEL {
@@ -2755,7 +2708,7 @@ pub mod align {
         let mut n_gap = 0;
         let mut n_gapo = 0;
         mb_count_gaps(r, &mut n_gap, &mut n_gapo);
-        r.mlen as f64 / (r.blen + p.n_ambi as i32 - n_gap + n_gapo) as f64
+        r.mlen as f64 / (r.blen + p.n_ambi() as i32 - n_gap + n_gapo) as f64
     }
 
     /// Original C static function `mb_recal_max_dp` from `minibwa/align.c:844`.
@@ -2765,7 +2718,7 @@ pub mod align {
         };
         let mut n_gap = 0i32;
         let mut gap_cost = 0.0;
-        for &cg in p.cigar.iter().take(p.n_cigar as usize) {
+        for &cg in p.cigar().iter().take(p.n_cigar as usize) {
             let op = cg & 0xf;
             let len = cg >> 4;
             if op == MB_CIGAR_INS || op == MB_CIGAR_DEL {
@@ -2773,7 +2726,7 @@ pub mod align {
                 n_gap += len as i32;
             }
         }
-        let n_mis = r.blen + p.n_ambi as i32 - r.mlen - n_gap;
+        let n_mis = r.blen + p.n_ambi() as i32 - r.mlen - n_gap;
         (match_sc as f64 * (r.mlen as f64 - b2 * n_mis as f64 - gap_cost) + 0.499) as i32
     }
 
@@ -2850,14 +2803,57 @@ pub mod align {
         regs: &mut Vec<mb_hit_t>,
         a: &mut Vec<mb_anchor_t>,
     ) {
+        let mut tseq = Vec::new();
+        let mut qseq0_buf = Vec::new();
+        mb_align_skeleton_with_scratch(
+            km,
+            opt,
+            mi,
+            qlen,
+            qseq,
+            mt,
+            n_regs_,
+            regs,
+            a,
+            &mut tseq,
+            &mut qseq0_buf,
+        );
+    }
+
+    pub fn mb_align_skeleton_with_scratch(
+        km: (),
+        opt: &mb_opt_t,
+        mi: &mb_idx_t,
+        qlen: i32,
+        qseq: &[u8],
+        mt: l2b_meth_t,
+        n_regs_: &mut i32,
+        regs: &mut Vec<mb_hit_t>,
+        a: &mut Vec<mb_anchor_t>,
+        tseq: &mut Vec<u8>,
+        qseq0_buf: &mut Vec<u8>,
+    ) {
         let mut n_regs = *n_regs_;
-        let mut qseq0 = [vec![0u8; qlen as usize], vec![0u8; qlen as usize]];
-        for i in 0..qlen as usize {
-            qseq0[0][i] = qseq[i];
-            qseq0[1][qlen as usize - 1 - i] = if qseq[i] < 4 { 3 - qseq[i] } else { 4 };
+        let qlen_usize = qlen as usize;
+        qseq0_buf.clear();
+        qseq0_buf.resize(qlen_usize * 2, 0);
+        let (qseq_fwd, qseq_rev) = qseq0_buf.split_at_mut(qlen_usize);
+        qseq_fwd.copy_from_slice(qseq);
+        for (i, &c) in qseq.iter().enumerate() {
+            qseq_rev[qlen_usize - 1 - i] = if c < 4 { 3 - c } else { 4 };
         }
+        let mut qseq0 = [qseq_fwd, qseq_rev];
         let n_a = mb_squeeze_a(km, n_regs, regs, a);
         let mut ez = ksw_extz_t::default();
+        let mut mat = [0i8; 25];
+        crate::ksw2::ksw_gen_nt4_mat(
+            &mut mat,
+            opt.a as i8,
+            opt.b as i8,
+            opt.b_ts as i8,
+            opt.b_ambi as i8,
+        );
+        tseq.clear();
         let mut i = 0usize;
         while i < n_regs as usize {
             let mut r2 = mb_hit_t::default();
@@ -2873,17 +2869,19 @@ pub mod align {
                 n_a,
                 a,
                 &mut ez,
+                tseq,
+                &mat,
             );
             if r2.cnt > 0 {
                 mb_insert_reg(&r2, i as i32, &mut n_regs, regs);
             }
-            if i > 0 && regs[i].split_inv != 0 {
+            if i > 0 && regs[i].split_inv() != 0 {
                 let mut rinv = mb_hit_t::default();
                 let (left, right) = regs.split_at_mut(i);
                 let r1 = &left[i - 1];
                 let rcur = &right[0];
                 if mb_align1_inv(
-                    km, opt, mi, qlen, &mut qseq0, mt, r1, rcur, &mut rinv, &mut ez,
+                    km, opt, mi, qlen, &mut qseq0, mt, r1, rcur, &mut rinv, &mut ez, tseq, &mat,
                 ) != 0
                 {
                     mb_insert_reg(&rinv, i as i32, &mut n_regs, regs);
@@ -2968,17 +2966,18 @@ pub mod align {
             let hit = mb_hit_t {
                 mlen: 80,
                 blen: 100,
-                p: Some(mb_extra_t {
-                    n_ambi: 2,
-                    n_cigar: 4,
-                    cigar: vec![
+                p: Some(
+                    mb_extra_t {
+                        n_ambi_cs: 2,
+                        ..Default::default()
+                    }
+                    .with_cigar(&[
                         20 << 4 | MB_CIGAR_MATCH,
                         3 << 4 | MB_CIGAR_INS,
                         5 << 4 | MB_CIGAR_DEL,
                         72 << 4 | MB_CIGAR_MATCH,
-                    ],
-                    ..Default::default()
-                }),
+                    ]),
+                ),
                 ..Default::default()
             };
             let mut n_gap = 0;
@@ -2998,12 +2997,13 @@ pub mod align {
                     qe: 95,
                     mlen: 90,
                     blen: 100,
-                    p: Some(mb_extra_t {
-                        dp_max: 120,
-                        n_cigar: 1,
-                        cigar: vec![100 << 4 | MB_CIGAR_MATCH],
-                        ..Default::default()
-                    }),
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 120,
+                            ..Default::default()
+                        }
+                        .with_cigar(&[100 << 4 | MB_CIGAR_MATCH]),
+                    ),
                     ..Default::default()
                 },
                 mb_hit_t {
@@ -3011,12 +3011,13 @@ pub mod align {
                     qe: 96,
                     mlen: 85,
                     blen: 100,
-                    p: Some(mb_extra_t {
-                        dp_max: 110,
-                        n_cigar: 2,
-                        cigar: vec![90 << 4 | MB_CIGAR_MATCH, 5 << 4 | MB_CIGAR_DEL],
-                        ..Default::default()
-                    }),
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 110,
+                            ..Default::default()
+                        }
+                        .with_cigar(&[90 << 4 | MB_CIGAR_MATCH, 5 << 4 | MB_CIGAR_DEL]),
+                    ),
                     ..Default::default()
                 },
             ];
@@ -3066,7 +3067,8 @@ pub mod align {
             );
             mb_append_cigar(&mut hit, 1, &[3 << 4 | MB_CIGAR_MATCH]);
             assert_eq!(
-                hit.p.as_ref().unwrap().cigar[..hit.p.as_ref().unwrap().n_cigar as usize].to_vec(),
+                hit.p.as_ref().unwrap().cigar()[..hit.p.as_ref().unwrap().n_cigar as usize]
+                    .to_vec(),
                 vec![
                     2 << 4 | MB_CIGAR_MATCH,
                     1 << 4 | MB_CIGAR_INS,
@@ -3090,18 +3092,20 @@ pub mod align {
         #[test]
         fn eqx_update_splits_match_runs() {
             let mut hit = mb_hit_t {
-                p: Some(mb_extra_t {
-                    n_cigar: 1,
-                    cigar: vec![5 << 4 | MB_CIGAR_MATCH],
-                    ..Default::default()
-                }),
+                p: Some(
+                    mb_extra_t {
+                        ..Default::default()
+                    }
+                    .with_cigar(&[5 << 4 | MB_CIGAR_MATCH]),
+                ),
                 ..Default::default()
             };
             let qseq = vec![0, 1, 2, 3, 0];
             let tseq = vec![0, 1, 3, 3, 1];
             mm_update_cigar_eqx(&mut hit, &qseq, &tseq);
             assert_eq!(
-                hit.p.as_ref().unwrap().cigar[..hit.p.as_ref().unwrap().n_cigar as usize].to_vec(),
+                hit.p.as_ref().unwrap().cigar()[..hit.p.as_ref().unwrap().n_cigar as usize]
+                    .to_vec(),
                 vec![
                     2 << 4 | MB_CIGAR_EQ_MATCH,
                     1 << 4 | MB_CIGAR_X_MISMATCH,
@@ -3118,11 +3122,12 @@ pub mod align {
                 qe: 5,
                 ts: 0,
                 te: 5,
-                p: Some(mb_extra_t {
-                    n_cigar: 1,
-                    cigar: vec![5 << 4 | MB_CIGAR_MATCH],
-                    ..Default::default()
-                }),
+                p: Some(
+                    mb_extra_t {
+                        ..Default::default()
+                    }
+                    .with_cigar(&[5 << 4 | MB_CIGAR_MATCH]),
+                ),
                 ..Default::default()
             };
             let qseq = vec![0, 1, 2, 3, 0];
@@ -3143,10 +3148,10 @@ pub mod align {
                 0,
             );
             let p = hit.p.as_ref().unwrap();
-            assert_eq!((hit.blen, hit.mlen, p.n_ambi), (4, 3, 1));
+            assert_eq!((hit.blen, hit.mlen, p.n_ambi()), (4, 3, 1));
             assert_eq!(p.dp_max, 4);
             assert_eq!(
-                p.cigar[..p.n_cigar as usize].to_vec(),
+                p.cigar()[..p.n_cigar as usize].to_vec(),
                 vec![
                     2 << 4 | MB_CIGAR_EQ_MATCH,
                     1 << 4 | MB_CIGAR_X_MISMATCH,
@@ -3537,7 +3542,7 @@ pub mod align {
             );
             assert_eq!(regs[0].p.as_ref().unwrap().n_cigar, 1);
             assert_eq!(
-                regs[0].p.as_ref().unwrap().cigar[0],
+                regs[0].p.as_ref().unwrap().cigar()[0],
                 12 << 4 | MB_CIGAR_MATCH
             );
         }
@@ -3548,20 +3553,130 @@ pub mod bseq {
     #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
     use crate::kommon::kom_revcomp;
-    use flate2::read::MultiGzDecoder;
+    use flate2::bufread::MultiGzDecoder;
+    use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
     use std::fs::File;
     use std::io::{self, BufRead, BufReader, Read};
+    use std::ptr::NonNull;
 
     const CHECK_PAIR_THRES: u64 = 1000000;
+
+    pub struct mb_opt_str_t {
+        ptr: NonNull<u8>,
+    }
+
+    unsafe impl Send for mb_opt_str_t {}
+    unsafe impl Sync for mb_opt_str_t {}
+
+    impl mb_opt_str_t {
+        #[inline]
+        pub fn from_string(s: String) -> Self {
+            let bytes = s.into_bytes();
+            Self::from_bytes(&bytes)
+        }
+
+        fn from_bytes(bytes: &[u8]) -> Self {
+            let header = std::mem::size_of::<usize>();
+            let size = header + bytes.len();
+            let layout = Layout::from_size_align(size.max(header), std::mem::align_of::<usize>())
+                .expect("valid optional string layout");
+            let base = unsafe { alloc(layout) };
+            let Some(base) = NonNull::new(base) else {
+                handle_alloc_error(layout);
+            };
+            unsafe {
+                (base.as_ptr() as *mut usize).write(bytes.len());
+                std::ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    base.as_ptr().add(header),
+                    bytes.len(),
+                );
+                Self {
+                    ptr: NonNull::new_unchecked(base.as_ptr().add(header)),
+                }
+            }
+        }
+
+        #[inline]
+        fn len(&self) -> usize {
+            unsafe {
+                let header = std::mem::size_of::<usize>();
+                *((self.ptr.as_ptr().sub(header)) as *const usize)
+            }
+        }
+
+        #[inline]
+        pub fn as_str(&self) -> &str {
+            unsafe {
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                    self.ptr.as_ptr(),
+                    self.len(),
+                ))
+            }
+        }
+    }
+
+    impl Clone for mb_opt_str_t {
+        fn clone(&self) -> Self {
+            Self::from_bytes(self.as_str().as_bytes())
+        }
+    }
+
+    impl Drop for mb_opt_str_t {
+        fn drop(&mut self) {
+            let header = std::mem::size_of::<usize>();
+            let len = self.len();
+            let layout =
+                Layout::from_size_align((header + len).max(header), std::mem::align_of::<usize>())
+                    .expect("valid optional string layout");
+            unsafe {
+                dealloc(self.ptr.as_ptr().sub(header), layout);
+            }
+        }
+    }
+
+    impl std::fmt::Debug for mb_opt_str_t {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.as_str().fmt(f)
+        }
+    }
+
+    impl PartialEq for mb_opt_str_t {
+        fn eq(&self, other: &Self) -> bool {
+            self.as_str() == other.as_str()
+        }
+    }
+
+    impl Eq for mb_opt_str_t {}
+
+    impl From<String> for mb_opt_str_t {
+        fn from(value: String) -> Self {
+            Self::from_string(value)
+        }
+    }
+
+    impl From<&str> for mb_opt_str_t {
+        fn from(value: &str) -> Self {
+            Self::from_bytes(value.as_bytes())
+        }
+    }
+
+    impl std::ops::Deref for mb_opt_str_t {
+        type Target = str;
+
+        fn deref(&self) -> &Self::Target {
+            self.as_str()
+        }
+    }
 
     #[derive(Clone, Debug, Default, PartialEq, Eq)]
     pub struct mb_bseq1_t {
         pub l_seq: u64,
         pub id: u64,
-        pub name: String,
-        pub seq: String,
-        pub qual: Option<String>,
-        pub comment: Option<String>,
+        pub name: Box<str>,
+        pub seq: Box<str>,
+        pub qual: Option<mb_opt_str_t>,
+        pub comment: Option<mb_opt_str_t>,
     }
 
     #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -3579,11 +3694,14 @@ pub mod bseq {
         pub qual: String,
     }
 
-    #[derive(Clone, Debug, Default, PartialEq, Eq)]
     pub struct mb_bseq_file_s {
         pub records: Vec<kseq_t>,
         pub pos: usize,
         pub s: Option<mb_bseq1_t>,
+        reader: Option<Box<dyn BufRead + Send>>,
+        pending_header: Option<(u8, String)>,
+        last_record_name: Option<String>,
+        eof: bool,
         pub parse_error: bool,
         pub parse_error_after: Option<String>,
         pub parse_error_reported: bool,
@@ -3622,119 +3740,37 @@ pub mod bseq {
     pub fn mb_revcomp_bseq(s: &mut mb_bseq1_t) {
         let mut seq = s.seq.as_bytes().to_vec();
         kom_revcomp(s.l_seq, &mut seq);
-        s.seq = String::from_utf8(seq).unwrap();
+        s.seq = String::from_utf8(seq).unwrap().into_boxed_str();
         if let Some(qual) = &mut s.qual {
             let mut q = qual.as_bytes().to_vec();
             q.reverse();
-            *qual = String::from_utf8(q).unwrap();
+            *qual = mb_opt_str_t::from_string(String::from_utf8(q).unwrap());
         }
     }
 
     /// Original C global function `mb_bseq_open` from `minibwa/bseq.c:43`.
     pub fn mb_bseq_open(fn_: Option<&str>) -> Option<mb_bseq_file_t> {
-        let raw: Box<dyn Read> = match fn_ {
+        let raw: Box<dyn Read + Send> = match fn_ {
             Some(path) if path != "-" => Box::new(File::open(path).ok()?),
             _ => Box::new(io::stdin()),
         };
         let mut buffered = BufReader::new(raw);
         let is_gzip = buffered.fill_buf().ok()?.starts_with(&[0x1f, 0x8b]);
-        let mut reader: Box<dyn Read> = if is_gzip {
-            Box::new(MultiGzDecoder::new(buffered))
+        let reader: Box<dyn BufRead + Send> = if is_gzip {
+            Box::new(BufReader::new(MultiGzDecoder::new(buffered)))
         } else {
             Box::new(buffered)
         };
-        let mut data = Vec::new();
-        if reader.read_to_end(&mut data).is_err() {
-            return None;
-        }
-
-        let mut records = Vec::new();
-        let mut parse_error = false;
-        let mut parse_error_after = None;
-        let mut i = 0usize;
-        while i < data.len() {
-            while i < data.len() && data[i] != b'>' && data[i] != b'@' {
-                i += 1;
-            }
-            if i >= data.len() {
-                break;
-            }
-            let start_ch = data[i];
-            i += 1;
-            let h0 = i;
-            while i < data.len() && data[i] != b'\n' && data[i] != b'\r' {
-                i += 1;
-            }
-            let header = String::from_utf8_lossy(&data[h0..i]).into_owned();
-            while i < data.len() && (data[i] == b'\n' || data[i] == b'\r') {
-                i += 1;
-            }
-            let mut it = header.splitn(2, |c: char| c.is_ascii_whitespace());
-            let name = it.next().unwrap_or("").to_string();
-            let comment = it.next().unwrap_or("").to_string();
-            let mut seq = Vec::new();
-            let mut saw_plus = false;
-            while i < data.len() {
-                while i < data.len() && (data[i] == b'\n' || data[i] == b'\r') {
-                    i += 1;
-                }
-                if i >= data.len() {
-                    break;
-                }
-                if data[i] == b'>' || data[i] == b'@' {
-                    break;
-                }
-                if data[i] == b'+' {
-                    saw_plus = true;
-                    while i < data.len() && data[i] != b'\n' && data[i] != b'\r' {
-                        i += 1;
-                    }
-                    while i < data.len() && (data[i] == b'\n' || data[i] == b'\r') {
-                        i += 1;
-                    }
-                    break;
-                }
-                while i < data.len() && data[i] != b'\n' && data[i] != b'\r' {
-                    seq.push(data[i]);
-                    i += 1;
-                }
-            }
-            let mut qual = Vec::new();
-            if start_ch == b'@' && saw_plus {
-                while i < data.len() && qual.len() < seq.len() {
-                    while i < data.len() && data[i] != b'\n' && data[i] != b'\r' {
-                        qual.push(data[i]);
-                        i += 1;
-                    }
-                    while i < data.len() && (data[i] == b'\n' || data[i] == b'\r') {
-                        i += 1;
-                    }
-                    if qual.len() >= seq.len() {
-                        break;
-                    }
-                }
-                if qual.len() != seq.len() {
-                    parse_error = true;
-                    parse_error_after = records.last().map(|r: &kseq_t| r.name.clone());
-                    break;
-                }
-                while i < data.len() && data[i] != b'>' && data[i] != b'@' {
-                    i += 1;
-                }
-            }
-            records.push(kseq_t {
-                name,
-                comment,
-                seq: String::from_utf8(seq).unwrap(),
-                qual: String::from_utf8(qual).unwrap(),
-            });
-        }
         Some(mb_bseq_file_t {
-            records,
+            records: Vec::new(),
             pos: 0,
             s: None,
-            parse_error,
-            parse_error_after,
+            reader: Some(reader),
+            pending_header: None,
+            last_record_name: None,
+            eof: false,
+            parse_error: false,
+            parse_error_after: None,
             parse_error_reported: false,
             suppress_parse_warnings: false,
         })
@@ -3751,30 +3787,135 @@ pub mod bseq {
     }
 
     /// Original C static function `kseq2bseq` from `minibwa/bseq.c:70`.
-    pub fn kseq2bseq(ks: &kseq_t, s: &mut mb_bseq1_t, with_qual: i32, with_comment: i32) {
+    pub fn kseq2bseq(ks: kseq_t, s: &mut mb_bseq1_t, with_qual: i32, with_comment: i32) {
         if ks.name.is_empty() {
             eprintln!("[WARNING]\u{1b}[1;31m empty sequence name in the input.\u{1b}[0m");
         }
-        s.name = kstrdup(&ks.name);
-        s.seq = kstrdup(&ks.seq);
-        let mut seq = s.seq.as_bytes().to_vec();
+        s.name = ks.name.into_boxed_str();
+        let mut seq = ks.seq.into_bytes();
         for c in &mut seq {
             if *c == b'u' || *c == b'U' {
                 *c -= 1;
             }
         }
-        s.seq = String::from_utf8(seq).unwrap();
+        s.l_seq = seq.len() as u64;
+        s.seq = String::from_utf8(seq).unwrap().into_boxed_str();
         s.qual = if with_qual != 0 && !ks.qual.is_empty() {
-            Some(kstrdup(&ks.qual))
+            Some(mb_opt_str_t::from_string(ks.qual))
         } else {
             None
         };
         s.comment = if with_comment != 0 && !ks.comment.is_empty() {
-            Some(kstrdup(&ks.comment))
+            Some(mb_opt_str_t::from_string(ks.comment))
         } else {
             None
         };
-        s.l_seq = ks.seq.len() as u64;
+    }
+
+    macro_rules! kseq_read {
+        ($fp:expr) => {{
+            (|| -> Option<kseq_t> {
+                let fp = &mut *$fp;
+                if fp.parse_error || fp.eof {
+                    return None;
+                }
+                let (start_ch, header) = if let Some(header) = fp.pending_header.take() {
+                    header
+                } else {
+                    let reader = fp.reader.as_mut()?;
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        let n = reader.read_line(&mut line).ok()?;
+                        if n == 0 {
+                            fp.eof = true;
+                            return None;
+                        }
+                        let bytes = line.as_bytes();
+                        if let Some(pos) = bytes.iter().position(|&c| c == b'>' || c == b'@') {
+                            let start_ch = bytes[pos];
+                            let mut header =
+                                String::from_utf8_lossy(&bytes[pos + 1..]).into_owned();
+                            while header.ends_with('\n') || header.ends_with('\r') {
+                                header.pop();
+                            }
+                            break (start_ch, header);
+                        }
+                    }
+                };
+                let mut it = header.splitn(2, |c: char| c.is_ascii_whitespace());
+                let name = it.next().unwrap_or("").to_string();
+                let comment = it.next().unwrap_or("").to_string();
+                let mut seq = Vec::new();
+                let mut saw_plus = false;
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    let n = fp.reader.as_mut()?.read_line(&mut line).ok()?;
+                    if n == 0 {
+                        fp.eof = true;
+                        break;
+                    }
+                    let bytes = line.as_bytes();
+                    if bytes.iter().all(|&c| c == b'\n' || c == b'\r') {
+                        continue;
+                    }
+                    if bytes[0] == b'>' || bytes[0] == b'@' {
+                        let mut header = String::from_utf8_lossy(&bytes[1..]).into_owned();
+                        while header.ends_with('\n') || header.ends_with('\r') {
+                            header.pop();
+                        }
+                        fp.pending_header = Some((bytes[0], header));
+                        break;
+                    }
+                    if bytes[0] == b'+' {
+                        saw_plus = true;
+                        break;
+                    }
+                    let mut end = bytes.len();
+                    while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
+                        end -= 1;
+                    }
+                    seq.extend_from_slice(&bytes[..end]);
+                }
+                let mut qual = Vec::new();
+                if start_ch == b'@' && saw_plus {
+                    while qual.len() < seq.len() {
+                        line.clear();
+                        let n = fp.reader.as_mut()?.read_line(&mut line).ok()?;
+                        if n == 0 {
+                            fp.eof = true;
+                            break;
+                        }
+                        let bytes = line.as_bytes();
+                        let mut end = bytes.len();
+                        while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
+                            end -= 1;
+                        }
+                        qual.extend_from_slice(&bytes[..end]);
+                        if qual.len() >= seq.len() {
+                            break;
+                        }
+                    }
+                    if qual.len() != seq.len() {
+                        fp.parse_error = true;
+                        if fp.parse_error_after.is_none() {
+                            fp.parse_error_after = fp.last_record_name.clone();
+                        }
+                        return None;
+                    }
+                }
+                fp.pos += 1;
+                let rec = kseq_t {
+                    name,
+                    comment,
+                    seq: String::from_utf8(seq).unwrap(),
+                    qual: String::from_utf8(qual).unwrap(),
+                };
+                fp.last_record_name = Some(rec.name.clone());
+                Some(rec)
+            })()
+        }};
     }
 
     /// Original C global function `mb_bseq_read` from `minibwa/bseq.c:85`.
@@ -3798,10 +3939,9 @@ pub mod bseq {
         if max_chunk_size < chunk_size {
             max_chunk_size = chunk_size;
         }
-        while fp.pos < fp.records.len() {
+        while let Some(ks) = kseq_read!(fp) {
             let mut s = mb_bseq1_t::default();
-            kseq2bseq(&fp.records[fp.pos], &mut s, with_qual, with_comment);
-            fp.pos += 1;
+            kseq2bseq(ks, &mut s, with_qual, with_comment);
             size += s.l_seq as i64;
             a.push(s);
             let to_stop = chunk_size <= 0
@@ -3814,10 +3954,9 @@ pub mod bseq {
                         .map(|x| x.l_seq < CHECK_PAIR_THRES)
                         .unwrap_or(false)
                 {
-                    while fp.pos < fp.records.len() {
+                    while let Some(ks) = kseq_read!(fp) {
                         let mut s = mb_bseq1_t::default();
-                        kseq2bseq(&fp.records[fp.pos], &mut s, with_qual, with_comment);
-                        fp.pos += 1;
+                        kseq2bseq(ks, &mut s, with_qual, with_comment);
                         if mb_qname_same(&s.name, &a[a.len() - 1].name) != 0 {
                             a.push(s);
                         } else {
@@ -3829,11 +3968,7 @@ pub mod bseq {
                 break;
             }
         }
-        if fp.pos >= fp.records.len()
-            && fp.parse_error
-            && !fp.parse_error_reported
-            && !fp.suppress_parse_warnings
-        {
+        if fp.parse_error && !fp.parse_error_reported && !fp.suppress_parse_warnings {
             if let Some(name) = &fp.parse_error_after {
                 eprintln!(
                     "[WARNING]\u{1b}[1;31m failed to parse the FASTA/FASTQ record next to '{}'. Continue anyway.\u{1b}[0m",
@@ -3866,34 +4001,46 @@ pub mod bseq {
             return a;
         }
         loop {
+            let mut read = Vec::with_capacity(n_fp as usize);
             let mut n_read = 0;
-            for f in fp.iter().take(n_fp as usize) {
-                if f.pos < f.records.len() {
+            for f in fp.iter_mut().take(n_fp as usize) {
+                let rec = kseq_read!(f);
+                if rec.is_some() {
                     n_read += 1;
                 }
+                read.push(rec);
             }
             if n_read < n_fp {
                 if n_read > 0 {
-                    for f in fp.iter_mut().take(n_fp as usize) {
-                        if f.pos < f.records.len() {
-                            f.pos += 1;
-                        }
-                    }
                     eprintln!(
                         "[W::mb_bseq_read_frag]\u{1b}[1;31m query files have different number of records; extra records skipped.\u{1b}[0m"
                     );
                 }
                 break;
             }
-            for f in fp.iter_mut().take(n_fp as usize) {
+            for rec in read.into_iter().flatten() {
                 let mut s = mb_bseq1_t::default();
-                kseq2bseq(&f.records[f.pos], &mut s, with_qual, with_comment);
-                f.pos += 1;
+                kseq2bseq(rec, &mut s, with_qual, with_comment);
                 size += s.l_seq as i64;
                 a.push(s);
             }
             if size >= chunk_size {
                 break;
+            }
+        }
+        for f in fp.iter_mut().take(n_fp as usize) {
+            if f.parse_error && !f.parse_error_reported && !f.suppress_parse_warnings {
+                if let Some(name) = &f.parse_error_after {
+                    eprintln!(
+                        "[WARNING]\u{1b}[1;31m failed to parse the FASTA/FASTQ record next to '{}'. Continue anyway.\u{1b}[0m",
+                        name
+                    );
+                } else {
+                    eprintln!(
+                        "[WARNING]\u{1b}[1;31m failed to parse the first FASTA/FASTQ record. Continue anyway.\u{1b}[0m"
+                    );
+                }
+                f.parse_error_reported = true;
             }
         }
         *n_ = a.len() as i32;
@@ -3902,7 +4049,7 @@ pub mod bseq {
 
     /// Original C global function `mb_bseq_eof` from `minibwa/bseq.c:163`.
     pub fn mb_bseq_eof(fp: &mb_bseq_file_t) -> i32 {
-        (fp.pos >= fp.records.len() && fp.s.is_none()) as i32
+        (fp.eof && fp.s.is_none()) as i32
     }
 
     #[cfg(test)]
@@ -3921,12 +4068,12 @@ pub mod bseq {
         fn revcomp_bseq_reverses_sequence_and_quality() {
             let mut s = mb_bseq1_t {
                 l_seq: 4,
-                seq: "ACGT".to_string(),
-                qual: Some("abcd".to_string()),
+                seq: "ACGT".into(),
+                qual: Some("abcd".into()),
                 ..Default::default()
             };
             mb_revcomp_bseq(&mut s);
-            assert_eq!(s.seq, "ACGT");
+            assert_eq!(&*s.seq, "ACGT");
             assert_eq!(s.qual.as_deref(), Some("dcba"));
         }
 
@@ -3936,7 +4083,7 @@ pub mod bseq {
             let mut n = 0;
             let reads = mb_bseq_read(&mut fp, 1_000_000, 0, 1, 0, 1, 1_000_000, &mut n);
             assert_eq!(n, 1);
-            assert_eq!(reads[0].name, "chrM");
+            assert_eq!(&*reads[0].name, "chrM");
             assert_eq!(reads[0].l_seq, 16569);
             assert!(reads[0].seq.starts_with("GATCACAGGTCTATCACCCT"));
             assert_eq!(mb_bseq_eof(&fp), 1);
@@ -3967,9 +4114,9 @@ pub mod bseq {
             let mut n = 0;
             let reads = mb_bseq_read(&mut fp, 1_000_000, 0, 0, 0, 1, 1_000_000, &mut n);
             assert_eq!(n, 2);
-            assert_eq!(reads[0].name, "r0");
-            assert_eq!(reads[0].seq, "AC@GT+AC");
-            assert_eq!(reads[1].name, "r1");
+            assert_eq!(&*reads[0].name, "r0");
+            assert_eq!(&*reads[0].seq, "AC@GT+AC");
+            assert_eq!(&*reads[1].name, "r1");
             let _ = std::fs::remove_file(path);
         }
     }
@@ -3979,7 +4126,7 @@ pub mod bwt {
     #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
     use std::fs::File;
-    use std::io::{Read, Write};
+    use std::io::{BufWriter, Read, Write};
     use std::path::Path;
 
     const MB_MAGIC: &[u8; 4] = b"MBW\x02";
@@ -4028,6 +4175,26 @@ pub mod bwt {
         pub i: i32,
         pub kmer: i32,
         pub p: mb_sai_t,
+    }
+
+    #[derive(Debug)]
+    pub struct mb_smem_entry_ref {
+        pub min_len: i32,
+        pub min_occ: i32,
+        pub st: i32,
+        pub en: i32,
+        pub q: *const u8,
+        pub v: *mut mb_sai_v,
+        pub stage: i32,
+        pub x: i32,
+        pub i: i32,
+        pub kmer: i32,
+        pub p: mb_sai_t,
+    }
+
+    #[inline(always)]
+    unsafe fn smem_q_ref(s: &mb_smem_entry_ref, i: i32) -> u8 {
+        unsafe { *s.q.add(i as usize) }
     }
 
     #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -4092,9 +4259,8 @@ pub mod bwt {
         bwt.primary = primary;
         bwt.seq_len = len;
         bwt.data_len = mb_bwt_data_len(len);
-        bwt.data = vec![0; bwt.data_len as usize];
+        bwt.data = Vec::with_capacity(bwt.data_len as usize);
 
-        let mut k = 0usize;
         let mut last_c: Option<usize> = None;
         for i in 0..len {
             let a = if is_byte != 0 {
@@ -4111,12 +4277,10 @@ pub mod bwt {
             };
             if (i & 0x7f) == 0 {
                 if i > 0 {
-                    bwt.data[k..k + 4].copy_from_slice(&x);
-                    k += 4;
+                    bwt.data.extend_from_slice(&x);
                 }
-                last_c = Some(k);
-                bwt.data[k..k + 4].copy_from_slice(&c);
-                k += 4;
+                last_c = Some(bwt.data.len());
+                bwt.data.extend_from_slice(&c);
                 x = [0; 4];
             } else if (i & 0x3f) == 0 {
                 if let Some(last_c) = last_c {
@@ -4128,11 +4292,9 @@ pub mod bwt {
             c[a as usize] += 1;
             x[((i & 0x7f) >> 5) as usize] |= (a as u64) << ((i & 0x1f) << 1);
         }
-        bwt.data[k..k + 4].copy_from_slice(&x);
-        k += 4;
-        bwt.data[k..k + 4].copy_from_slice(&c);
-        k += 4;
-        assert_eq!(k, bwt.data_len as usize);
+        bwt.data.extend_from_slice(&x);
+        bwt.data.extend_from_slice(&c);
+        assert_eq!(bwt.data.len(), bwt.data_len as usize);
         bwt.L2[0] = 0;
         for i in 0..4usize {
             bwt.L2[i + 1] = bwt.L2[i] + c[i];
@@ -4142,6 +4304,7 @@ pub mod bwt {
     }
 
     /// Original C static function `mb_bwt_set_intv` from `minibwa/bwt.h:71`.
+    #[inline(always)]
     pub fn mb_bwt_set_intv(bwt: &mb_bwt_t, c: i32, ik: &mut mb_sai_t) {
         ik.x[0] = bwt.L2[c as usize] + 1;
         ik.x[1] = bwt.L2[(3 - c) as usize] + 1;
@@ -4150,16 +4313,25 @@ pub mod bwt {
     }
 
     /// Original C static function `mb_bwt_block_prefetch` from `minibwa/bwt.c:118`.
+    #[inline(always)]
     pub fn mb_bwt_block_prefetch(bwt: &mb_bwt_t, k: u64) {
-        if k > 0 {
+        if k > 0 && !bwt.data.is_empty() {
             let block = ((k - 1 - ((k - 1 >= bwt.primary) as u64)) >> 7) << 3;
-            if let Some(cell) = bwt.data.get(block as usize) {
-                crate::s2n_lite::_mm_prefetch(cell as *const u64 as *const u8, 3);
-            }
+            let cell = bwt.data.as_ptr().wrapping_add(block as usize);
+            crate::s2n_lite::_mm_prefetch(cell as *const u8, 3);
+        }
+    }
+
+    #[inline(always)]
+    pub fn mb_bwt_pre_prefetch(bwt: &mb_bwt_t, kmer: i32) {
+        if !bwt.pre.is_empty() {
+            let p = unsafe { bwt.pre.as_ptr().add(kmer as usize) };
+            crate::s2n_lite::_mm_prefetch(p as *const u8, 3);
         }
     }
 
     /// Original C static function `rank_aux1` from `minibwa/bwt.c:123`.
+    #[inline(always)]
     pub fn rank_aux1(mut y: u64, c: u8) -> i32 {
         y = ((if (c & 2) != 0 { y } else { !y }) >> 1)
             & (if (c & 1) != 0 { y } else { !y })
@@ -4168,6 +4340,7 @@ pub mod bwt {
     }
 
     /// Original C global function `mb_bwt_rank11` from `minibwa/bwt.c:136`.
+    #[inline(always)]
     pub fn mb_bwt_rank11(bwt: &mb_bwt_t, mut k: u64, c: u8) -> u64 {
         if k == 0 {
             return 0;
@@ -4202,6 +4375,7 @@ pub mod bwt {
     }
 
     /// Original C static function `seek_block` from `minibwa/bwt.c:157`.
+    #[inline(always)]
     pub fn seek_block(bwt: &mb_bwt_t, k: u64, cnt: &mut [u64; 4]) -> usize {
         let p = ((k >> 7) << 3) as usize;
         let mask = if (k & 0x7f) >= 64 {
@@ -4217,6 +4391,7 @@ pub mod bwt {
     }
 
     /// Original C static function `rank_aux4` from `minibwa/bwt.c:168`.
+    #[inline(always)]
     pub fn rank_aux4(bwt: &mb_bwt_t, x: u32) -> u32 {
         bwt.cnt_table[(x & 0xff) as usize]
             + bwt.cnt_table[((x >> 8) & 0xff) as usize]
@@ -4224,7 +4399,13 @@ pub mod bwt {
             + bwt.cnt_table[(x >> 24) as usize]
     }
 
+    #[inline(always)]
+    unsafe fn bwt_word32(bwt: &mb_bwt_t, q: usize) -> u32 {
+        unsafe { *(bwt.data.as_ptr() as *const u32).add(q) }
+    }
+
     /// Original C global function `mb_bwt_rank1a` from `minibwa/bwt.c:173`.
+    #[inline(always)]
     pub fn mb_bwt_rank1a(bwt: &mb_bwt_t, mut k: u64, cnt: &mut [u64; 4]) {
         if k == 0 {
             *cnt = [0; 4];
@@ -4239,21 +4420,10 @@ pub mod bwt {
         }
         let mut x = 0u32;
         while q < end {
-            let word = bwt.data[q >> 1];
-            let val = if (q & 1) == 0 {
-                word as u32
-            } else {
-                (word >> 32) as u32
-            };
-            x = x.wrapping_add(rank_aux4(bwt, val));
+            x = x.wrapping_add(rank_aux4(bwt, unsafe { bwt_word32(bwt, q) }));
             q += 1;
         }
-        let word = bwt.data[q >> 1];
-        let val = if (q & 1) == 0 {
-            word as u32
-        } else {
-            (word >> 32) as u32
-        };
+        let val = unsafe { bwt_word32(bwt, q) };
         let tmp = val << ((!k & 0xf) << 1);
         x = x.wrapping_add(rank_aux4(bwt, tmp).wrapping_sub((!k & 0xf) as u32));
         cnt[0] += (x & 0xff) as u64;
@@ -4263,6 +4433,7 @@ pub mod bwt {
     }
 
     /// Original C global function `mb_bwt_rank2a` from `minibwa/bwt.c:192`.
+    #[inline(always)]
     pub fn mb_bwt_rank2a(
         bwt: &mb_bwt_t,
         mut k: u64,
@@ -4297,40 +4468,18 @@ pub mod bwt {
             }
             let mut x = 0u32;
             while q < endk {
-                let word = bwt.data[q >> 1];
-                let val = if (q & 1) == 0 {
-                    word as u32
-                } else {
-                    (word >> 32) as u32
-                };
-                x = x.wrapping_add(rank_aux4(bwt, val));
+                x = x.wrapping_add(rank_aux4(bwt, unsafe { bwt_word32(bwt, q) }));
                 q += 1;
             }
             let mut y = x;
-            let word = bwt.data[q >> 1];
-            let val = if (q & 1) == 0 {
-                word as u32
-            } else {
-                (word >> 32) as u32
-            };
+            let val = unsafe { bwt_word32(bwt, q) };
             let tmp = val << ((!k & 0xf) << 1);
             x = x.wrapping_add(rank_aux4(bwt, tmp).wrapping_sub((!k & 0xf) as u32));
             while q < endl {
-                let word = bwt.data[q >> 1];
-                let val = if (q & 1) == 0 {
-                    word as u32
-                } else {
-                    (word >> 32) as u32
-                };
-                y = y.wrapping_add(rank_aux4(bwt, val));
+                y = y.wrapping_add(rank_aux4(bwt, unsafe { bwt_word32(bwt, q) }));
                 q += 1;
             }
-            let word = bwt.data[q >> 1];
-            let val = if (q & 1) == 0 {
-                word as u32
-            } else {
-                (word >> 32) as u32
-            };
+            let val = unsafe { bwt_word32(bwt, q) };
             let tmp = val << ((!l & 0xf) << 1);
             y = y.wrapping_add(rank_aux4(bwt, tmp).wrapping_sub((!l & 0xf) as u32));
             *cntl = *cntk;
@@ -4346,22 +4495,59 @@ pub mod bwt {
     }
 
     /// Original C global function `mb_bwt_extend` from `minibwa/bwt.c:234`.
+    #[inline(always)]
     pub fn mb_bwt_extend(bwt: &mb_bwt_t, ik: &mb_sai_t, ok: &mut [mb_sai_t; 4], is_back: i32) {
+        if is_back == 0 {
+            mb_bwt_extend_forward(bwt, ik, ok);
+            return;
+        }
+        mb_bwt_extend_back(bwt, ik, ok);
+    }
+
+    #[inline(always)]
+    pub fn mb_bwt_extend_forward(bwt: &mb_bwt_t, ik: &mb_sai_t, ok: &mut [mb_sai_t; 4]) {
         let mut tk = [0u64; 4];
         let mut tl = [0u64; 4];
-        let side = (is_back == 0) as usize;
-        let other = (is_back != 0) as usize;
-        mb_bwt_rank2a(bwt, ik.x[side], ik.x[side] + ik.size, &mut tk, &mut tl);
-        for i in 0..4usize {
-            ok[i].x[side] = bwt.L2[i] + 1 + tk[i];
-            tl[i] -= tk[i];
-            ok[i].size = tl[i];
-        }
-        ok[3].x[other] = ik.x[other]
-            + ((ik.x[side] <= bwt.primary && ik.x[side] + ik.size > bwt.primary) as u64);
-        ok[2].x[other] = ok[3].x[other] + tl[3];
-        ok[1].x[other] = ok[2].x[other] + tl[2];
-        ok[0].x[other] = ok[1].x[other] + tl[1];
+        mb_bwt_rank2a(bwt, ik.x[1], ik.x[1] + ik.size, &mut tk, &mut tl);
+        ok[0].x[1] = bwt.L2[0] + 1 + tk[0];
+        ok[1].x[1] = bwt.L2[1] + 1 + tk[1];
+        ok[2].x[1] = bwt.L2[2] + 1 + tk[2];
+        ok[3].x[1] = bwt.L2[3] + 1 + tk[3];
+        tl[0] -= tk[0];
+        tl[1] -= tk[1];
+        tl[2] -= tk[2];
+        tl[3] -= tk[3];
+        ok[0].size = tl[0];
+        ok[1].size = tl[1];
+        ok[2].size = tl[2];
+        ok[3].size = tl[3];
+        ok[3].x[0] = ik.x[0] + ((ik.x[1] <= bwt.primary && ik.x[1] + ik.size > bwt.primary) as u64);
+        ok[2].x[0] = ok[3].x[0] + tl[3];
+        ok[1].x[0] = ok[2].x[0] + tl[2];
+        ok[0].x[0] = ok[1].x[0] + tl[1];
+    }
+
+    #[inline(always)]
+    pub fn mb_bwt_extend_back(bwt: &mb_bwt_t, ik: &mb_sai_t, ok: &mut [mb_sai_t; 4]) {
+        let mut tk = [0u64; 4];
+        let mut tl = [0u64; 4];
+        mb_bwt_rank2a(bwt, ik.x[0], ik.x[0] + ik.size, &mut tk, &mut tl);
+        ok[0].x[0] = bwt.L2[0] + 1 + tk[0];
+        ok[1].x[0] = bwt.L2[1] + 1 + tk[1];
+        ok[2].x[0] = bwt.L2[2] + 1 + tk[2];
+        ok[3].x[0] = bwt.L2[3] + 1 + tk[3];
+        tl[0] -= tk[0];
+        tl[1] -= tk[1];
+        tl[2] -= tk[2];
+        tl[3] -= tk[3];
+        ok[0].size = tl[0];
+        ok[1].size = tl[1];
+        ok[2].size = tl[2];
+        ok[3].size = tl[3];
+        ok[3].x[1] = ik.x[1] + ((ik.x[0] <= bwt.primary && ik.x[0] + ik.size > bwt.primary) as u64);
+        ok[2].x[1] = ok[3].x[1] + tl[3];
+        ok[1].x[1] = ok[2].x[1] + tl[2];
+        ok[0].x[1] = ok[1].x[1] + tl[1];
     }
 
     /// Original C static function `mb_bwt_back` from `minibwa/bwt.c:250`.
@@ -4375,7 +4561,7 @@ pub mod bwt {
     ) -> i64 {
         let mut i = pos - 1;
         let mut ok = [mb_sai_t::default(); 4];
-        assert!(q[pos as usize] < 4);
+        debug_assert!(q[pos as usize] < 4);
         if !f.pre.is_empty() && pos - st >= f.pre_len as i64 {
             let mut z = 0u64;
             let mut l = 0u32;
@@ -4385,7 +4571,7 @@ pub mod bwt {
                 i -= 1;
                 l += 1;
             }
-            assert!(z < (1u64 << (f.pre_len * 2)));
+            debug_assert!(z < (1u64 << (f.pre_len * 2)));
             *p = f.pre[z as usize];
         } else {
             p.size = 0;
@@ -4399,7 +4585,7 @@ pub mod bwt {
             if c > 3 {
                 break;
             }
-            mb_bwt_extend(f, p, &mut ok, 1);
+            mb_bwt_extend_back(f, p, &mut ok);
             if ok[c].size < min_occ as u64 {
                 break;
             }
@@ -4421,7 +4607,7 @@ pub mod bwt {
     ) -> i64 {
         let mut ik = mb_sai_t::default();
         let mut ok = [mb_sai_t::default(); 4];
-        assert!(len <= i32::MAX as u32);
+        debug_assert!(len <= i32::MAX as u32);
         p.size = 0;
         ik.size = 0;
         if len as i64 - x < min_len {
@@ -4448,7 +4634,7 @@ pub mod bwt {
             if q[j as usize] > 3 {
                 break;
             }
-            mb_bwt_extend(f, &ik, &mut ok, 0);
+            mb_bwt_extend_forward(f, &ik, &mut ok);
             if ok[c as usize].size < min_occ as u64 {
                 break;
             }
@@ -4468,28 +4654,45 @@ pub mod bwt {
         i + 1
     }
 
-    /// Original C static function `tq_init` from `minibwa/bwt.c:313`.
-    pub fn tq_init(km: (), q: &mut tiny_queue_t, n: i32) {
-        q.cap = n;
-        q.cap -= 1;
-        q.cap |= q.cap >> 1;
-        q.cap |= q.cap >> 2;
-        q.cap |= q.cap >> 4;
-        q.cap |= q.cap >> 8;
-        q.cap |= q.cap >> 16;
-        q.cap += 1;
-        q.a = vec![0; q.cap as usize];
+    #[inline(always)]
+    pub fn tq_reset(_km: (), q: &mut tiny_queue_t, n: i32) {
+        let mut cap = n;
+        if cap <= 0 {
+            q.cap = 0;
+            q.front = 0;
+            q.count = 0;
+            return;
+        }
+        cap -= 1;
+        cap |= cap >> 1;
+        cap |= cap >> 2;
+        cap |= cap >> 4;
+        cap |= cap >> 8;
+        cap |= cap >> 16;
+        cap += 1;
+        q.cap = cap;
+        if q.a.len() < q.cap as usize {
+            q.a.resize(q.cap as usize, 0);
+        }
         q.front = 0;
         q.count = 0;
     }
 
+    /// Original C static function `tq_init` from `minibwa/bwt.c:313`.
+    #[inline(always)]
+    pub fn tq_init(km: (), q: &mut tiny_queue_t, n: i32) {
+        tq_reset(km, q, n);
+    }
+
     /// Original C static function `tq_push` from `minibwa/bwt.c:321`.
+    #[inline(always)]
     pub fn tq_push(q: &mut tiny_queue_t, x: i32) {
         q.a[((q.count + q.front) & (q.cap - 1)) as usize] = x;
         q.count += 1;
     }
 
     /// Original C static function `tq_shift` from `minibwa/bwt.c:326`.
+    #[inline(always)]
     pub fn tq_shift(q: &mut tiny_queue_t) -> i32 {
         if q.count == 0 {
             return -1;
@@ -4502,11 +4705,12 @@ pub mod bwt {
     }
 
     /// Original C static function `se_one_step_back` from `minibwa/bwt.c:336`.
+    #[inline(always)]
     pub fn se_one_step_back(bwt: &mb_bwt_t, s: &mut mb_smem_entry_t) {
         let mut ok = [mb_sai_t::default(); 4];
         let c = s.q[s.i as usize] as i32;
-        assert!(c < 4);
-        mb_bwt_extend(bwt, &s.p, &mut ok, 1);
+        debug_assert!(c < 4);
+        mb_bwt_extend_back(bwt, &s.p, &mut ok);
         if ok[c as usize].size < s.min_occ as u64 {
             s.x = s.i + 1;
             s.stage = 1;
@@ -4560,6 +4764,7 @@ pub mod bwt {
                             s.i -= 1;
                             i += 1;
                         }
+                        mb_bwt_pre_prefetch(bwt, s.kmer);
                         s.stage = 2;
                     } else {
                         mb_bwt_set_intv(bwt, s.q[s.i as usize] as i32, &mut s.p);
@@ -4599,7 +4804,7 @@ pub mod bwt {
                     let c = 3 - s.q[s.i as usize] as i32;
                     let mut ok = [mb_sai_t::default(); 4];
                     if c >= 0 {
-                        mb_bwt_extend(bwt, &s.p, &mut ok, 0);
+                        mb_bwt_extend_forward(bwt, &s.p, &mut ok);
                     }
                     if c >= 0 && ok[c as usize].size >= s.min_occ as u64 {
                         s.p = ok[c as usize];
@@ -4626,6 +4831,7 @@ pub mod bwt {
                                 s.i -= 1;
                                 i += 1;
                             }
+                            mb_bwt_pre_prefetch(bwt, s.kmer);
                             s.stage = 5;
                         } else {
                             mb_bwt_set_intv(bwt, s.q[s.i as usize] as i32, &mut s.p);
@@ -4646,7 +4852,174 @@ pub mod bwt {
         }
     }
 
+    #[inline(always)]
+    pub fn se_one_step_back_ref(bwt: &mb_bwt_t, s: &mut mb_smem_entry_ref) {
+        let mut ok = [mb_sai_t::default(); 4];
+        let c = unsafe { smem_q_ref(s, s.i) } as i32;
+        debug_assert!(c < 4);
+        mb_bwt_extend_back(bwt, &s.p, &mut ok);
+        if ok[c as usize].size < s.min_occ as u64 {
+            s.x = s.i + 1;
+            s.stage = 1;
+        } else {
+            s.p = ok[c as usize];
+            s.i -= 1;
+            mb_bwt_block_prefetch(bwt, s.p.x[0]);
+            mb_bwt_block_prefetch(bwt, s.p.x[0] + s.p.size);
+        }
+    }
+
+    pub fn mb_bwt_smem_batch_ref(
+        km: (),
+        bwt: &mb_bwt_t,
+        n: i32,
+        a: &mut [mb_smem_entry_ref],
+        v: &mut [mb_sai_v],
+    ) {
+        let mut tq = tiny_queue_t::default();
+        mb_bwt_smem_batch_ref_with_queue(km, bwt, n, a, v, &mut tq);
+    }
+
+    pub fn mb_bwt_smem_batch_ref_with_queue(
+        km: (),
+        bwt: &mb_bwt_t,
+        n: i32,
+        a: &mut [mb_smem_entry_ref],
+        _v: &mut [mb_sai_v],
+        tq: &mut tiny_queue_t,
+    ) {
+        tq_reset(km, tq, n);
+        for i in 0..n {
+            let s = unsafe { a.get_unchecked_mut(i as usize) };
+            tq_push(tq, i);
+            s.stage = 1;
+            s.x = s.st;
+            let sv = unsafe { &mut *s.v };
+            if sv.m < 64 {
+                sv.m = 64;
+                sv.a.reserve(sv.m.saturating_sub(sv.a.capacity()));
+            }
+        }
+
+        while tq.count > 0 {
+            let idx = tq_shift(tq);
+            let s = unsafe { a.get_unchecked_mut(idx as usize) };
+            if s.stage == 1 {
+                if s.en - s.x < s.min_len {
+                    continue;
+                }
+                let mut xn = -1;
+                let mut i = s.x;
+                while i < s.x + s.min_len {
+                    if unsafe { smem_q_ref(s, i) } > 3 {
+                        xn = i;
+                    }
+                    i += 1;
+                }
+                if xn >= 0 {
+                    s.x = xn + 1;
+                } else {
+                    s.i = s.x + s.min_len - 1;
+                    if !bwt.pre.is_empty() && s.min_len >= bwt.pre_len as i32 {
+                        s.kmer = 0;
+                        let mut i = 0;
+                        while i < bwt.pre_len as i32 {
+                            s.kmer = s.kmer << 2 | unsafe { smem_q_ref(s, s.i) } as i32;
+                            s.i -= 1;
+                            i += 1;
+                        }
+                        mb_bwt_pre_prefetch(bwt, s.kmer);
+                        s.stage = 2;
+                    } else {
+                        mb_bwt_set_intv(bwt, unsafe { smem_q_ref(s, s.i) } as i32, &mut s.p);
+                        s.i -= 1;
+                        s.stage = 3;
+                    }
+                }
+            } else if s.stage == 2 || s.stage == 5 {
+                s.p = bwt.pre[s.kmer as usize];
+                if s.p.size < s.min_occ as u64 {
+                    s.i += bwt.pre_len as i32;
+                    mb_bwt_set_intv(bwt, unsafe { smem_q_ref(s, s.i) } as i32, &mut s.p);
+                    s.i -= 1;
+                }
+                s.stage += 1;
+            } else if s.stage == 3 {
+                if s.i < s.x {
+                    mb_bwt_block_prefetch(bwt, s.p.x[1]);
+                    mb_bwt_block_prefetch(bwt, s.p.x[1] + s.p.size);
+                    s.i = s.x + s.min_len;
+                    s.stage = 4;
+                } else {
+                    se_one_step_back_ref(bwt, s);
+                }
+            } else if s.stage == 4 {
+                if s.i == s.en {
+                    s.p.info = (s.x as u64) << 32 | s.i as u64;
+                    let sv = unsafe { &mut *s.v };
+                    if sv.n >= sv.m {
+                        sv.m = sv.n + 1;
+                        sv.m += (sv.m >> 1) + 16;
+                        sv.a.reserve(sv.m.saturating_sub(sv.a.capacity()));
+                    }
+                    sv.a.push(s.p);
+                    sv.n += 1;
+                    continue;
+                } else {
+                    let c = 3 - unsafe { smem_q_ref(s, s.i) } as i32;
+                    let mut ok = [mb_sai_t::default(); 4];
+                    if c >= 0 {
+                        mb_bwt_extend_forward(bwt, &s.p, &mut ok);
+                    }
+                    if c >= 0 && ok[c as usize].size >= s.min_occ as u64 {
+                        s.p = ok[c as usize];
+                        s.i += 1;
+                        mb_bwt_block_prefetch(bwt, s.p.x[1]);
+                        mb_bwt_block_prefetch(bwt, s.p.x[1] + s.p.size);
+                    } else {
+                        s.p.info = (s.x as u64) << 32 | s.i as u64;
+                        let sv = unsafe { &mut *s.v };
+                        if sv.n >= sv.m {
+                            sv.m = sv.n + 1;
+                            sv.m += (sv.m >> 1) + 16;
+                            sv.a.reserve(sv.m.saturating_sub(sv.a.capacity()));
+                        }
+                        sv.a.push(s.p);
+                        sv.n += 1;
+                        if c < 0 {
+                            s.x = s.i + 1;
+                            s.stage = 1;
+                        } else if !bwt.pre.is_empty() && s.i - s.x - 1 >= bwt.pre_len as i32 {
+                            s.kmer = 0;
+                            let mut i = 0;
+                            while i < bwt.pre_len as i32 {
+                                s.kmer = s.kmer << 2 | unsafe { smem_q_ref(s, s.i) } as i32;
+                                s.i -= 1;
+                                i += 1;
+                            }
+                            mb_bwt_pre_prefetch(bwt, s.kmer);
+                            s.stage = 5;
+                        } else {
+                            mb_bwt_set_intv(bwt, unsafe { smem_q_ref(s, s.i) } as i32, &mut s.p);
+                            s.i -= 1;
+                            s.stage = 6;
+                        }
+                    }
+                }
+            } else if s.stage == 6 {
+                if s.i < s.x + 1 {
+                    s.x = s.i + 1;
+                    s.stage = 1;
+                } else {
+                    se_one_step_back_ref(bwt, s);
+                }
+            }
+            tq_push(tq, idx);
+        }
+    }
+
     /// Original C static function `bwt_invPsi` from `minibwa/bwt.c:460`.
+    #[inline(always)]
     pub fn bwt_invPsi(bwt: &mb_bwt_t, k: u64) -> u64 {
         let x = k - (k > bwt.primary) as u64;
         let block = (((x >> 7) << 3) + 4 + ((x & 127) >> 5)) as usize;
@@ -4684,6 +5057,7 @@ pub mod bwt {
     }
 
     /// Original C global function `mb_bwt_sa` from `minibwa/bwt.c:490`.
+    #[inline(always)]
     pub fn mb_bwt_sa(bwt: &mb_bwt_t, mut k: u64) -> u64 {
         let mut sa = 0u64;
         let mask = (1u64 << bwt.sa_bit) - 1;
@@ -4695,36 +5069,70 @@ pub mod bwt {
     }
 
     /// Original C global function `mb_bwt_sa_batch` from `minibwa/bwt.c:502`.
+    #[inline]
     pub fn mb_bwt_sa_batch(km: (), bwt: &mb_bwt_t, n: i64, x: &mut [u64]) {
+        let mut z = Vec::new();
+        mb_bwt_sa_batch_with_scratch(km, bwt, n, x, &mut z);
+    }
+
+    #[inline]
+    pub fn mb_bwt_sa_batch_with_scratch(
+        _km: (),
+        bwt: &mb_bwt_t,
+        n: i64,
+        x: &mut [u64],
+        z: &mut Vec<(u64, u64)>,
+    ) {
         let mask = (1u64 << bwt.sa_bit) - 1;
         if n <= 0 {
             return;
         }
-        let mut z = vec![(0u64, 0u64); n as usize];
-        for i in 0..n as usize {
-            z[i].0 = x[i];
-            z[i].1 = i as u64;
-            if (z[i].0 & mask) != 0 {
-                mb_bwt_block_prefetch(bwt, z[i].0);
+        z.clear();
+        z.resize(n as usize, (0, 0));
+        let n = n as usize;
+        let z_ptr = z.as_mut_ptr();
+        let x_ptr = x.as_mut_ptr();
+        let sa_ptr = bwt.sa.as_ptr();
+        for i in 0..n {
+            let x_i = unsafe { *x_ptr.add(i) };
+            unsafe {
+                (*z_ptr.add(i)).0 = x_i;
+                (*z_ptr.add(i)).1 = i as u64;
+            }
+            if (x_i & mask) == 0 {
+                let sa = unsafe { sa_ptr.add((x_i >> bwt.sa_bit) as usize) };
+                crate::s2n_lite::_mm_prefetch(sa as *const u8, 3);
+            } else {
+                mb_bwt_block_prefetch(bwt, x_i);
             }
         }
         let mut step = 0u64;
-        let mut r = n as usize;
+        let mut r = n;
         while r > 0 {
             let r0 = r;
             r = 0;
             for i in 0..r0 {
-                if (z[i].0 & mask) == 0 {
-                    x[z[i].1 as usize] = step.wrapping_add(bwt.sa[(z[i].0 >> bwt.sa_bit) as usize]);
+                let zi = unsafe { *z_ptr.add(i) };
+                if (zi.0 & mask) == 0 {
+                    unsafe {
+                        *x_ptr.add(zi.1 as usize) =
+                            step.wrapping_add(*sa_ptr.add((zi.0 >> bwt.sa_bit) as usize));
+                    }
                 } else {
-                    z[r] = z[i];
+                    unsafe { *z_ptr.add(r) = zi };
                     r += 1;
                 }
             }
             for i in 0..r {
-                z[i].0 = bwt_invPsi(bwt, z[i].0);
-                if (z[i].0 & mask) != 0 {
-                    mb_bwt_block_prefetch(bwt, z[i].0);
+                let x_i = bwt_invPsi(bwt, unsafe { (*z_ptr.add(i)).0 });
+                unsafe {
+                    (*z_ptr.add(i)).0 = x_i;
+                }
+                if (x_i & mask) == 0 {
+                    let sa = unsafe { sa_ptr.add((x_i >> bwt.sa_bit) as usize) };
+                    crate::s2n_lite::_mm_prefetch(sa as *const u8, 3);
+                } else {
+                    mb_bwt_block_prefetch(bwt, x_i);
                 }
             }
             step += 1;
@@ -4757,7 +5165,7 @@ pub mod bwt {
             if top.d > 0 {
                 str_[(depth - top.d) as usize] = top.c as u8;
             }
-            mb_bwt_extend(bwt, &top.p, &mut ok, 1);
+            mb_bwt_extend_back(bwt, &top.p, &mut ok);
             for a in 0..4i32 {
                 str_[(depth - top.d - 1) as usize] = a as u8;
                 if top.d != depth - 1 {
@@ -4776,13 +5184,66 @@ pub mod bwt {
         }
     }
 
+    fn mb_bwt_count_kmer_uninit(
+        bwt: &mb_bwt_t,
+        depth: i32,
+        s: &mut [std::mem::MaybeUninit<mb_sai_t>],
+    ) {
+        #[derive(Clone, Copy, Debug, Default)]
+        struct count_pair64_t {
+            p: mb_sai_t,
+            d: i32,
+            c: i32,
+        }
+
+        let mut stack = [count_pair64_t::default(); 64];
+        let mut s_top = 0usize;
+        let mut str_ = [0u8; 16];
+        assert!(depth <= 15);
+        for a in 0..4i32 {
+            mb_bwt_set_intv(bwt, a, &mut stack[s_top].p);
+            stack[s_top].d = 1;
+            stack[s_top].c = a;
+            s_top += 1;
+        }
+        while s_top > 0 {
+            s_top -= 1;
+            let top = stack[s_top];
+            let mut ok = [mb_sai_t::default(); 4];
+            if top.d > 0 {
+                str_[(depth - top.d) as usize] = top.c as u8;
+            }
+            mb_bwt_extend_back(bwt, &top.p, &mut ok);
+            for a in 0..4i32 {
+                str_[(depth - top.d - 1) as usize] = a as u8;
+                if top.d != depth - 1 {
+                    stack[s_top].p = ok[a as usize];
+                    stack[s_top].d = top.d + 1;
+                    stack[s_top].c = a;
+                    s_top += 1;
+                } else {
+                    let mut x = 0u64;
+                    for i in 0..depth {
+                        x |= (str_[i as usize] as u64) << (i * 2);
+                    }
+                    s[x as usize].write(ok[a as usize]);
+                }
+            }
+        }
+    }
+
     /// Original C global function `mb_bwt_cache` from `minibwa/bwt.c:576`.
     pub fn mb_bwt_cache(bwt: &mut mb_bwt_t, len: i32) {
         bwt.pre.clear();
         bwt.pre_len = len as u32;
-        bwt.pre = vec![mb_sai_t::default(); 1usize << (len * 2)];
-        let mut pre = std::mem::take(&mut bwt.pre);
-        mb_bwt_count_kmer(bwt, len, &mut pre);
+        let n = 1usize << (len * 2);
+        let mut pre = Vec::<std::mem::MaybeUninit<mb_sai_t>>::with_capacity(n);
+        let pre_slice = unsafe { std::slice::from_raw_parts_mut(pre.as_mut_ptr(), n) };
+        mb_bwt_count_kmer_uninit(bwt, len, pre_slice);
+        let ptr = pre.as_mut_ptr() as *mut mb_sai_t;
+        let cap = pre.capacity();
+        std::mem::forget(pre);
+        let pre = unsafe { Vec::from_raw_parts(ptr, n, cap) };
         bwt.pre = pre;
     }
 
@@ -4802,6 +5263,25 @@ pub mod bwt {
             }
         }
         offset as u64
+    }
+
+    fn read_huge_u64_vec<R: Read>(fp: &mut R, n: u64) -> Option<Vec<u64>> {
+        let mut a = Vec::<u64>::with_capacity(n as usize);
+        let bytes =
+            unsafe { std::slice::from_raw_parts_mut(a.as_mut_ptr() as *mut u8, n as usize * 8) };
+        if read_huge(fp, n.checked_mul(8)?, bytes) != n * 8 {
+            return None;
+        }
+        unsafe {
+            a.set_len(n as usize);
+        }
+        #[cfg(target_endian = "big")]
+        {
+            for x in &mut a {
+                *x = u64::from_le(*x);
+            }
+        }
+        Some(a)
     }
 
     /// Original C global function `mb_bwt_load_raw` from `minibwa/bwt.c:600`.
@@ -4824,10 +5304,11 @@ pub mod bwt {
 
     /// Original C global function `mb_bwt_save` from `minibwa/bwt.c:622`.
     pub fn mb_bwt_save<P: AsRef<Path>>(fn_: P, bwt: &mb_bwt_t) -> i32 {
-        let mut fp = match File::create(fn_) {
+        let fp = match File::create(fn_) {
             Ok(fp) => fp,
             Err(_) => return -1,
         };
+        let mut fp = BufWriter::with_capacity(1 << 20, fp);
         if fp.write_all(MB_MAGIC).is_err() {
             return -1;
         }
@@ -4842,22 +5323,42 @@ pub mod bwt {
                 return -1;
             }
         }
-        for &word in bwt.data.iter().take(bwt.data_len as usize) {
-            if fp.write_all(&word.to_le_bytes()).is_err() {
-                return -1;
-            }
+        if write_u64_slice_le(&mut fp, &bwt.data[..bwt.data_len as usize]).is_err() {
+            return -1;
         }
         if fp.write_all(&bwt.n_sa.to_le_bytes()).is_err() {
             return -1;
         }
         if bwt.sa_bit != u32::MAX && bwt.n_sa > 0 && !bwt.sa.is_empty() {
-            for &word in bwt.sa.iter().take(bwt.n_sa as usize) {
-                if fp.write_all(&word.to_le_bytes()).is_err() {
-                    return -1;
-                }
+            if write_u64_slice_le(&mut fp, &bwt.sa[..bwt.n_sa as usize]).is_err() {
+                return -1;
             }
         }
-        0
+        if fp.flush().is_err() {
+            -1
+        } else {
+            0
+        }
+    }
+
+    fn write_u64_slice_le<W: Write>(writer: &mut W, words: &[u64]) -> std::io::Result<()> {
+        #[cfg(target_endian = "little")]
+        {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    words.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(words),
+                )
+            };
+            writer.write_all(bytes)
+        }
+        #[cfg(not(target_endian = "little"))]
+        {
+            for &word in words {
+                writer.write_all(&word.to_le_bytes())?;
+            }
+            Ok(())
+        }
     }
 
     /// Original C global function `mb_bwt_load` from `minibwa/bwt.c:639`.
@@ -4881,22 +5382,12 @@ pub mod bwt {
         }
         bwt.seq_len = bwt.L2[4];
         bwt.data_len = mb_bwt_data_len(bwt.seq_len);
-        let mut data_bytes = vec![0u8; (bwt.data_len << 3) as usize];
-        read_huge(&mut fp, bwt.data_len << 3, &mut data_bytes);
-        bwt.data = Vec::with_capacity(bwt.data_len as usize);
-        for chunk in data_bytes.chunks_exact(8) {
-            bwt.data.push(u64::from_le_bytes(chunk.try_into().unwrap()));
-        }
+        bwt.data = read_huge_u64_vec(&mut fp, bwt.data_len)?;
         let mut n_sa = [0u8; 8];
         fp.read_exact(&mut n_sa).ok()?;
         bwt.n_sa = u64::from_le_bytes(n_sa);
         if bwt.sa_bit != u32::MAX && bwt.n_sa > 0 {
-            let mut sa_bytes = vec![0u8; (bwt.n_sa << 3) as usize];
-            fp.read_exact(&mut sa_bytes).ok()?;
-            bwt.sa = Vec::with_capacity(bwt.n_sa as usize);
-            for chunk in sa_bytes.chunks_exact(8) {
-                bwt.sa.push(u64::from_le_bytes(chunk.try_into().unwrap()));
-            }
+            bwt.sa = read_huge_u64_vec(&mut fp, bwt.n_sa)?;
         }
         Some(bwt)
     }
@@ -7002,7 +7493,7 @@ pub mod cs {
         let Some(p) = &r.p else {
             return min_tmp_len + 1;
         };
-        for &cg in p.cigar.iter().take(p.n_cigar as usize) {
+        for &cg in p.cigar().iter().take(p.n_cigar as usize) {
             let op = cg & 0xf;
             let len = (cg >> 4) as usize;
             if op == MB_CIGAR_INS || op == MB_CIGAR_DEL {
@@ -7088,7 +7579,7 @@ pub mod cs {
                 if is_ds != 0 { b'd' } else { b'c' } as i32
             )],
         );
-        for &cg in p.cigar.iter().take(p.n_cigar as usize) {
+        for &cg in p.cigar().iter().take(p.n_cigar as usize) {
             let op = cg & 0xf;
             let len = (cg >> 4) as usize;
             if op == MB_CIGAR_MATCH || op == MB_CIGAR_EQ_MATCH || op == MB_CIGAR_X_MISMATCH {
@@ -7103,7 +7594,7 @@ pub mod cs {
         let _tmp = vec![0u8; alloc_tmp(km, r)];
         let mut q_off = 0usize;
         let mut t_off = 0usize;
-        for &cg in p.cigar.iter().take(p.n_cigar as usize) {
+        for &cg in p.cigar().iter().take(p.n_cigar as usize) {
             let op = cg & 0xf;
             let len = (cg >> 4) as usize;
             assert!(
@@ -7227,7 +7718,7 @@ pub mod cs {
         let mut q_off = 0usize;
         let mut t_off = 0usize;
         let mut l_MD = 0i32;
-        for &cg in p.cigar.iter().take(p.n_cigar as usize) {
+        for &cg in p.cigar().iter().take(p.n_cigar as usize) {
             let op = cg & 0xf;
             let len = (cg >> 4) as usize;
             assert!(
@@ -7285,10 +7776,6 @@ pub mod cs {
         use super::*;
         use crate::pe::{mb_extra_t, mb_hit_t};
 
-        fn text(s: &kstring_t) -> String {
-            String::from_utf8_lossy(&s.s[..s.l]).into_owned()
-        }
-
         #[test]
         fn cs_and_md_tags_follow_cigar_edits() {
             let hit = mb_hit_t {
@@ -7296,33 +7783,34 @@ pub mod cs {
                 qe: 6,
                 ts: 0,
                 te: 5,
-                p: Some(mb_extra_t {
-                    n_cigar: 3,
-                    cigar: vec![
+                p: Some(
+                    mb_extra_t {
+                        ..Default::default()
+                    }
+                    .with_cigar(&[
                         2 << 4 | MB_CIGAR_MATCH,
                         1 << 4 | MB_CIGAR_INS,
                         3 << 4 | MB_CIGAR_MATCH,
-                    ],
-                    ..Default::default()
-                }),
+                    ]),
+                ),
                 ..Default::default()
             };
             let q = [0, 1, 2, 3, 0, 1];
             let t = [0, 1, 3, 0, 1];
             let mut s = kstring_t::default();
             mb_write_cs_ds((), &mut s, &t, &q, &hit, 0);
-            assert_eq!(text(&s), "cs:Z::2+g:3");
+            assert_eq!(String::from_utf8_lossy(&s.s[..s.l]), "cs:Z::2+g:3");
 
             let mut md = kstring_t::default();
             mb_write_MD((), &mut md, &t, &q, &hit);
-            assert_eq!(text(&md), "\tMD:Z:5");
+            assert_eq!(String::from_utf8_lossy(&md.s[..md.l]), "\tMD:Z:5");
         }
 
         #[test]
         fn ds_marks_repeat_context() {
             let mut s = kstring_t::default();
             write_indel_ds((), &mut s, 3, &[0, 0, 0], 1, 1);
-            assert_eq!(text(&s), "[a]a[a]");
+            assert_eq!(String::from_utf8_lossy(&s.s[..s.l]), "[a]a[a]");
         }
     }
 }
@@ -7332,12 +7820,14 @@ pub mod fastmap {
 
     use crate::bseq::{mb_bseq_open, mb_bseq_read};
     use crate::bwt::{
-        mb_bwt_sa_batch, mb_bwt_smem, mb_bwt_smem_batch, mb_sai_t, mb_sai_v, mb_smem_entry_t,
+        mb_bwt_sa_batch, mb_bwt_smem, mb_bwt_smem_batch_ref_with_queue, mb_sai_t, mb_sai_v,
+        mb_smem_entry_ref, tiny_queue_t,
     };
-    use crate::ketopt::{ketopt, ketopt_t, ko_longopt_t};
-    use crate::kommon::{kom_sprintf_arg, kom_sprintf_lite, kstring_t};
+    use crate::ketopt::{ketopt, ko_longopt_t, KETOPT_INIT};
+    use crate::kommon::kstring_t;
     use crate::l2bit::l2b_intv2cid;
     use crate::map_algo::{mb_idx_load, mb_idx_t};
+    use std::io::Write;
 
     #[derive(Clone, Debug, Default, PartialEq, Eq)]
     pub struct batch_seq1_t {
@@ -7347,24 +7837,97 @@ pub mod fastmap {
         pub v: mb_sai_v,
     }
 
+    fn ks_put_bytes(out: &mut kstring_t, bytes: &[u8]) {
+        let end = out.l + bytes.len();
+        if end + 1 > out.s.len() {
+            out.s.resize(end + 1, 0);
+            out.m = out.s.len();
+        }
+        out.s[out.l..end].copy_from_slice(bytes);
+        out.l = end;
+        out.s[out.l] = 0;
+    }
+
+    fn ks_put_u64(out: &mut kstring_t, mut x: u64) {
+        let mut buf = [0u8; 20];
+        let mut i = buf.len();
+        loop {
+            i -= 1;
+            buf[i] = b'0' + (x % 10) as u8;
+            x /= 10;
+            if x == 0 {
+                break;
+            }
+        }
+        ks_put_bytes(out, &buf[i..]);
+    }
+
+    fn ks_put_i64(out: &mut kstring_t, x: i64) {
+        if x < 0 {
+            ks_put_bytes(out, b"-");
+            ks_put_u64(out, x.unsigned_abs());
+        } else {
+            ks_put_u64(out, x as u64);
+        }
+    }
+
+    fn ks_put_i32(out: &mut kstring_t, x: i32) {
+        ks_put_i64(out, x as i64);
+    }
+
+    fn emit_kstring(
+        out: &kstring_t,
+        emitted: &mut String,
+        output_writer: &mut Option<&mut dyn Write>,
+    ) -> bool {
+        if let Some(writer) = output_writer.as_deref_mut() {
+            writer.write_all(&out.s[..out.l]).is_ok()
+        } else {
+            emitted.push_str(std::str::from_utf8(&out.s[..out.l]).unwrap());
+            true
+        }
+    }
+
     /// Original C static function `batch_smem` from `minibwa/fastmap.c:17`.
     pub fn batch_smem(idx: &mb_idx_t, n: i32, t: &mut [batch_seq1_t], min_len: i32, min_occ: i32) {
-        let mut s = Vec::with_capacity(n as usize);
+        let mut tq = tiny_queue_t::default();
+        batch_smem_with_queue(idx, n, t, min_len, min_occ, &mut tq);
+    }
+
+    fn batch_smem_with_queue(
+        idx: &mb_idx_t,
+        n: i32,
+        t: &mut [batch_seq1_t],
+        min_len: i32,
+        min_occ: i32,
+        tq: &mut tiny_queue_t,
+    ) {
+        let mut v = Vec::with_capacity(n as usize);
         for ti in t.iter_mut().take(n as usize) {
             ti.v.n = 0;
-            s.push(mb_smem_entry_t {
+            ti.v.a.clear();
+            v.push(std::mem::take(&mut ti.v));
+        }
+        let mut s = Vec::with_capacity(n as usize);
+        let v_ptr = v.as_mut_ptr();
+        for (i, ti) in t.iter().take(n as usize).enumerate() {
+            s.push(mb_smem_entry_ref {
                 min_len,
                 min_occ,
                 st: 0,
                 en: ti.l_seq,
-                q: ti.seq.clone(),
-                v: mb_sai_v::default(),
-                ..Default::default()
+                q: ti.seq.as_ptr(),
+                v: unsafe { v_ptr.add(i) },
+                stage: 0,
+                x: 0,
+                i: 0,
+                kmer: 0,
+                p: mb_sai_t::default(),
             });
         }
-        mb_bwt_smem_batch((), &idx.bwt, n, &mut s);
-        for (ti, si) in t.iter_mut().zip(s.into_iter()).take(n as usize) {
-            ti.v = si.v;
+        mb_bwt_smem_batch_ref_with_queue((), &idx.bwt, n, &mut s, &mut v, tq);
+        for (ti, vi) in t.iter_mut().zip(v.into_iter()).take(n as usize) {
+            ti.v = vi;
         }
     }
 
@@ -7377,15 +7940,12 @@ pub mod fastmap {
         out: &mut kstring_t,
     ) {
         let len = (p.info & 0xffff_ffff).wrapping_sub(p.info >> 32);
-        kom_sprintf_lite(
-            out,
-            "EM\t%ld\t%ld\t%ld",
-            &[
-                kom_sprintf_arg::ld((p.info >> 32) as i64),
-                kom_sprintf_arg::ld((p.info & 0xffff_ffff) as i64),
-                kom_sprintf_arg::ld(p.size as i64),
-            ],
-        );
+        ks_put_bytes(out, b"EM\t");
+        ks_put_u64(out, p.info >> 32);
+        ks_put_bytes(out, b"\t");
+        ks_put_u64(out, p.info & 0xffff_ffff);
+        ks_put_bytes(out, b"\t");
+        ks_put_u64(out, p.size);
         if p.size <= max_size_out as u64 {
             let n_sa = p.size as usize;
             for (j, slot) in sa.iter_mut().take(n_sa).enumerate() {
@@ -7397,24 +7957,19 @@ pub mod fastmap {
                 let mut cst = 0i64;
                 let cid = l2b_intv2cid(&idx.l2b, pos, pos + len, &mut cst, &mut rev);
                 if cid < 0 {
-                    kom_sprintf_lite(out, "\t.", &[]);
+                    ks_put_bytes(out, b"\t.");
                 } else {
                     let name = &idx.l2b.ctg[cid as usize].name;
-                    kom_sprintf_lite(
-                        out,
-                        "\t%s:%c%ld",
-                        &[
-                            kom_sprintf_arg::s(name),
-                            kom_sprintf_arg::c(if rev != 0 { b'-' } else { b'+' } as i32),
-                            kom_sprintf_arg::ld(cst + 1),
-                        ],
-                    );
+                    ks_put_bytes(out, b"\t");
+                    ks_put_bytes(out, name.as_bytes());
+                    ks_put_bytes(out, if rev != 0 { b":-" } else { b":+" });
+                    ks_put_i64(out, cst + 1);
                 }
             }
         } else {
-            kom_sprintf_lite(out, "\t*", &[]);
+            ks_put_bytes(out, b"\t*");
         }
-        kom_sprintf_lite(out, "\n", &[]);
+        ks_put_bytes(out, b"\n");
     }
 
     /// Original C static function `process_batch` from `minibwa/fastmap.c:56`.
@@ -7429,21 +7984,57 @@ pub mod fastmap {
         out: &mut kstring_t,
     ) -> String {
         let mut emitted = String::new();
-        batch_smem(idx, n, t, min_len, min_occ);
+        let mut tq = tiny_queue_t::default();
+        let mut output_writer = None;
+        if process_batch_append(
+            idx,
+            n,
+            t,
+            min_len,
+            min_occ,
+            max_size_out,
+            sa,
+            out,
+            &mut emitted,
+            &mut tq,
+            &mut output_writer,
+        ) {
+            emitted
+        } else {
+            String::new()
+        }
+    }
+
+    fn process_batch_append(
+        idx: &mb_idx_t,
+        n: i32,
+        t: &mut [batch_seq1_t],
+        min_len: i32,
+        min_occ: i32,
+        max_size_out: i32,
+        sa: &mut [u64],
+        out: &mut kstring_t,
+        emitted: &mut String,
+        tq: &mut tiny_queue_t,
+        output_writer: &mut Option<&mut dyn Write>,
+    ) -> bool {
+        batch_smem_with_queue(idx, n, t, min_len, min_occ, tq);
         for ti in t.iter_mut().take(n as usize) {
             out.l = 0;
-            kom_sprintf_lite(
-                out,
-                "SQ\t%s\t%d\n",
-                &[kom_sprintf_arg::s(&ti.name), kom_sprintf_arg::d(ti.l_seq)],
-            );
+            ks_put_bytes(out, b"SQ\t");
+            ks_put_bytes(out, ti.name.as_bytes());
+            ks_put_bytes(out, b"\t");
+            ks_put_i32(out, ti.l_seq);
+            ks_put_bytes(out, b"\n");
             for p in ti.v.a.iter().take(ti.v.n) {
                 write_intv(idx, p, max_size_out, sa, out);
             }
-            kom_sprintf_lite(out, "//\n", &[]);
-            emitted.push_str(&String::from_utf8_lossy(&out.s[..out.l]));
+            ks_put_bytes(out, b"//\n");
+            if !emit_kstring(out, emitted, output_writer) {
+                return false;
+            }
         }
-        emitted
+        true
     }
 
     /// Original C static function `usage_fastmap` from `minibwa/fastmap.c:63`.
@@ -7462,6 +8053,17 @@ pub mod fastmap {
 
     /// Original C global function `main_fastmap` from `minibwa/fastmap.c:73`.
     pub fn main_fastmap(argv: &[String]) -> (i32, String) {
+        main_fastmap_inner(argv, None)
+    }
+
+    pub fn main_fastmap_write(argv: &[String], output_writer: &mut dyn Write) -> (i32, String) {
+        main_fastmap_inner(argv, Some(output_writer))
+    }
+
+    fn main_fastmap_inner(
+        argv: &[String],
+        mut output_writer: Option<&mut dyn Write>,
+    ) -> (i32, String) {
         let long_opts = [ko_longopt_t {
             name: Some("help".into()),
             has_arg: 0,
@@ -7469,7 +8071,7 @@ pub mod fastmap {
         }];
         let argc = argv.len() as i32;
         let mut args = argv.to_vec();
-        let mut o = ketopt_t::default();
+        let mut o = KETOPT_INIT.clone();
         let mut min_len = 19;
         let mut min_occ = 1;
         let mut max_size_out = 20;
@@ -7504,6 +8106,12 @@ pub mod fastmap {
         let mut emitted = String::new();
         let mut out = kstring_t::default();
         let mut sa = vec![0u64; max_size_out.max(0) as usize];
+        let mut tq = tiny_queue_t::default();
+        let mut batch = if max_seq > 1 {
+            vec![batch_seq1_t::default(); max_seq as usize]
+        } else {
+            Vec::new()
+        };
         loop {
             let mut n_read = 0;
             let reads = mb_bseq_read(
@@ -7520,26 +8128,24 @@ pub mod fastmap {
                 break;
             }
             if max_seq > 1 {
-                let mut batch = reads
-                    .iter()
-                    .map(|r| batch_seq1_t {
-                        name: r.name.clone(),
-                        l_seq: r.l_seq as i32,
-                        seq: r
-                            .seq
-                            .bytes()
-                            .map(|c| match c {
-                                b'A' | b'a' => 0,
-                                b'C' | b'c' => 1,
-                                b'G' | b'g' => 2,
-                                b'T' | b't' => 3,
-                                _ => 4,
-                            })
-                            .collect(),
-                        v: mb_sai_v::default(),
-                    })
-                    .collect::<Vec<_>>();
-                emitted.push_str(&process_batch(
+                let n_read_usize = n_read as usize;
+                if batch.len() < n_read_usize {
+                    batch.resize_with(n_read_usize, batch_seq1_t::default);
+                }
+                for (slot, r) in batch.iter_mut().zip(reads.iter()).take(n_read_usize) {
+                    slot.name.clear();
+                    slot.name.push_str(&r.name);
+                    slot.l_seq = r.l_seq as i32;
+                    slot.seq.clear();
+                    slot.seq.extend(r.seq.bytes().map(|c| match c {
+                        b'A' | b'a' => 0,
+                        b'C' | b'c' => 1,
+                        b'G' | b'g' => 2,
+                        b'T' | b't' => 3,
+                        _ => 4,
+                    }));
+                }
+                if !process_batch_append(
                     &idx,
                     n_read,
                     &mut batch,
@@ -7548,7 +8154,12 @@ pub mod fastmap {
                     max_size_out,
                     &mut sa,
                     &mut out,
-                ));
+                    &mut emitted,
+                    &mut tq,
+                    &mut output_writer,
+                ) {
+                    return (-1, String::new());
+                }
             } else {
                 let r = &reads[0];
                 let seq = r
@@ -7563,14 +8174,11 @@ pub mod fastmap {
                     })
                     .collect::<Vec<_>>();
                 out.l = 0;
-                kom_sprintf_lite(
-                    &mut out,
-                    "SQ\t%s\t%ld\n",
-                    &[
-                        kom_sprintf_arg::s(&r.name),
-                        kom_sprintf_arg::ld(r.l_seq as i64),
-                    ],
-                );
+                ks_put_bytes(&mut out, b"SQ\t");
+                ks_put_bytes(&mut out, r.name.as_bytes());
+                ks_put_bytes(&mut out, b"\t");
+                ks_put_u64(&mut out, r.l_seq);
+                ks_put_bytes(&mut out, b"\n");
                 let mut x = 0i64;
                 let mut a = Vec::<mb_sai_t>::new();
                 while x < r.l_seq as i64 {
@@ -7591,8 +8199,15 @@ pub mod fastmap {
                 for p in &a {
                     write_intv(&idx, p, max_size_out, &mut sa, &mut out);
                 }
-                kom_sprintf_lite(&mut out, "//\n", &[]);
-                emitted.push_str(&String::from_utf8_lossy(&out.s[..out.l]));
+                ks_put_bytes(&mut out, b"//\n");
+                if !emit_kstring(&out, &mut emitted, &mut output_writer) {
+                    return (-1, String::new());
+                }
+            }
+        }
+        if let Some(writer) = output_writer {
+            if writer.flush().is_err() {
+                return (-1, String::new());
             }
         }
         (0, emitted)
@@ -7679,27 +8294,82 @@ pub mod format {
     use crate::kommon::{kom_sprintf_arg, kom_sprintf_lite, kstring_t};
     use crate::l2bit::l2b_t;
     use crate::options::{MB_F_2ND_SEQ, MB_F_COPY_COMMENT, MB_F_SAM, MB_F_SUPP_SOFT};
-    use crate::pe::mb_hit_t;
+    use crate::pe::{mb_hit_buf_t, mb_hit_t};
     use std::sync::{Mutex, OnceLock};
 
     const MB_CIGAR_STR: &[u8] = b"MIDNSHP=XB";
 
     static MB_RG_ID: OnceLock<Mutex<String>> = OnceLock::new();
 
+    #[inline(always)]
+    fn append_bytes(s: &mut kstring_t, bytes: &[u8]) {
+        let end = s.l + bytes.len();
+        if end > s.s.len() {
+            s.s.resize(end, 0);
+            s.m = s.s.len();
+        }
+        s.s[s.l..end].copy_from_slice(bytes);
+        s.l = end;
+    }
+
+    #[inline(always)]
+    fn append_str(s: &mut kstring_t, text: &str) {
+        append_bytes(s, text.as_bytes());
+    }
+
+    #[inline(always)]
+    fn append_byte(s: &mut kstring_t, byte: u8) {
+        let end = s.l + 1;
+        if end > s.s.len() {
+            s.s.resize(end, 0);
+            s.m = s.s.len();
+        }
+        s.s[s.l] = byte;
+        s.l = end;
+    }
+
+    #[inline(always)]
+    fn append_u64(s: &mut kstring_t, mut value: u64) {
+        let mut buf = [0u8; 20];
+        let mut i = buf.len();
+        loop {
+            i -= 1;
+            buf[i] = b'0' + (value % 10) as u8;
+            value /= 10;
+            if value == 0 {
+                break;
+            }
+        }
+        append_bytes(s, &buf[i..]);
+    }
+
+    #[inline(always)]
+    fn append_i64(s: &mut kstring_t, value: i64) {
+        if value < 0 {
+            append_byte(s, b'-');
+            append_u64(s, value.unsigned_abs());
+        } else {
+            append_u64(s, value as u64);
+        }
+    }
+
+    #[inline(always)]
+    fn append_i32(s: &mut kstring_t, value: i32) {
+        append_i64(s, value as i64);
+    }
+
     /// Original C static function `write_tags` from `minibwa/format.c:13`.
     pub fn write_tags(s: &mut kstring_t, p: &mb_hit_t) {
         let extra = p.p.as_ref().unwrap();
-        let nm = p.blen - p.mlen + extra.n_ambi as i32;
-        kom_sprintf_lite(
-            s,
-            "\tNM:i:%d\tAS:i:%d\tms:i:%d\tmd:i:%d",
-            &[
-                kom_sprintf_arg::d(nm),
-                kom_sprintf_arg::d(extra.dp_score),
-                kom_sprintf_arg::d(extra.dp_max0),
-                kom_sprintf_arg::d(extra.dp_max - extra.dp_max2),
-            ],
-        );
+        let nm = p.blen - p.mlen + extra.n_ambi() as i32;
+        append_bytes(s, b"\tNM:i:");
+        append_i32(s, nm);
+        append_bytes(s, b"\tAS:i:");
+        append_i32(s, extra.dp_score);
+        append_bytes(s, b"\tms:i:");
+        append_i32(s, extra.dp_max0);
+        append_bytes(s, b"\tmd:i:");
+        append_i32(s, extra.dp_max - extra.dp_max2);
     }
 
     /// Original C global function `mb_fmt_paf` from `minibwa/format.c:19`.
@@ -7712,62 +8382,60 @@ pub mod format {
         n_seg: i32,
         seg_idx: i32,
     ) {
-        kom_sprintf_lite(s, "%s", &[kom_sprintf_arg::s(&t.name)]);
+        append_str(s, &t.name);
         if n_seg > 1 && seg_idx >= 0 {
-            kom_sprintf_lite(s, "/%d", &[kom_sprintf_arg::d(seg_idx + 1)]);
+            append_byte(s, b'/');
+            append_i32(s, seg_idx + 1);
         }
-        kom_sprintf_lite(s, "\t%ld", &[kom_sprintf_arg::ld(t.l_seq as i64)]);
+        append_byte(s, b'\t');
+        append_i64(s, t.l_seq as i64);
         let Some(p) = p else {
-            kom_sprintf_lite(s, "\t*\t*\t*\t*\t*\t*\t*\t0\t0\t0\n", &[]);
+            append_bytes(s, b"\t*\t*\t*\t*\t*\t*\t*\t0\t0\t0\n");
             return;
         };
         let ctg = &l2b.ctg[p.tid as usize];
-        kom_sprintf_lite(
-            s,
-            "\t%d\t%d\t%c\t%s\t%ld\t%ld\t%ld\t%d\t%d\t%d\ttp:A:%c\ts1:i:%d\tcm:i:%d",
-            &[
-                kom_sprintf_arg::d(p.qs),
-                kom_sprintf_arg::d(p.qe),
-                kom_sprintf_arg::c(if p.rev != 0 { '-' as i32 } else { '+' as i32 }),
-                kom_sprintf_arg::s(&ctg.name),
-                kom_sprintf_arg::ld(ctg.len as i64),
-                kom_sprintf_arg::ld(p.ts),
-                kom_sprintf_arg::ld(p.te),
-                kom_sprintf_arg::d(p.mlen),
-                kom_sprintf_arg::d(p.blen),
-                kom_sprintf_arg::d(p.mapq),
-                kom_sprintf_arg::c(if p.parent == p.id {
-                    'P' as i32
-                } else {
-                    'S' as i32
-                }),
-                kom_sprintf_arg::d(p.score),
-                kom_sprintf_arg::d(p.cnt),
-            ],
-        );
+        append_byte(s, b'\t');
+        append_i32(s, p.qs);
+        append_byte(s, b'\t');
+        append_i32(s, p.qe);
+        append_byte(s, b'\t');
+        append_byte(s, if p.rev() != 0 { b'-' } else { b'+' });
+        append_byte(s, b'\t');
+        append_str(s, &ctg.name);
+        append_byte(s, b'\t');
+        append_i64(s, ctg.len as i64);
+        append_byte(s, b'\t');
+        append_i64(s, p.ts);
+        append_byte(s, b'\t');
+        append_i64(s, p.te);
+        append_byte(s, b'\t');
+        append_i32(s, p.mlen);
+        append_byte(s, b'\t');
+        append_i32(s, p.blen);
+        append_byte(s, b'\t');
+        append_i32(s, p.mapq);
+        append_bytes(s, b"\ttp:A:");
+        append_byte(s, if p.parent == p.id { b'P' } else { b'S' });
+        append_bytes(s, b"\ts1:i:");
+        append_i32(s, p.score);
+        append_bytes(s, b"\tcm:i:");
+        append_i32(s, p.cnt);
         if p.parent == p.id {
-            kom_sprintf_lite(
-                s,
-                "\ts2:i:%d",
-                &[kom_sprintf_arg::d(if p.subsc >= 0 { p.subsc } else { 0 })],
-            );
+            append_bytes(s, b"\ts2:i:");
+            append_i32(s, if p.subsc >= 0 { p.subsc } else { 0 });
         }
         if let Some(extra) = &p.p {
             write_tags(s, p);
             if extra.n_cigar > 0 {
-                kom_sprintf_lite(s, "\tcg:Z:", &[]);
-                for &c in extra.cigar.iter().take(extra.n_cigar as usize) {
-                    let op = MB_CIGAR_STR[(c & 0xf) as usize] as i32;
-                    kom_sprintf_lite(
-                        s,
-                        "%d%c",
-                        &[kom_sprintf_arg::d((c >> 4) as i32), kom_sprintf_arg::c(op)],
-                    );
+                append_bytes(s, b"\tcg:Z:");
+                for &c in extra.cigar().iter().take(extra.n_cigar as usize) {
+                    append_i32(s, (c >> 4) as i32);
+                    append_byte(s, MB_CIGAR_STR[(c & 0xf) as usize]);
                 }
             }
-            if extra.cs != 0 {
+            if extra.cs() != 0 {
                 let mut bytes = Vec::new();
-                'outer: for &w in extra.cigar.iter().skip(extra.n_cigar as usize) {
+                'outer: for &w in extra.cigar_all().iter().skip(extra.n_cigar as usize) {
                     for i in 0..4 {
                         let b = ((w >> (i * 8)) & 0xff) as u8;
                         if b == 0 {
@@ -7777,15 +8445,17 @@ pub mod format {
                     }
                 }
                 let tag = String::from_utf8_lossy(&bytes);
-                kom_sprintf_lite(s, "\t%s", &[kom_sprintf_arg::s(&tag)]);
+                append_byte(s, b'\t');
+                append_str(s, &tag);
             }
         }
         if (opt_flag & MB_F_COPY_COMMENT) != 0 {
             if let Some(comment) = &t.comment {
-                kom_sprintf_lite(s, "\t%s", &[kom_sprintf_arg::s(comment)]);
+                append_byte(s, b'\t');
+                append_str(s, comment);
             }
         }
-        kom_sprintf_lite(s, "\n", &[]);
+        append_byte(s, b'\n');
     }
 
     /// Original C static function `mb_escape` from `minibwa/format.c:52`.
@@ -7947,7 +8617,7 @@ pub mod format {
     /// Original C static function `get_sam_pri` from `minibwa/format.c:154`.
     pub fn get_sam_pri(n_hit: i32, hit: &[mb_hit_t]) -> Option<&mb_hit_t> {
         for h in hit.iter().take(n_hit as usize) {
-            if h.sam_pri != 0 {
+            if h.sam_pri() != 0 {
                 return Some(h);
             }
         }
@@ -7968,8 +8638,8 @@ pub mod format {
             kom_sprintf_lite(s, "*", &[]);
             return;
         };
-        let clip_len0 = if r.rev != 0 { qlen - r.qe } else { r.qs };
-        let clip_len1 = if r.rev != 0 { r.qs } else { qlen - r.qe };
+        let clip_len0 = if r.rev() != 0 { qlen - r.qe } else { r.qs };
+        let clip_len1 = if r.rev() != 0 { r.qs } else { qlen - r.qe };
         if in_tag != 0 {
             let clip_char = if ((sam_flag & 0x800) != 0
                 || ((sam_flag & 0x100) != 0 && (opt_flag & MB_F_2ND_SEQ) != 0))
@@ -7987,7 +8657,7 @@ pub mod format {
                     &[kom_sprintf_arg::u((clip_len0 as u32) << 4 | clip_char)],
                 );
             }
-            for &c in extra.cigar.iter().take(extra.n_cigar as usize) {
+            for &c in extra.cigar().iter().take(extra.n_cigar as usize) {
                 kom_sprintf_lite(s, ",%u", &[kom_sprintf_arg::u(c)]);
             }
             if clip_len1 != 0 {
@@ -8014,7 +8684,7 @@ pub mod format {
                     &[kom_sprintf_arg::d(clip_len0), kom_sprintf_arg::c(clip_char)],
                 );
             }
-            for &c in extra.cigar.iter().take(extra.n_cigar as usize) {
+            for &c in extra.cigar().iter().take(extra.n_cigar as usize) {
                 kom_sprintf_lite(
                     s,
                     "%d%c",
@@ -8042,7 +8712,7 @@ pub mod format {
         t: &mb_bseq1_t,
         n_seg: i32,
         n_hit: &[i32],
-        hit: &[Vec<mb_hit_t>],
+        hit: &[mb_hit_buf_t],
         hit_idx: i32,
         opt_flag: u64,
         seg_idx: i32,
@@ -8067,19 +8737,19 @@ pub mod format {
         kom_sprintf_lite(s, "%s", &[kom_sprintf_arg::s(&t.name)]);
         let mut flag = if n_seg > 1 { 0x1 } else { 0x0 };
         if let Some(r) = r {
-            if r.rev != 0 {
+            if r.rev() != 0 {
                 flag |= 0x10;
             }
             if r.parent != r.id {
                 flag |= 0x100;
-            } else if r.sam_pri == 0 {
+            } else if r.sam_pri() == 0 {
                 flag |= 0x800;
             }
         } else {
             flag |= 0x4;
         }
         if n_seg > 1 {
-            if r.is_some_and(|x| x.proper_pair != 0) {
+            if r.is_some_and(|x| x.proper_pair() != 0) {
                 flag |= 0x2;
             }
             if seg_idx == 0 {
@@ -8088,7 +8758,7 @@ pub mod format {
                 flag |= 0x80;
             }
             if let Some(next) = r_next {
-                if next.rev != 0 {
+                if next.rev() != 0 {
                     flag |= 0x20;
                 }
             } else {
@@ -8133,12 +8803,12 @@ pub mod format {
                 if let Some(next) = r_next {
                     if this_tid as i64 == next.tid {
                         if let Some(r) = r {
-                            let this_pos5 = if r.rev != 0 {
+                            let this_pos5 = if r.rev() != 0 {
                                 r.te as i32 - 1
                             } else {
                                 this_pos
                             };
-                            let next_pos5 = if next.rev != 0 {
+                            let next_pos5 = if next.rev() != 0 {
                                 next.te as i32 - 1
                             } else {
                                 next.ts as i32
@@ -8182,10 +8852,10 @@ pub mod format {
         let seq = t.seq.as_bytes();
         if let Some(r) = r {
             if (flag & 0x900) == 0 || (opt_flag & MB_F_SUPP_SOFT) != 0 {
-                sam_write_sq(s, seq, t.l_seq as i32, r.rev as i32, r.rev as i32);
+                sam_write_sq(s, seq, t.l_seq as i32, r.rev() as i32, r.rev() as i32);
                 kom_sprintf_lite(s, "\t", &[]);
                 if let Some(qual) = &t.qual {
-                    sam_write_sq(s, qual.as_bytes(), t.l_seq as i32, r.rev as i32, 0);
+                    sam_write_sq(s, qual.as_bytes(), t.l_seq as i32, r.rev() as i32, 0);
                 } else {
                     kom_sprintf_lite(s, "*", &[]);
                 }
@@ -8196,8 +8866,8 @@ pub mod format {
                     s,
                     &seq[r.qs as usize..],
                     r.qe - r.qs,
-                    r.rev as i32,
-                    r.rev as i32,
+                    r.rev() as i32,
+                    r.rev() as i32,
                 );
                 kom_sprintf_lite(s, "\t", &[]);
                 if let Some(qual) = &t.qual {
@@ -8205,7 +8875,7 @@ pub mod format {
                         s,
                         &qual.as_bytes()[r.qs as usize..],
                         r.qe - r.qs,
-                        r.rev as i32,
+                        r.rev() as i32,
                         0,
                     );
                 } else {
@@ -8247,9 +8917,9 @@ pub mod format {
                 }
             }
             if let Some(extra) = &r.p {
-                if extra.cs != 0 {
+                if extra.cs() != 0 {
                     let mut bytes = Vec::new();
-                    'outer: for &w in extra.cigar.iter().skip(extra.n_cigar as usize) {
+                    'outer: for &w in extra.cigar_all().iter().skip(extra.n_cigar as usize) {
                         for i in 0..4 {
                             let b = ((w >> (i * 8)) & 0xff) as u8;
                             if b == 0 {
@@ -8284,12 +8954,12 @@ pub mod format {
                                 l_i = (q.qe - q.qs) - (q.te - q.ts) as i32;
                                 (q.te - q.ts) as i32
                             };
-                            let clip5 = if q.rev != 0 {
+                            let clip5 = if q.rev() != 0 {
                                 t.l_seq as i32 - q.qe
                             } else {
                                 q.qs
                             };
-                            let clip3 = if q.rev != 0 {
+                            let clip3 = if q.rev() != 0 {
                                 q.qs
                             } else {
                                 t.l_seq as i32 - q.qe
@@ -8300,7 +8970,7 @@ pub mod format {
                                 &[
                                     kom_sprintf_arg::s(&l2b.ctg[q.tid as usize].name),
                                     kom_sprintf_arg::d(q.ts as i32 + 1),
-                                    kom_sprintf_arg::c(if q.rev != 0 {
+                                    kom_sprintf_arg::c(if q.rev() != 0 {
                                         '-' as i32
                                     } else {
                                         '+' as i32
@@ -8328,7 +8998,7 @@ pub mod format {
                                 ",%d,%d;",
                                 &[
                                     kom_sprintf_arg::d(q.mapq),
-                                    kom_sprintf_arg::d(q.blen - q.mlen + qextra.n_ambi as i32),
+                                    kom_sprintf_arg::d(q.blen - q.mlen + qextra.n_ambi() as i32),
                                 ],
                             );
                         }
@@ -8358,7 +9028,7 @@ pub mod format {
         t: &mb_bseq1_t,
         n_seg: i32,
         n_hit: &[i32],
-        hit: &[Vec<mb_hit_t>],
+        hit: &[mb_hit_buf_t],
         hit_idx: i32,
         opt_flag: u64,
         seg_idx: i32,
@@ -8385,10 +9055,6 @@ pub mod format {
         use crate::l2bit::l2b_ctg_t;
         use crate::pe::mb_extra_t;
 
-        fn text(s: &kstring_t) -> String {
-            String::from_utf8_lossy(&s.s[..s.l]).into_owned()
-        }
-
         #[test]
         fn paf_formats_unmapped_and_mapped_records() {
             let l2b = l2b_t {
@@ -8402,14 +9068,17 @@ pub mod format {
             };
             let read = mb_bseq1_t {
                 l_seq: 8,
-                name: "read1".to_string(),
-                seq: "ACGTACGT".to_string(),
-                comment: Some("rl:i:8".to_string()),
+                name: "read1".into(),
+                seq: "ACGTACGT".into(),
+                comment: Some("rl:i:8".into()),
                 ..Default::default()
             };
             let mut out = kstring_t::default();
             mb_fmt_paf(&mut out, &l2b, &read, None, MB_F_COPY_COMMENT, 1, 0);
-            assert_eq!(text(&out), "read1\t8\t*\t*\t*\t*\t*\t*\t*\t0\t0\t0\n");
+            assert_eq!(
+                String::from_utf8_lossy(&out.s[..out.l]),
+                "read1\t8\t*\t*\t*\t*\t*\t*\t*\t0\t0\t0\n"
+            );
 
             let mut tag_words = vec![8 << 4 | MB_CIGAR_MATCH];
             for chunk in b"cs:Z::8\0".chunks(4) {
@@ -8433,25 +9102,26 @@ pub mod format {
                 score: 24,
                 subsc: 10,
                 cnt: 2,
-                p: Some(mb_extra_t {
-                    dp_score: 24,
-                    dp_max0: 24,
-                    dp_max: 24,
-                    dp_max2: 3,
-                    cs: 1,
-                    n_cigar: 1,
-                    cigar: tag_words,
-                    ..Default::default()
-                }),
+                p: Some(
+                    mb_extra_t {
+                        dp_score: 24,
+                        dp_max0: 24,
+                        dp_max: 24,
+                        dp_max2: 3,
+                        n_ambi_cs: mb_extra_t::CS_FLAG,
+                        ..Default::default()
+                    }
+                    .with_cigar(&tag_words),
+                ),
                 ..Default::default()
             };
             out.l = 0;
             mb_fmt_paf(&mut out, &l2b, &read, Some(&hit), MB_F_COPY_COMMENT, 1, 0);
-            assert!(text(&out).contains(
+            let got = String::from_utf8_lossy(&out.s[..out.l]);
+            assert!(got.contains(
                 "read1\t8\t0\t8\t+\tchrM\t16569\t3\t11\t8\t8\t60\ttp:A:P\ts1:i:24\tcm:i:2"
             ));
-            assert!(text(&out)
-                .contains("\tNM:i:0\tAS:i:24\tms:i:24\tmd:i:21\tcg:Z:8M\tcs:Z::8\trl:i:8\n"));
+            assert!(got.contains("\tNM:i:0\tAS:i:24\tms:i:24\tmd:i:21\tcg:Z:8M\tcs:Z::8\trl:i:8\n"));
         }
 
         #[test]
@@ -8473,7 +9143,7 @@ pub mod format {
                 Some("0.0-test"),
                 &["minibwa", "mem", "ref.fa", "reads.fq"],
             );
-            let got = text(&out);
+            let got = String::from_utf8_lossy(&out.s[..out.l]);
             assert_eq!(ret, 0);
             assert!(got.contains("@SQ\tSN:chr1\tLN:100\n"));
             assert!(got.contains("@RG\tID:grp1\tSM:sample\n"));
@@ -8495,9 +9165,9 @@ pub mod format {
             };
             let read = mb_bseq1_t {
                 l_seq: 6,
-                name: "q1".to_string(),
-                seq: "ACGTAA".to_string(),
-                qual: Some("abcdef".to_string()),
+                name: "q1".into(),
+                seq: "ACGTAA".into(),
+                qual: Some("abcdef".into()),
                 ..Default::default()
             };
             let hit = mb_hit_t {
@@ -8508,20 +9178,20 @@ pub mod format {
                 parent: 1,
                 qs: 1,
                 qe: 5,
-                rev: 1,
+                flags: mb_hit_t::flags_with(1, 0, 1, 0, 0, 0, 0, 0, 0),
                 mlen: 4,
                 blen: 4,
                 mapq: 42,
-                sam_pri: 1,
-                p: Some(mb_extra_t {
-                    dp_score: 12,
-                    dp_max0: 12,
-                    dp_max: 12,
-                    dp_max2: 0,
-                    n_cigar: 1,
-                    cigar: vec![4 << 4 | MB_CIGAR_MATCH],
-                    ..Default::default()
-                }),
+                p: Some(
+                    mb_extra_t {
+                        dp_score: 12,
+                        dp_max0: 12,
+                        dp_max: 12,
+                        dp_max2: 0,
+                        ..Default::default()
+                    }
+                    .with_cigar(&[4 << 4 | MB_CIGAR_MATCH]),
+                ),
                 ..Default::default()
             };
             let mut out = kstring_t::default();
@@ -8534,13 +9204,13 @@ pub mod format {
                 &read,
                 1,
                 &[1],
-                &[vec![hit]],
+                &[mb_hit_buf_t::from_vec(vec![hit])],
                 0,
                 MB_F_SAM,
                 0,
                 0,
             );
-            let got = text(&out);
+            let got = String::from_utf8_lossy(&out.s[..out.l]);
             assert!(got.starts_with("q1\t16\tchr1\t10\t42\t1S4M1S\t*\t0\t0\tTTACGT\tfedcba"));
             assert!(got.contains("\tNM:i:0\tAS:i:12\tms:i:12\tmd:i:12\n"));
         }
@@ -8555,11 +9225,27 @@ pub mod index {
         mb_bwt_save, mb_bwt_t,
     };
     use crate::bwtgen::mb_bwtgen;
-    use crate::ketopt::{ketopt, ketopt_t, ko_longopt_t};
+    use crate::ketopt::{ketopt, ko_longopt_t, KETOPT_INIT};
     use crate::kommon::{kom_panic, kom_parse_num};
     use crate::l2bit::{
         l2b_get0, l2b_import, l2b_load, l2b_save, l2b_save_pac, l2b_save_pac_meth, l2b_t,
     };
+    use rayon::prelude::*;
+
+    fn run_with_index_pool<R: Send>(n_thread: i32, f: impl FnOnce() -> R + Send) -> R {
+        if n_thread <= 1 || rayon::current_thread_index().is_some() {
+            return f();
+        }
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(n_thread as usize)
+            .build()
+            .expect("failed to build Rayon thread pool");
+        pool.install(f)
+    }
+
+    fn use_parallel_index_post(n_thread: i32, len: usize) -> bool {
+        n_thread > 1 && len >= (1 << 20) && rayon::current_thread_index().is_some()
+    }
 
     /// Original C static function `l2b_c2t` from `minibwa/index.c:17`.
     pub fn l2b_c2t(b: u8) -> u8 {
@@ -8579,6 +9265,316 @@ pub mod index {
         }
     }
 
+    #[cfg(target_arch = "x86")]
+    #[inline]
+    unsafe fn mb_unpack_2bit_16bytes_sse2(src: *const u8, dst: *mut u8) {
+        use std::arch::x86::{
+            __m128i, _mm_and_si128, _mm_loadu_si128, _mm_set1_epi8, _mm_srli_epi16,
+            _mm_storeu_si128, _mm_unpackhi_epi16, _mm_unpackhi_epi8, _mm_unpacklo_epi16,
+            _mm_unpacklo_epi8,
+        };
+
+        let x = unsafe { _mm_loadu_si128(src as *const __m128i) };
+        let mask = unsafe { _mm_set1_epi8(3) };
+        let b0 = unsafe { _mm_and_si128(x, mask) };
+        let b1 = unsafe { _mm_and_si128(_mm_srli_epi16::<2>(x), mask) };
+        let b2 = unsafe { _mm_and_si128(_mm_srli_epi16::<4>(x), mask) };
+        let b3 = unsafe { _mm_and_si128(_mm_srli_epi16::<6>(x), mask) };
+
+        let lo01 = unsafe { _mm_unpacklo_epi8(b0, b1) };
+        let lo23 = unsafe { _mm_unpacklo_epi8(b2, b3) };
+        let hi01 = unsafe { _mm_unpackhi_epi8(b0, b1) };
+        let hi23 = unsafe { _mm_unpackhi_epi8(b2, b3) };
+
+        unsafe { _mm_storeu_si128(dst as *mut __m128i, _mm_unpacklo_epi16(lo01, lo23)) };
+        unsafe { _mm_storeu_si128(dst.add(16) as *mut __m128i, _mm_unpackhi_epi16(lo01, lo23)) };
+        unsafe { _mm_storeu_si128(dst.add(32) as *mut __m128i, _mm_unpacklo_epi16(hi01, hi23)) };
+        unsafe { _mm_storeu_si128(dst.add(48) as *mut __m128i, _mm_unpackhi_epi16(hi01, hi23)) };
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    unsafe fn mb_unpack_2bit_16bytes_sse2(src: *const u8, dst: *mut u8) {
+        use std::arch::x86_64::{
+            __m128i, _mm_and_si128, _mm_loadu_si128, _mm_set1_epi8, _mm_srli_epi16,
+            _mm_storeu_si128, _mm_unpackhi_epi16, _mm_unpackhi_epi8, _mm_unpacklo_epi16,
+            _mm_unpacklo_epi8,
+        };
+
+        let x = unsafe { _mm_loadu_si128(src as *const __m128i) };
+        let mask = unsafe { _mm_set1_epi8(3) };
+        let b0 = unsafe { _mm_and_si128(x, mask) };
+        let b1 = unsafe { _mm_and_si128(_mm_srli_epi16::<2>(x), mask) };
+        let b2 = unsafe { _mm_and_si128(_mm_srli_epi16::<4>(x), mask) };
+        let b3 = unsafe { _mm_and_si128(_mm_srli_epi16::<6>(x), mask) };
+
+        let lo01 = unsafe { _mm_unpacklo_epi8(b0, b1) };
+        let lo23 = unsafe { _mm_unpacklo_epi8(b2, b3) };
+        let hi01 = unsafe { _mm_unpackhi_epi8(b0, b1) };
+        let hi23 = unsafe { _mm_unpackhi_epi8(b2, b3) };
+
+        unsafe { _mm_storeu_si128(dst as *mut __m128i, _mm_unpacklo_epi16(lo01, lo23)) };
+        unsafe { _mm_storeu_si128(dst.add(16) as *mut __m128i, _mm_unpackhi_epi16(lo01, lo23)) };
+        unsafe { _mm_storeu_si128(dst.add(32) as *mut __m128i, _mm_unpacklo_epi16(hi01, hi23)) };
+        unsafe { _mm_storeu_si128(dst.add(48) as *mut __m128i, _mm_unpackhi_epi16(hi01, hi23)) };
+    }
+
+    #[inline]
+    fn mb_l2b_fill_forward_2bit(seq: &mut [u8], l2b: &l2b_t) -> usize {
+        let len = l2b.tot_len as usize;
+        let mut i = 0usize;
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            // SIMD note: SSE2 expands 16 packed input bytes into 64 two-bit bases.
+            let simd_len = len & !63usize;
+            let src = l2b.pac.as_ptr() as *const u8;
+            while i < simd_len {
+                unsafe { mb_unpack_2bit_16bytes_sse2(src.add(i >> 2), seq.as_mut_ptr().add(i)) };
+                i += 64;
+            }
+        }
+        while i < len {
+            seq[i] = l2b_get0(l2b, i as u64) as u8;
+            i += 1;
+        }
+        len
+    }
+
+    #[inline]
+    fn mb_l2b_fill_reverse_complement_2bit(seq: &mut [u8], l2b: &l2b_t) -> usize {
+        let len = l2b.tot_len as usize;
+        let mut src_end = len;
+        let mut dst = 0usize;
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            while src_end & 63 != 0 {
+                src_end -= 1;
+                seq[dst] = 3 - l2b_get0(l2b, src_end as u64) as u8;
+                dst += 1;
+            }
+            let src = l2b.pac.as_ptr() as *const u8;
+            let mut tmp = [0u8; 64];
+            while src_end >= 64 {
+                src_end -= 64;
+                unsafe { mb_unpack_2bit_16bytes_sse2(src.add(src_end >> 2), tmp.as_mut_ptr()) };
+                for k in 0..64 {
+                    seq[dst + k] = 3 - tmp[63 - k];
+                }
+                dst += 64;
+            }
+        }
+        while src_end > 0 {
+            src_end -= 1;
+            seq[dst] = 3 - l2b_get0(l2b, src_end as u64) as u8;
+            dst += 1;
+        }
+        len
+    }
+
+    #[inline]
+    fn mb_l2b_fill_forward_meth_2bit(seq: &mut [u8], l2b: &l2b_t, is_g2a: bool) -> usize {
+        let len = l2b.tot_len as usize;
+        let mut i = 0usize;
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            let simd_len = len & !63usize;
+            let src = l2b.pac.as_ptr() as *const u8;
+            while i < simd_len {
+                unsafe { mb_unpack_2bit_16bytes_sse2(src.add(i >> 2), seq.as_mut_ptr().add(i)) };
+                for b in &mut seq[i..i + 64] {
+                    if is_g2a {
+                        *b = l2b_g2a(*b);
+                    } else {
+                        *b = l2b_c2t(*b);
+                    }
+                }
+                i += 64;
+            }
+        }
+        while i < len {
+            let b = l2b_get0(l2b, i as u64) as u8;
+            seq[i] = if is_g2a { l2b_g2a(b) } else { l2b_c2t(b) };
+            i += 1;
+        }
+        len
+    }
+
+    #[inline]
+    fn mb_l2b_fill_reverse_meth_2bit(seq: &mut [u8], l2b: &l2b_t, is_g2a: bool) -> usize {
+        let len = l2b.tot_len as usize;
+        let mut src_end = len;
+        let mut dst = 0usize;
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            while src_end & 63 != 0 {
+                src_end -= 1;
+                let b = l2b_get0(l2b, src_end as u64) as u8;
+                seq[dst] = 3 - if is_g2a { l2b_g2a(b) } else { l2b_c2t(b) };
+                dst += 1;
+            }
+            let src = l2b.pac.as_ptr() as *const u8;
+            let mut tmp = [0u8; 64];
+            while src_end >= 64 {
+                src_end -= 64;
+                unsafe { mb_unpack_2bit_16bytes_sse2(src.add(src_end >> 2), tmp.as_mut_ptr()) };
+                for k in 0..64 {
+                    let b = tmp[63 - k];
+                    seq[dst + k] = 3 - if is_g2a { l2b_g2a(b) } else { l2b_c2t(b) };
+                }
+                dst += 64;
+            }
+        }
+        while src_end > 0 {
+            src_end -= 1;
+            let b = l2b_get0(l2b, src_end as u64) as u8;
+            seq[dst] = 3 - if is_g2a { l2b_g2a(b) } else { l2b_c2t(b) };
+            dst += 1;
+        }
+        len
+    }
+
+    unsafe fn sample_sa_i32(
+        a: *const i32,
+        len: usize,
+        sa_shift: usize,
+        step: usize,
+        ssa: &mut [u64],
+    ) {
+        let ssa_ptr = ssa.as_mut_ptr();
+        let mut i = 0usize;
+        while i <= len {
+            *ssa_ptr.add(i >> sa_shift) = *a.add(i) as u64;
+            i += step;
+        }
+    }
+
+    unsafe fn sample_sa_i64(
+        a: *const i64,
+        len: usize,
+        sa_shift: usize,
+        step: usize,
+        ssa: &mut [u64],
+    ) {
+        let ssa_ptr = ssa.as_mut_ptr();
+        let mut i = 0usize;
+        while i <= len {
+            *ssa_ptr.add(i >> sa_shift) = *a.add(i) as u64;
+            i += step;
+        }
+    }
+
+    unsafe fn sa_to_bwt_i32(a: *mut i32, seq: &mut [u8], len: usize) -> u64 {
+        let seq_read = seq.as_ptr();
+        let mut primary = usize::MAX;
+        for i in 0..=len {
+            let ai = *a.add(i);
+            if ai == 0 {
+                primary = i;
+            } else {
+                *a.add(i) = *seq_read.add(ai as usize - 1) as i32;
+            }
+        }
+        assert_ne!(primary, usize::MAX);
+
+        let seq_write = seq.as_mut_ptr();
+        for i in 0..primary {
+            *seq_write.add(i) = *a.add(i) as u8;
+        }
+        for i in primary..len {
+            *seq_write.add(i) = *a.add(i + 1) as u8;
+        }
+        primary as u64
+    }
+
+    fn sa_to_bwt_i32_parallel(a: &mut [i32], seq: &mut [u8], len: usize) -> u64 {
+        const CHUNK: usize = 1 << 18;
+        let seq_read = &seq[..];
+        let primary = a[..=len]
+            .par_chunks_mut(CHUNK)
+            .enumerate()
+            .filter_map(|(chunk_idx, chunk)| {
+                let base = chunk_idx * CHUNK;
+                let mut primary = None;
+                for (offset, ai) in chunk.iter_mut().enumerate() {
+                    if *ai == 0 {
+                        primary = Some(base + offset);
+                    } else {
+                        *ai = seq_read[*ai as usize - 1] as i32;
+                    }
+                }
+                primary
+            })
+            .reduce_with(|a, b| a.min(b))
+            .expect("suffix array primary index not found");
+
+        let a_read = &a[..=len];
+        let (left, right) = seq.split_at_mut(primary);
+        left.par_iter_mut()
+            .enumerate()
+            .for_each(|(i, dst)| *dst = a_read[i] as u8);
+        right
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, dst)| *dst = a_read[primary + i + 1] as u8);
+        primary as u64
+    }
+
+    unsafe fn sa_to_bwt_i64(a: *mut i64, seq: &mut [u8], len: usize) -> u64 {
+        let seq_read = seq.as_ptr();
+        let mut primary = usize::MAX;
+        for i in 0..=len {
+            let ai = *a.add(i);
+            if ai == 0 {
+                primary = i;
+            } else {
+                *a.add(i) = *seq_read.add(ai as usize - 1) as i64;
+            }
+        }
+        assert_ne!(primary, usize::MAX);
+
+        let seq_write = seq.as_mut_ptr();
+        for i in 0..primary {
+            *seq_write.add(i) = *a.add(i) as u8;
+        }
+        for i in primary..len {
+            *seq_write.add(i) = *a.add(i + 1) as u8;
+        }
+        primary as u64
+    }
+
+    fn sa_to_bwt_i64_parallel(a: &mut [i64], seq: &mut [u8], len: usize) -> u64 {
+        const CHUNK: usize = 1 << 18;
+        let seq_read = &seq[..];
+        let primary = a[..=len]
+            .par_chunks_mut(CHUNK)
+            .enumerate()
+            .filter_map(|(chunk_idx, chunk)| {
+                let base = chunk_idx * CHUNK;
+                let mut primary = None;
+                for (offset, ai) in chunk.iter_mut().enumerate() {
+                    if *ai == 0 {
+                        primary = Some(base + offset);
+                    } else {
+                        *ai = seq_read[*ai as usize - 1] as i64;
+                    }
+                }
+                primary
+            })
+            .reduce_with(|a, b| a.min(b))
+            .expect("suffix array primary index not found");
+
+        let a_read = &a[..=len];
+        let (left, right) = seq.split_at_mut(primary);
+        left.par_iter_mut()
+            .enumerate()
+            .for_each(|(i, dst)| *dst = a_read[i] as u8);
+        right
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, dst)| *dst = a_read[primary + i + 1] as u8);
+        primary as u64
+    }
+
     /// Original C global function `mb_bwt_libsais` from `minibwa/index.c:19`.
     pub fn mb_bwt_libsais(
         l2b: &l2b_t,
@@ -8587,70 +9583,137 @@ pub mod index {
         is_meth: i32,
         n_thread: i32,
     ) -> mb_bwt_t {
+        let time_stages = std::env::var_os("MINIBWA_RS_INDEX_TIMING").is_some();
+        let mut stage_start = std::time::Instant::now();
         let copies = (if is_meth != 0 { 2 } else { 1 }) * (if both_strand != 0 { 2 } else { 1 });
         let len = l2b.tot_len as usize * copies as usize;
         let mut seq = Vec::<u8>::with_capacity(len);
         if is_meth != 0 {
-            for i in 0..l2b.tot_len {
-                seq.push(l2b_c2t(l2b_get0(l2b, i) as u8));
-            }
-            for i in 0..l2b.tot_len {
-                seq.push(l2b_g2a(l2b_get0(l2b, i) as u8));
-            }
+            let copy_len = l2b.tot_len as usize;
+            seq.resize(copy_len, 0);
+            mb_l2b_fill_forward_meth_2bit(&mut seq, l2b, false);
+            let old_len = seq.len();
+            seq.resize(old_len + copy_len, 0);
+            mb_l2b_fill_forward_meth_2bit(&mut seq[old_len..], l2b, true);
             if both_strand != 0 {
-                for i in (0..l2b.tot_len).rev() {
-                    seq.push(3 - l2b_g2a(l2b_get0(l2b, i) as u8));
-                }
-                for i in (0..l2b.tot_len).rev() {
-                    seq.push(3 - l2b_c2t(l2b_get0(l2b, i) as u8));
-                }
+                let old_len = seq.len();
+                seq.resize(old_len + copy_len, 0);
+                mb_l2b_fill_reverse_meth_2bit(&mut seq[old_len..], l2b, true);
+                let old_len = seq.len();
+                seq.resize(old_len + copy_len, 0);
+                mb_l2b_fill_reverse_meth_2bit(&mut seq[old_len..], l2b, false);
             }
         } else {
-            for i in 0..l2b.tot_len {
-                seq.push(l2b_get0(l2b, i) as u8);
-            }
+            seq.resize(l2b.tot_len as usize, 0);
+            mb_l2b_fill_forward_2bit(&mut seq, l2b);
             if both_strand != 0 {
-                for i in (0..l2b.tot_len).rev() {
-                    seq.push(3 - l2b_get0(l2b, i) as u8);
-                }
+                let old_len = seq.len();
+                seq.resize(old_len + l2b.tot_len as usize, 0);
+                mb_l2b_fill_reverse_complement_2bit(&mut seq[old_len..], l2b);
             }
         }
         assert_eq!(seq.len(), len);
-        const FS: i64 = 10000;
-        let mut a = vec![0i64; len + FS as usize];
-        let rc = if n_thread > 1 {
-            libsais_rs::libsais64::libsais64_omp(&seq, &mut a, FS, None, n_thread as i64)
-        } else {
-            libsais_rs::libsais64(&seq, &mut a, FS, None)
-        };
-        assert_eq!(rc, 0, "libsais failed with status {rc}");
-
-        let step = 1u64 << sa_bit;
-        let mask = step - 1;
-        let n_ssa = ((len as u64) + step) >> sa_bit;
-        let mut ssa = vec![0u64; n_ssa as usize];
-        for i in 0..=len {
-            if ((i as u64) & mask) == 0 {
-                ssa[i >> sa_bit as usize] = if i == 0 { len as u64 } else { a[i - 1] as u64 };
-            }
+        if time_stages {
+            eprintln!(
+                "[index::mb_bwt_libsais] fill_seq {:.3}s",
+                stage_start.elapsed().as_secs_f64()
+            );
+            stage_start = std::time::Instant::now();
         }
+        let sa_shift = sa_bit as usize;
+        let step = 1u64 << sa_shift;
+        let step_usize = step as usize;
+        let n_ssa = ((len as u64) + step) >> sa_shift;
+        const FS: usize = 10000;
+        let use_32bit_sa = std::env::var_os("MINIBWA_RS_INDEX_32BIT_SA").is_some()
+            && len <= i32::MAX as usize - FS;
+        let (primary, mut ssa) = if use_32bit_sa {
+            let mut a = vec![0i32; len + FS + 1];
+            let rc =
+                libsais_rs::libsais_upstream_c_omp(&seq, &mut a[1..], FS as i32, None, n_thread);
+            assert_eq!(rc, 0, "libsais failed with status {rc}");
+            if time_stages {
+                eprintln!(
+                    "[index::mb_bwt_libsais] libsais32 {:.3}s",
+                    stage_start.elapsed().as_secs_f64()
+                );
+                stage_start = std::time::Instant::now();
+            }
+            a[0] = len as i32;
+            let mut ssa = vec![0u64; n_ssa as usize];
+            let primary = unsafe {
+                let a_ptr = a.as_mut_ptr();
+                sample_sa_i32(a_ptr, len, sa_shift, step_usize, &mut ssa);
+                if use_parallel_index_post(n_thread, len) {
+                    sa_to_bwt_i32_parallel(&mut a[..=len], &mut seq, len)
+                } else {
+                    sa_to_bwt_i32(a_ptr, &mut seq, len)
+                }
+            };
+            if time_stages {
+                eprintln!(
+                    "[index::mb_bwt_libsais] post32 {:.3}s",
+                    stage_start.elapsed().as_secs_f64()
+                );
+                stage_start = std::time::Instant::now();
+            }
+            drop(a);
+            (primary, ssa)
+        } else {
+            let mut a_storage = Vec::<std::mem::MaybeUninit<i64>>::with_capacity(len + FS + 1);
+            unsafe {
+                a_storage.set_len(len + FS + 1);
+            }
+            let rc = libsais_rs::libsais64::libsais64_upstream_c_omp_uninit(
+                &seq,
+                &mut a_storage[1..],
+                FS as i64,
+                None,
+                n_thread as i64,
+            );
+            assert_eq!(rc, 0, "libsais failed with status {rc}");
+            if time_stages {
+                eprintln!(
+                    "[index::mb_bwt_libsais] libsais64 {:.3}s",
+                    stage_start.elapsed().as_secs_f64()
+                );
+                stage_start = std::time::Instant::now();
+            }
+            let a_ptr = a_storage.as_mut_ptr().cast::<i64>();
+            unsafe {
+                *a_ptr = len as i64;
+            }
+            let a = unsafe { std::slice::from_raw_parts_mut(a_ptr, len + 1) };
+            let mut ssa = vec![0u64; n_ssa as usize];
+            let primary = unsafe {
+                let a_ptr = a.as_mut_ptr();
+                sample_sa_i64(a_ptr, len, sa_shift, step_usize, &mut ssa);
+                if use_parallel_index_post(n_thread, len) {
+                    sa_to_bwt_i64_parallel(a, &mut seq, len)
+                } else {
+                    sa_to_bwt_i64(a_ptr, &mut seq, len)
+                }
+            };
+            if time_stages {
+                eprintln!(
+                    "[index::mb_bwt_libsais] post64 {:.3}s",
+                    stage_start.elapsed().as_secs_f64()
+                );
+                stage_start = std::time::Instant::now();
+            }
+            (primary, ssa)
+        };
         if !ssa.is_empty() {
             ssa[0] = u64::MAX;
         }
-        let mut primary = u64::MAX;
-        let mut raw = Vec::with_capacity(len);
-        for (i, suf) in std::iter::once(len as i64)
-            .chain(a[..len].iter().copied())
-            .enumerate()
-        {
-            if suf == 0 {
-                primary = i as u64;
-            } else {
-                raw.push(seq[suf as usize - 1]);
-            }
+        let mut bwt = mb_bwt_init_from_raw(1, &seq, len as u64, primary);
+        if time_stages {
+            eprintln!(
+                "[index::mb_bwt_libsais] init_bwt {:.3}s",
+                stage_start.elapsed().as_secs_f64()
+            );
         }
-        assert_ne!(primary, u64::MAX);
-        let mut bwt = mb_bwt_init_from_raw(1, &raw, len as u64, primary);
+        drop(seq);
         bwt.sa_bit = sa_bit as u32;
         bwt.n_sa = n_ssa;
         bwt.sa = ssa;
@@ -8683,7 +9746,7 @@ pub mod index {
         ];
         let argc = argv.len() as i32;
         let mut args = argv.to_vec();
-        let mut o = ketopt_t::default();
+        let mut o = KETOPT_INIT.clone();
         let mut out_pac = 0;
         let mut both_strand = 0;
         let mut seed = 11u64;
@@ -8734,7 +9797,7 @@ pub mod index {
         }];
         let argc = argv.len() as i32;
         let mut args = argv.to_vec();
-        let mut o = ketopt_t::default();
+        let mut o = KETOPT_INIT.clone();
         let mut block_size = 10_000_000i32;
         loop {
             let c = ketopt(&mut o, argc, &mut args, 1, "b:", Some(&long_opts));
@@ -8806,7 +9869,7 @@ pub mod index {
         }];
         let argc = argv.len() as i32;
         let mut args = argv.to_vec();
-        let mut o = ketopt_t::default();
+        let mut o = KETOPT_INIT.clone();
         let mut n_thread = 4;
         let mut both_strand = 1;
         let mut sa_bit = 4;
@@ -8831,7 +9894,9 @@ pub mod index {
         let Some(l2b) = l2b_load(&args[o.ind as usize]) else {
             kom_panic("main_genbwt", "failed to open the input file.");
         };
-        let bwt = mb_bwt_libsais(&l2b, sa_bit, both_strand, 0, n_thread);
+        let bwt = run_with_index_pool(n_thread, || {
+            mb_bwt_libsais(&l2b, sa_bit, both_strand, 0, n_thread)
+        });
         mb_bwt_save(&args[o.ind as usize + 1], &bwt);
         (0, String::new())
     }
@@ -8855,7 +9920,7 @@ pub mod index {
         }];
         let argc = argv.len() as i32;
         let mut args = argv.to_vec();
-        let mut o = ketopt_t::default();
+        let mut o = KETOPT_INIT.clone();
         let mut sa_bit = 4;
         let mut is_raw = 0;
         loop {
@@ -8912,7 +9977,7 @@ pub mod index {
         ];
         let argc = argv.len() as i32;
         let mut args = argv.to_vec();
-        let mut o = ketopt_t::default();
+        let mut o = KETOPT_INIT.clone();
         let mut low_mem = 0;
         let mut n_thread = 4;
         let mut sa_bit = 4;
@@ -8951,9 +10016,18 @@ pub mod index {
         let fn_l2b = format!("{prefix}.l2b");
         let fn_bwt = format!("{prefix}.mbw");
         let fn_meth_bwt = format!("{prefix}.meth.mbw");
-        let Some(l2b) = l2b_import(&args[o.ind as usize], seed) else {
+        let time_index = std::env::var_os("MINIBWA_RS_INDEX_TIMING").is_some();
+        let mut stage_start = std::time::Instant::now();
+        let Some(mut l2b) = l2b_import(&args[o.ind as usize], seed) else {
             kom_panic("main_index", "failed to read the genome FASTA.");
         };
+        if time_index {
+            eprintln!(
+                "[index::main_index] l2b_import {:.3}s",
+                stage_start.elapsed().as_secs_f64()
+            );
+            stage_start = std::time::Instant::now();
+        }
         if low_mem != 0 {
             l2b_save_pac(&fn_l2b, &l2b, 1);
             if mb_bwtgen(
@@ -8966,11 +10040,17 @@ pub mod index {
                 return (1, String::new());
             }
             l2b_save(&fn_l2b, &l2b);
+            l2b.ctg = Vec::new();
+            l2b.ambi = Vec::new();
+            l2b.mask = Vec::new();
+            l2b.cat_name = Vec::new();
+            l2b.cat_comm = Vec::new();
             let Some(mut bwt) = mb_bwt_load_raw(&fn_bwt) else {
                 return (1, String::new());
             };
             mb_bwt_gen_sa(&mut bwt, sa_bit as u32);
             mb_bwt_save(&fn_bwt, &bwt);
+            drop(bwt);
             if is_meth != 0 {
                 l2b_save_pac_meth(&fn_l2b, &l2b, 1);
                 if mb_bwtgen(
@@ -8990,10 +10070,38 @@ pub mod index {
             }
         } else {
             l2b_save(&fn_l2b, &l2b);
-            let bwt = mb_bwt_libsais(&l2b, sa_bit, 1, 0, n_thread);
+            if time_index {
+                eprintln!(
+                    "[index::main_index] l2b_save {:.3}s",
+                    stage_start.elapsed().as_secs_f64()
+                );
+                stage_start = std::time::Instant::now();
+            }
+            l2b.ctg = Vec::new();
+            l2b.ambi = Vec::new();
+            l2b.mask = Vec::new();
+            l2b.cat_name = Vec::new();
+            l2b.cat_comm = Vec::new();
+            let bwt =
+                run_with_index_pool(n_thread, || mb_bwt_libsais(&l2b, sa_bit, 1, 0, n_thread));
+            if time_index {
+                eprintln!(
+                    "[index::main_index] mb_bwt_libsais total {:.3}s",
+                    stage_start.elapsed().as_secs_f64()
+                );
+                stage_start = std::time::Instant::now();
+            }
             mb_bwt_save(&fn_bwt, &bwt);
+            if time_index {
+                eprintln!(
+                    "[index::main_index] mb_bwt_save {:.3}s",
+                    stage_start.elapsed().as_secs_f64()
+                );
+            }
+            drop(bwt);
             if is_meth != 0 {
-                let bwt = mb_bwt_libsais(&l2b, sa_bit, 1, 1, n_thread);
+                let bwt =
+                    run_with_index_pool(n_thread, || mb_bwt_libsais(&l2b, sa_bit, 1, 1, n_thread));
                 mb_bwt_save(&fn_meth_bwt, &bwt);
             }
         }
@@ -9006,18 +10114,6 @@ pub mod index {
         use crate::bwt::{mb_bwt_load, mb_bwt_sa};
         use crate::l2bit::{l2b_add_seq, l2b_format_seq, l2b_load, l2b_t};
         use std::fs;
-        use std::path::PathBuf;
-
-        fn tmp_path(name: &str) -> PathBuf {
-            let mut p = std::env::temp_dir();
-            p.push(format!(
-                "minibwa_rs_index_{}_{}_{}",
-                name,
-                std::process::id(),
-                crate::kommon::kom_realtime().to_bits()
-            ));
-            p
-        }
 
         #[test]
         fn bwt_libsais_builds_loadable_forward_reverse_index() {
@@ -9036,7 +10132,12 @@ pub mod index {
 
         #[test]
         fn fa2bit_and_genbwt_subcommands_roundtrip_small_fasta() {
-            let dir = tmp_path("roundtrip");
+            let mut dir = std::env::temp_dir();
+            dir.push(format!(
+                "minibwa_rs_index_roundtrip_{}_{}",
+                std::process::id(),
+                crate::kommon::kom_realtime().to_bits()
+            ));
             fs::create_dir_all(&dir).unwrap();
             let fa = dir.join("in.fa");
             let l2b = dir.join("out.l2b");
@@ -9068,7 +10169,12 @@ pub mod index {
 
         #[test]
         fn main_index_builds_l2b_and_mbw_prefix_files() {
-            let dir = tmp_path("main_index");
+            let mut dir = std::env::temp_dir();
+            dir.push(format!(
+                "minibwa_rs_index_main_index_{}_{}",
+                std::process::id(),
+                crate::kommon::kom_realtime().to_bits()
+            ));
             fs::create_dir_all(&dir).unwrap();
             let fa = dir.join("in.fa");
             let prefix = dir.join("idx");
@@ -9390,12 +10496,6 @@ pub mod ketopt {
         pub n_args: i32,
     }
 
-    impl Default for ketopt_t {
-        fn default() -> Self {
-            KETOPT_INIT.clone()
-        }
-    }
-
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct ko_longopt_t {
         pub name: Option<String>,
@@ -9575,7 +10675,7 @@ pub mod ketopt {
                 "-abval".to_string(),
                 "tail".to_string(),
             ];
-            let mut st = ketopt_t::default();
+            let mut st = KETOPT_INIT.clone();
             assert_eq!(ketopt(&mut st, 4, &mut argv, 1, "ab:", None), 'a' as i32);
             assert_eq!(st.arg, None);
             assert_eq!(ketopt(&mut st, 4, &mut argv, 1, "ab:", None), 'b' as i32);
@@ -9611,7 +10711,7 @@ pub mod ketopt {
                 "--verb".to_string(),
                 "--unknown".to_string(),
             ];
-            let mut st = ketopt_t::default();
+            let mut st = KETOPT_INIT.clone();
             assert_eq!(
                 ketopt(&mut st, 4, &mut argv, 0, "", Some(&longopts)),
                 't' as i32
@@ -9653,6 +10753,25 @@ pub mod kommon {
         pub m: usize,
         pub s: Vec<u8>,
     }
+
+    const fn make_kom_nt4_table() -> [u8; 256] {
+        let mut table = [4u8; 256];
+        table[0] = 0;
+        table[1] = 1;
+        table[2] = 2;
+        table[3] = 3;
+        table[b'A' as usize] = 0;
+        table[b'C' as usize] = 1;
+        table[b'G' as usize] = 2;
+        table[b'T' as usize] = 3;
+        table[b'a' as usize] = 0;
+        table[b'c' as usize] = 1;
+        table[b'g' as usize] = 2;
+        table[b't' as usize] = 3;
+        table
+    }
+
+    pub const KOM_NT4_TABLE: [u8; 256] = make_kom_nt4_table();
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum kom_sprintf_arg<'a> {
@@ -9987,6 +11106,135 @@ pub mod kommon {
             assert!(kom_realtime() >= 0.0);
             assert!(kom_percent_cpu() >= 0.0);
         }
+    }
+}
+
+pub mod stage_time {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::Instant;
+
+    pub static ENABLED: AtomicBool = AtomicBool::new(false);
+
+    #[derive(Copy, Clone)]
+    #[repr(usize)]
+    pub enum Bucket {
+        ReadIo = 0,
+        Encode = 1,
+        Seed = 2,
+        Anchor = 3,
+        Chain = 4,
+        Align = 5,
+        MapqPost = 6,
+        Pair = 7,
+        Output = 8,
+    }
+    pub const N: usize = 9;
+    const NAMES: [&str; N] = [
+        "read_io",
+        "encode",
+        "seed",
+        "anchor",
+        "chain",
+        "align",
+        "mapq+post",
+        "pair",
+        "output",
+    ];
+
+    static TOTALS: [AtomicU64; N] = [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+    ];
+
+    thread_local! {
+        static LOCAL: [Cell<u64>; N] = const {
+            [
+                Cell::new(0), Cell::new(0), Cell::new(0),
+                Cell::new(0), Cell::new(0), Cell::new(0),
+                Cell::new(0), Cell::new(0), Cell::new(0),
+            ]
+        };
+    }
+
+    pub fn init_from_env() {
+        if std::env::var("MBWA_TIME_STAGES").ok().as_deref() == Some("1") {
+            ENABLED.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn enabled() -> bool {
+        ENABLED.load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    pub fn measure<R>(b: Bucket, f: impl FnOnce() -> R) -> R {
+        if !ENABLED.load(Ordering::Relaxed) {
+            return f();
+        }
+        let t0 = Instant::now();
+        let r = f();
+        let ns = t0.elapsed().as_nanos() as u64;
+        LOCAL.with(|arr| arr[b as usize].set(arr[b as usize].get() + ns));
+        r
+    }
+
+    pub fn flush_local() {
+        if !ENABLED.load(Ordering::Relaxed) {
+            return;
+        }
+        LOCAL.with(|arr| {
+            for i in 0..N {
+                let v = arr[i].get();
+                if v > 0 {
+                    TOTALS[i].fetch_add(v, Ordering::Relaxed);
+                    arr[i].set(0);
+                }
+            }
+        });
+    }
+
+    #[inline]
+    pub fn accumulate_global(b: Bucket, ns: u64) {
+        if !ENABLED.load(Ordering::Relaxed) {
+            return;
+        }
+        TOTALS[b as usize].fetch_add(ns, Ordering::Relaxed);
+    }
+
+    pub fn report() {
+        if !ENABLED.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut total: u64 = 0;
+        let mut vals = [0u64; N];
+        for i in 0..N {
+            vals[i] = TOTALS[i].load(Ordering::Relaxed);
+            total += vals[i];
+        }
+        eprintln!("[stage] cumulative thread-time per phase (ms across all worker threads):");
+        for i in 0..N {
+            let pct = if total > 0 {
+                100.0 * vals[i] as f64 / total as f64
+            } else {
+                0.0
+            };
+            eprintln!(
+                "[stage]   {:<10} {:>10} ms  {:>5.1}%",
+                NAMES[i],
+                vals[i] / 1_000_000,
+                pct
+            );
+        }
+        eprintln!("[stage]   {:<10} {:>10} ms", "TOTAL", total / 1_000_000);
     }
 }
 
@@ -10426,6 +11674,328 @@ pub mod ksw2 {
     }
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+pub mod ksw2_c_sse {
+    use crate::ksw2::ksw_extz_t;
+    use crate::ksw2_ll_sse::ksw_llrst_t;
+    use std::ffi::c_void;
+    use std::ptr;
+    use std::sync::OnceLock;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ksw_extz_raw_t {
+        max_zdropped: u32,
+        max_q: i32,
+        max_t: i32,
+        mqe: i32,
+        mqe_t: i32,
+        mte: i32,
+        mte_q: i32,
+        score: i32,
+        m_cigar: i32,
+        n_cigar: i32,
+        reach_end: i32,
+        cigar: *mut u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ksw_llrst_raw_t {
+        score: i32,
+        te: i32,
+        qe: i32,
+        score2: i32,
+        te2: i32,
+    }
+
+    unsafe extern "C" {
+        #[link_name = "ksw_extz2_sse"]
+        fn c_ksw_extz2_sse(
+            km: *mut c_void,
+            qlen: i32,
+            query: *const u8,
+            tlen: i32,
+            target: *const u8,
+            m: i8,
+            mat: *const i8,
+            q: i8,
+            e: i8,
+            w: i32,
+            zdrop: i32,
+            end_bonus: i32,
+            flag: i32,
+            ez: *mut ksw_extz_raw_t,
+        );
+
+        #[link_name = "ksw_extd2_sse"]
+        fn c_ksw_extd2_sse(
+            km: *mut c_void,
+            qlen: i32,
+            query: *const u8,
+            tlen: i32,
+            target: *const u8,
+            m: i8,
+            mat: *const i8,
+            q: i8,
+            e: i8,
+            q2: i8,
+            e2: i8,
+            w: i32,
+            zdrop: i32,
+            end_bonus: i32,
+            flag: i32,
+            ez: *mut ksw_extz_raw_t,
+        );
+
+        #[link_name = "ksw_ll_qinit"]
+        fn c_ksw_ll_qinit(
+            km: *mut c_void,
+            size: i32,
+            qlen: i32,
+            query: *const u8,
+            m: i32,
+            mat: *const i8,
+        ) -> *mut c_void;
+
+        #[link_name = "ksw_ll_i16"]
+        fn c_ksw_ll_i16(
+            q: *mut c_void,
+            tlen: i32,
+            target: *const u8,
+            gapo: i32,
+            gape: i32,
+            qe: *mut i32,
+            te: *mut i32,
+        ) -> i32;
+
+        #[link_name = "ksw_ll_u8_core"]
+        fn c_ksw_ll_u8_core(
+            q: *mut c_void,
+            tlen: i32,
+            target: *const u8,
+            gapo: i32,
+            gape: i32,
+            xtra: i32,
+        ) -> ksw_llrst_raw_t;
+
+        #[link_name = "ksw_ll_i16_core"]
+        fn c_ksw_ll_i16_core(
+            q: *mut c_void,
+            tlen: i32,
+            target: *const u8,
+            gapo: i32,
+            gape: i32,
+            xtra: i32,
+        ) -> ksw_llrst_raw_t;
+    }
+
+    #[inline(always)]
+    fn use_c_ksw() -> bool {
+        static USE_C_KSW: OnceLock<bool> = OnceLock::new();
+        *USE_C_KSW.get_or_init(|| std::env::var_os("MINIBWA_RS_RUST_KSW").is_none())
+    }
+
+    #[inline(always)]
+    unsafe fn raw_from_ez_cigar(ez: &mut ksw_extz_t) -> ksw_extz_raw_t {
+        let mut cigar = std::mem::take(&mut ez.cigar);
+        let cap = cigar.capacity();
+        let ptr = if cap == 0 {
+            ptr::null_mut()
+        } else {
+            cigar.as_mut_ptr()
+        };
+        std::mem::forget(cigar);
+        ksw_extz_raw_t {
+            m_cigar: cap as i32,
+            cigar: ptr,
+            ..Default::default()
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn copy_raw_ez(raw: &mut ksw_extz_raw_t, ez: &mut ksw_extz_t) {
+        ez.max = raw.max_zdropped & 0x7fff_ffff;
+        ez.zdropped = raw.max_zdropped >> 31;
+        ez.max_q = raw.max_q;
+        ez.max_t = raw.max_t;
+        ez.mqe = raw.mqe;
+        ez.mqe_t = raw.mqe_t;
+        ez.mte = raw.mte;
+        ez.mte_q = raw.mte_q;
+        ez.score = raw.score;
+        ez.m_cigar = raw.m_cigar;
+        ez.n_cigar = raw.n_cigar;
+        ez.reach_end = raw.reach_end;
+        ez.cigar = if raw.cigar.is_null() {
+            Vec::new()
+        } else {
+            unsafe {
+                Vec::from_raw_parts(
+                    raw.cigar,
+                    raw.n_cigar.max(0) as usize,
+                    raw.m_cigar.max(0) as usize,
+                )
+            }
+        };
+        raw.cigar = ptr::null_mut();
+        raw.m_cigar = 0;
+        raw.n_cigar = 0;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    pub fn maybe_extz2(
+        qlen: i32,
+        query: &[u8],
+        tlen: i32,
+        target: &[u8],
+        m: i8,
+        mat: &[i8],
+        q: i8,
+        e: i8,
+        w: i32,
+        zdrop: i32,
+        end_bonus: i32,
+        flag: i32,
+        ez: &mut ksw_extz_t,
+    ) -> bool {
+        if !use_c_ksw() {
+            return false;
+        }
+        let mut raw = unsafe { raw_from_ez_cigar(ez) };
+        unsafe {
+            c_ksw_extz2_sse(
+                ptr::null_mut(),
+                qlen,
+                query.as_ptr(),
+                tlen,
+                target.as_ptr(),
+                m,
+                mat.as_ptr(),
+                q,
+                e,
+                w,
+                zdrop,
+                end_bonus,
+                flag,
+                &mut raw,
+            );
+            copy_raw_ez(&mut raw, ez);
+        }
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    pub fn maybe_extd2(
+        qlen: i32,
+        query: &[u8],
+        tlen: i32,
+        target: &[u8],
+        m: i8,
+        mat: &[i8],
+        q: i8,
+        e: i8,
+        q2: i8,
+        e2: i8,
+        w: i32,
+        zdrop: i32,
+        end_bonus: i32,
+        flag: i32,
+        ez: &mut ksw_extz_t,
+    ) -> bool {
+        if !use_c_ksw() {
+            return false;
+        }
+        let mut raw = unsafe { raw_from_ez_cigar(ez) };
+        unsafe {
+            c_ksw_extd2_sse(
+                ptr::null_mut(),
+                qlen,
+                query.as_ptr(),
+                tlen,
+                target.as_ptr(),
+                m,
+                mat.as_ptr(),
+                q,
+                e,
+                q2,
+                e2,
+                w,
+                zdrop,
+                end_bonus,
+                flag,
+                &mut raw,
+            );
+            copy_raw_ez(&mut raw, ez);
+        }
+        true
+    }
+
+    #[inline(always)]
+    pub fn maybe_ll_i16(
+        qlen: i32,
+        query: &[u8],
+        mat: &[i8],
+        tlen: i32,
+        target: &[u8],
+        gapo: i32,
+        gape: i32,
+        qe: &mut i32,
+        te: &mut i32,
+    ) -> Option<i32> {
+        if !use_c_ksw() {
+            return None;
+        }
+        unsafe {
+            let q = c_ksw_ll_qinit(ptr::null_mut(), 2, qlen, query.as_ptr(), 5, mat.as_ptr());
+            if q.is_null() {
+                return None;
+            }
+            let score = c_ksw_ll_i16(q, tlen, target.as_ptr(), gapo, gape, qe, te);
+            libc::free(q);
+            Some(score)
+        }
+    }
+
+    #[inline(always)]
+    pub fn maybe_ll_core(
+        size: i32,
+        qlen: i32,
+        query: &[u8],
+        mat: &[i8],
+        tlen: i32,
+        target: &[u8],
+        gapo: i32,
+        gape: i32,
+        xtra: i32,
+    ) -> Option<ksw_llrst_t> {
+        if !use_c_ksw() {
+            return None;
+        }
+        unsafe {
+            let q = c_ksw_ll_qinit(ptr::null_mut(), size, qlen, query.as_ptr(), 5, mat.as_ptr());
+            if q.is_null() {
+                return None;
+            }
+            let raw = if size <= 1 {
+                c_ksw_ll_u8_core(q, tlen, target.as_ptr(), gapo, gape, xtra)
+            } else {
+                c_ksw_ll_i16_core(q, tlen, target.as_ptr(), gapo, gape, xtra)
+            };
+            libc::free(q);
+            Some(ksw_llrst_t {
+                score: raw.score,
+                te: raw.te,
+                qe: raw.qe,
+                score2: raw.score2,
+                te2: raw.te2,
+            })
+        }
+    }
+}
+
 pub mod ksw2_extd2_sse {
     #![allow(unused_variables, dead_code, non_snake_case)]
 
@@ -10434,6 +12004,76 @@ pub mod ksw2_extd2_sse {
         KSW_EZ_APPROX_MAX, KSW_EZ_EXTZ_ONLY, KSW_EZ_GENERIC_SC, KSW_EZ_REV_CIGAR, KSW_EZ_RIGHT,
         KSW_EZ_SCORE_ONLY, KSW_NEG_INF,
     };
+    use crate::s2n_lite;
+    use std::cell::RefCell;
+    use std::thread::LocalKey;
+
+    thread_local! {
+        static EXTD_U: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+        static EXTD_V: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+        static EXTD_X: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+        static EXTD_Y: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+        static EXTD_X2: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+        static EXTD_Y2: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+        static EXTD_S: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+        static EXTD_SF_QR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+        static EXTD_H: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+        static EXTD_P: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+        static EXTD_OFF: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+        static EXTD_OFF_END: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+    }
+
+    #[inline(always)]
+    fn take_u8(key: &'static LocalKey<RefCell<Vec<u8>>>, len: usize, fill: u8) -> Vec<u8> {
+        key.with(|cell| {
+            let mut v = std::mem::take(&mut *cell.borrow_mut());
+            v.clear();
+            v.resize(len, fill);
+            v
+        })
+    }
+
+    #[inline(always)]
+    fn put_u8(key: &'static LocalKey<RefCell<Vec<u8>>>, mut v: Vec<u8>) {
+        v.clear();
+        key.with(|cell| {
+            *cell.borrow_mut() = v;
+        });
+    }
+
+    #[inline(always)]
+    fn take_i32(key: &'static LocalKey<RefCell<Vec<i32>>>, len: usize, fill: i32) -> Vec<i32> {
+        key.with(|cell| {
+            let mut v = std::mem::take(&mut *cell.borrow_mut());
+            v.clear();
+            v.resize(len, fill);
+            v
+        })
+    }
+
+    #[inline(always)]
+    fn put_i32(key: &'static LocalKey<RefCell<Vec<i32>>>, mut v: Vec<i32>) {
+        v.clear();
+        key.with(|cell| {
+            *cell.borrow_mut() = v;
+        });
+    }
+
+    #[inline(always)]
+    unsafe fn load16_at(slice: &[u8], offset: usize) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        unsafe {
+            std::ptr::copy_nonoverlapping(slice.as_ptr().add(offset), out.as_mut_ptr(), 16);
+        }
+        out
+    }
+
+    #[inline(always)]
+    unsafe fn store16_at(slice: &mut [u8], offset: usize, value: [u8; 16]) {
+        unsafe {
+            std::ptr::copy_nonoverlapping(value.as_ptr(), slice.as_mut_ptr().add(offset), 16);
+        }
+    }
 
     /// Original C global function `ksw_extd2_sse` from `minibwa/ksw2_extd2_sse.c:16`.
     pub fn ksw_extd2_sse(
@@ -10454,9 +12094,14 @@ pub mod ksw2_extd2_sse {
         flag: i32,
         ez: &mut ksw_extz_t,
     ) {
-        // SIMD TODO: original ksw_extd2_sse.c is an SSE2/NEON diagonal-vector
-        // dual-affine implementation. This scalar lane-for-lane translation keeps
-        // the original byte-state behavior; add native SIMD for performance parity.
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if crate::ksw2_c_sse::maybe_extd2(
+            qlen, query, tlen, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag, ez,
+        ) {
+            return;
+        }
+        // SIMD note: the byte-state DP and exact-max scans use the
+        // native-backed s2n_lite shim.
         let h_qe = q as i32 + e as i32;
         if (q2 as i32) + (e2 as i32) < (q as i32) + (e as i32) {
             std::mem::swap(&mut q, &mut q2);
@@ -10511,34 +12156,34 @@ pub mod ksw2_extd2_sse {
         let with_cigar = (flag & KSW_EZ_SCORE_ONLY) == 0;
         let neg_qe = (-qe) as i8 as u8;
         let neg_qe2 = (-qe2) as i8 as u8;
-        let mut u = vec![neg_qe; n_vec_bytes.max(1)];
-        let mut v = vec![neg_qe; n_vec_bytes.max(1)];
-        let mut x = vec![neg_qe; n_vec_bytes.max(1)];
-        let mut y = vec![neg_qe; n_vec_bytes.max(1)];
-        let mut x2 = vec![neg_qe2; n_vec_bytes.max(1)];
-        let mut y2 = vec![neg_qe2; n_vec_bytes.max(1)];
-        let mut s = vec![0u8; n_vec_bytes.max(1)];
+        let mut u = take_u8(&EXTD_U, n_vec_bytes.max(1), neg_qe);
+        let mut v = take_u8(&EXTD_V, n_vec_bytes.max(1), neg_qe);
+        let mut x = take_u8(&EXTD_X, n_vec_bytes.max(1), neg_qe);
+        let mut y = take_u8(&EXTD_Y, n_vec_bytes.max(1), neg_qe);
+        let mut x2 = take_u8(&EXTD_X2, n_vec_bytes.max(1), neg_qe2);
+        let mut y2 = take_u8(&EXTD_Y2, n_vec_bytes.max(1), neg_qe2);
+        let mut s = take_u8(&EXTD_S, (n_vec_bytes + 16).max(1), 0);
         let qr_off = n_vec_bytes;
-        let mut sf_qr = vec![0u8; n_vec_bytes + ((qlen_ + 1) * 16).max(1)];
+        let mut sf_qr = take_u8(&EXTD_SF_QR, n_vec_bytes + ((qlen_ + 1) * 16).max(1), 0);
         let mut h = if approx_max {
-            Vec::new()
+            take_i32(&EXTD_H, 0, KSW_NEG_INF)
         } else {
-            vec![KSW_NEG_INF; n_vec_bytes.max(1)]
+            take_i32(&EXTD_H, n_vec_bytes.max(1), KSW_NEG_INF)
         };
         let mut p = if with_cigar {
-            vec![0u8; (qlen + tlen - 1) * n_col_ * 16]
+            take_u8(&EXTD_P, (qlen + tlen - 1) * n_col_ * 16, 0)
         } else {
-            Vec::new()
+            take_u8(&EXTD_P, 0, 0)
         };
         let mut off = if with_cigar {
-            vec![0i32; qlen + tlen - 1]
+            take_i32(&EXTD_OFF, qlen + tlen - 1, 0)
         } else {
-            Vec::new()
+            take_i32(&EXTD_OFF, 0, 0)
         };
         let mut off_end = if with_cigar {
-            vec![0i32; qlen + tlen - 1]
+            take_i32(&EXTD_OFF_END, qlen + tlen - 1, 0)
         } else {
-            Vec::new()
+            take_i32(&EXTD_OFF_END, 0, 0)
         };
         for t in 0..qlen {
             sf_qr[qr_off + t] = query[qlen - 1 - t];
@@ -10553,6 +12198,23 @@ pub mod ksw2_extd2_sse {
             mat[m * m - 1] as u8
         };
         let wildcard = (m - 1) as u8;
+        let sc_mch_v = s2n_lite::_mm_set1_epi8(sc_mch as i32);
+        let sc_mis_v = s2n_lite::_mm_set1_epi8(sc_mis as i32);
+        let sc_n_v = s2n_lite::_mm_set1_epi8(sc_n as i32);
+        let wildcard_v = s2n_lite::_mm_set1_epi8(wildcard as i32);
+        let zero_v = s2n_lite::_mm_setzero_si128();
+        let q_v = s2n_lite::_mm_set1_epi8(q_byte as i32);
+        let q2_v = s2n_lite::_mm_set1_epi8(q2_byte as i32);
+        let qe_v = s2n_lite::_mm_set1_epi8(qe_byte as i32);
+        let qe2_v = s2n_lite::_mm_set1_epi8(qe2_byte as i32);
+        let flag1_v = s2n_lite::_mm_set1_epi8(1);
+        let flag2_v = s2n_lite::_mm_set1_epi8(2);
+        let flag3_v = s2n_lite::_mm_set1_epi8(3);
+        let flag4_v = s2n_lite::_mm_set1_epi8(4);
+        let flag8_v = s2n_lite::_mm_set1_epi8(0x08);
+        let flag16_v = s2n_lite::_mm_set1_epi8(0x10);
+        let flag32_v = s2n_lite::_mm_set1_epi8(0x20);
+        let flag64_v = s2n_lite::_mm_set1_epi8(0x40);
         let mut h0 = 0i32;
         let mut last_h0_t = 0i32;
         let mut last_st = -1i32;
@@ -10624,24 +12286,17 @@ pub mod ksw2_extd2_sse {
             if (flag & KSW_EZ_GENERIC_SC) == 0 {
                 let mut score_t = st0;
                 while score_t <= en0 {
-                    for lane in 0..16 {
-                        let t = score_t + lane;
-                        let q_base = qr_off as i32 + qlen as i32 - 1 - r_i32 + t;
-                        let t_usize = t as usize;
-                        if t_usize >= s.len() {
-                            continue;
-                        }
-                        let q_usize = q_base as usize;
-                        let sq = sf_qr[t_usize];
-                        let stq = sf_qr[q_usize];
-                        s[t_usize] = if sq == wildcard || stq == wildcard {
-                            sc_n
-                        } else if sq == stq {
-                            sc_mch
-                        } else {
-                            sc_mis
-                        };
-                    }
+                    let t_usize = score_t as usize;
+                    let q_usize = (qr_off as i32 + qlen as i32 - 1 - r_i32 + score_t) as usize;
+                    let sq = unsafe { load16_at(&sf_qr, t_usize) };
+                    let stq = unsafe { load16_at(&sf_qr, q_usize) };
+                    let eq = s2n_lite::_mm_cmpeq_epi8(sq, stq);
+                    let sq_wild = s2n_lite::_mm_cmpeq_epi8(sq, wildcard_v);
+                    let st_wild = s2n_lite::_mm_cmpeq_epi8(stq, wildcard_v);
+                    let wild = s2n_lite::_mm_or_si128(sq_wild, st_wild);
+                    let mut score = s2n_lite::_mm_blendv_epi8(sc_mis_v, sc_mch_v, eq);
+                    score = s2n_lite::_mm_blendv_epi8(score, sc_n_v, wild);
+                    unsafe { store16_at(&mut s, t_usize, score) };
                     score_t += 16;
                 }
             } else {
@@ -10679,159 +12334,145 @@ pub mod ksw2_extd2_sse {
                 let old_x_tail = old_x[15];
                 let old_x2_tail = old_x2[15];
                 let old_v_tail = old_v[15];
-                let mut a_lanes = [0u8; 16];
-                let mut b_lanes = [0u8; 16];
-                let mut a2_lanes = [0u8; 16];
-                let mut b2_lanes = [0u8; 16];
-                let mut d_lanes = [0u8; 16];
-
-                for lane in 0..16 {
-                    let idx = base + lane;
-                    let xt1 = if lane == 0 { x1_lane } else { old_x[lane - 1] };
-                    let x2t1 = if lane == 0 {
-                        x21_lane
-                    } else {
-                        old_x2[lane - 1]
-                    };
-                    let vt1 = if lane == 0 { v1_lane } else { old_v[lane - 1] };
-                    let ut = old_u[lane];
-                    let mut z = s[idx];
-                    let a = xt1.wrapping_add(vt1);
-                    let b = old_y[lane].wrapping_add(ut);
-                    let a2 = x2t1.wrapping_add(vt1);
-                    let b2 = old_y2[lane].wrapping_add(ut);
-                    let mut d = 0u8;
+                {
+                    let mut s_block = [0u8; 16];
+                    s_block.copy_from_slice(&s[base..base + 16]);
+                    let xt1 = s2n_lite::_mm_or_si128(
+                        s2n_lite::_mm_slli_si128::<1>(old_x),
+                        s2n_lite::_mm_cvtsi32_si128(x1_lane as i32),
+                    );
+                    let x2t1 = s2n_lite::_mm_or_si128(
+                        s2n_lite::_mm_slli_si128::<1>(old_x2),
+                        s2n_lite::_mm_cvtsi32_si128(x21_lane as i32),
+                    );
+                    let vt1 = s2n_lite::_mm_or_si128(
+                        s2n_lite::_mm_slli_si128::<1>(old_v),
+                        s2n_lite::_mm_cvtsi32_si128(v1_lane as i32),
+                    );
+                    let ut = old_u;
+                    let mut z = s_block;
+                    let mut a = s2n_lite::_mm_add_epi8(xt1, vt1);
+                    let mut b = s2n_lite::_mm_add_epi8(old_y, ut);
+                    let mut a2 = s2n_lite::_mm_add_epi8(x2t1, vt1);
+                    let mut b2 = s2n_lite::_mm_add_epi8(old_y2, ut);
+                    let mut d = zero_v;
                     if !with_cigar {
-                        for cand in [a, b, a2, b2] {
-                            if (cand as i8) > (z as i8) {
-                                z = cand;
-                            }
-                        }
+                        z = s2n_lite::_mm_max_epi8(z, a);
+                        z = s2n_lite::_mm_max_epi8(z, b);
+                        z = s2n_lite::_mm_max_epi8(z, a2);
+                        z = s2n_lite::_mm_max_epi8(z, b2);
                     } else if (flag & KSW_EZ_RIGHT) == 0 {
-                        if (a as i8) > (z as i8) {
-                            d = 1;
-                            z = a;
-                        }
-                        if (b as i8) > (z as i8) {
-                            d = 2;
-                            z = b;
-                        }
-                        if (a2 as i8) > (z as i8) {
-                            d = 3;
-                            z = a2;
-                        }
-                        if (b2 as i8) > (z as i8) {
-                            d = 4;
-                            z = b2;
-                        }
+                        d = s2n_lite::_mm_and_si128(s2n_lite::_mm_cmpgt_epi8(a, z), flag1_v);
+                        z = s2n_lite::_mm_max_epi8(z, a);
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(b, z);
+                        d = s2n_lite::_mm_blendv_epi8(d, flag2_v, tmp);
+                        z = s2n_lite::_mm_max_epi8(z, b);
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(a2, z);
+                        d = s2n_lite::_mm_blendv_epi8(d, flag3_v, tmp);
+                        z = s2n_lite::_mm_max_epi8(z, a2);
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(b2, z);
+                        d = s2n_lite::_mm_blendv_epi8(d, flag4_v, tmp);
+                        z = s2n_lite::_mm_max_epi8(z, b2);
                     } else {
-                        d = if (z as i8) > (a as i8) { 0 } else { 1 };
-                        if (a as i8) > (z as i8) {
-                            z = a;
-                        }
-                        if (z as i8) <= (b as i8) {
-                            d = 2;
-                        }
-                        if (b as i8) > (z as i8) {
-                            z = b;
-                        }
-                        if (z as i8) <= (a2 as i8) {
-                            d = 3;
-                        }
-                        if (a2 as i8) > (z as i8) {
-                            z = a2;
-                        }
-                        if (z as i8) <= (b2 as i8) {
-                            d = 4;
-                        }
-                        if (b2 as i8) > (z as i8) {
-                            z = b2;
-                        }
+                        d = s2n_lite::_mm_andnot_si128(s2n_lite::_mm_cmpgt_epi8(z, a), flag1_v);
+                        z = s2n_lite::_mm_max_epi8(z, a);
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(z, b);
+                        d = s2n_lite::_mm_blendv_epi8(flag2_v, d, tmp);
+                        z = s2n_lite::_mm_max_epi8(z, b);
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(z, a2);
+                        d = s2n_lite::_mm_blendv_epi8(flag3_v, d, tmp);
+                        z = s2n_lite::_mm_max_epi8(z, a2);
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(z, b2);
+                        d = s2n_lite::_mm_blendv_epi8(flag4_v, d, tmp);
+                        z = s2n_lite::_mm_max_epi8(z, b2);
                     }
-                    if (z as i8) > mat[0] {
-                        z = sc_mch;
-                    }
-                    u[idx] = z.wrapping_sub(vt1);
-                    v[idx] = z.wrapping_sub(ut);
-                    let z_gap = z.wrapping_sub(q_byte);
-                    let z_gap2 = z.wrapping_sub(q2_byte);
-                    a_lanes[lane] = a.wrapping_sub(z_gap);
-                    b_lanes[lane] = b.wrapping_sub(z_gap);
-                    a2_lanes[lane] = a2.wrapping_sub(z_gap2);
-                    b2_lanes[lane] = b2.wrapping_sub(z_gap2);
-                    d_lanes[lane] = d;
-                }
-                for lane in 0..16 {
-                    let idx = base + lane;
-                    let a = a_lanes[lane];
-                    let b = b_lanes[lane];
-                    let a2v = a2_lanes[lane];
-                    let b2v = b2_lanes[lane];
-                    let mut d = d_lanes[lane];
+                    z = s2n_lite::_mm_min_epi8(z, sc_mch_v);
+                    u[base..base + 16].copy_from_slice(&s2n_lite::_mm_sub_epi8(z, vt1));
+                    v[base..base + 16].copy_from_slice(&s2n_lite::_mm_sub_epi8(z, ut));
+                    let z_gap = s2n_lite::_mm_sub_epi8(z, q_v);
+                    let z_gap2 = s2n_lite::_mm_sub_epi8(z, q2_v);
+                    a = s2n_lite::_mm_sub_epi8(a, z_gap);
+                    b = s2n_lite::_mm_sub_epi8(b, z_gap);
+                    a2 = s2n_lite::_mm_sub_epi8(a2, z_gap2);
+                    b2 = s2n_lite::_mm_sub_epi8(b2, z_gap2);
                     if !with_cigar {
-                        x[idx] = (if (a as i8) > 0 { a } else { 0 }).wrapping_sub(qe_byte);
-                        y[idx] = (if (b as i8) > 0 { b } else { 0 }).wrapping_sub(qe_byte);
-                        x2[idx] = (if (a2v as i8) > 0 { a2v } else { 0 }).wrapping_sub(qe2_byte);
-                        y2[idx] = (if (b2v as i8) > 0 { b2v } else { 0 }).wrapping_sub(qe2_byte);
+                        x[base..base + 16].copy_from_slice(&s2n_lite::_mm_sub_epi8(
+                            s2n_lite::_mm_max_epi8(a, zero_v),
+                            qe_v,
+                        ));
+                        y[base..base + 16].copy_from_slice(&s2n_lite::_mm_sub_epi8(
+                            s2n_lite::_mm_max_epi8(b, zero_v),
+                            qe_v,
+                        ));
+                        x2[base..base + 16].copy_from_slice(&s2n_lite::_mm_sub_epi8(
+                            s2n_lite::_mm_max_epi8(a2, zero_v),
+                            qe2_v,
+                        ));
+                        y2[base..base + 16].copy_from_slice(&s2n_lite::_mm_sub_epi8(
+                            s2n_lite::_mm_max_epi8(b2, zero_v),
+                            qe2_v,
+                        ));
+                        let _ = d;
                     } else if (flag & KSW_EZ_RIGHT) == 0 {
-                        if (a as i8) > 0 {
-                            x[idx] = a.wrapping_sub(qe_byte);
-                            d |= 0x08;
-                        } else {
-                            x[idx] = 0u8.wrapping_sub(qe_byte);
-                        }
-                        if (b as i8) > 0 {
-                            y[idx] = b.wrapping_sub(qe_byte);
-                            d |= 0x10;
-                        } else {
-                            y[idx] = 0u8.wrapping_sub(qe_byte);
-                        }
-                        if (a2v as i8) > 0 {
-                            x2[idx] = a2v.wrapping_sub(qe2_byte);
-                            d |= 0x20;
-                        } else {
-                            x2[idx] = 0u8.wrapping_sub(qe2_byte);
-                        }
-                        if (b2v as i8) > 0 {
-                            y2[idx] = b2v.wrapping_sub(qe2_byte);
-                            d |= 0x40;
-                        } else {
-                            y2[idx] = 0u8.wrapping_sub(qe2_byte);
-                        }
-                        let p_idx = (r * n_col_ + block as usize - st_block as usize) * 16 + lane;
-                        p[p_idx] = d;
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(a, zero_v);
+                        x[base..base + 16].copy_from_slice(&s2n_lite::_mm_sub_epi8(
+                            s2n_lite::_mm_and_si128(tmp, a),
+                            qe_v,
+                        ));
+                        d = s2n_lite::_mm_or_si128(d, s2n_lite::_mm_and_si128(tmp, flag8_v));
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(b, zero_v);
+                        y[base..base + 16].copy_from_slice(&s2n_lite::_mm_sub_epi8(
+                            s2n_lite::_mm_and_si128(tmp, b),
+                            qe_v,
+                        ));
+                        d = s2n_lite::_mm_or_si128(d, s2n_lite::_mm_and_si128(tmp, flag16_v));
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(a2, zero_v);
+                        x2[base..base + 16].copy_from_slice(&s2n_lite::_mm_sub_epi8(
+                            s2n_lite::_mm_and_si128(tmp, a2),
+                            qe2_v,
+                        ));
+                        d = s2n_lite::_mm_or_si128(d, s2n_lite::_mm_and_si128(tmp, flag32_v));
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(b2, zero_v);
+                        y2[base..base + 16].copy_from_slice(&s2n_lite::_mm_sub_epi8(
+                            s2n_lite::_mm_and_si128(tmp, b2),
+                            qe2_v,
+                        ));
+                        d = s2n_lite::_mm_or_si128(d, s2n_lite::_mm_and_si128(tmp, flag64_v));
+                        let p_idx = (r * n_col_ + block as usize - st_block as usize) * 16;
+                        p[p_idx..p_idx + 16].copy_from_slice(&d);
                     } else {
-                        if 0i8 > a as i8 {
-                            x[idx] = 0u8.wrapping_sub(qe_byte);
-                        } else {
-                            x[idx] = a.wrapping_sub(qe_byte);
-                            d |= 0x08;
-                        }
-                        if 0i8 > b as i8 {
-                            y[idx] = 0u8.wrapping_sub(qe_byte);
-                        } else {
-                            y[idx] = b.wrapping_sub(qe_byte);
-                            d |= 0x10;
-                        }
-                        if 0i8 > a2v as i8 {
-                            x2[idx] = 0u8.wrapping_sub(qe2_byte);
-                        } else {
-                            x2[idx] = a2v.wrapping_sub(qe2_byte);
-                            d |= 0x20;
-                        }
-                        if 0i8 > b2v as i8 {
-                            y2[idx] = 0u8.wrapping_sub(qe2_byte);
-                        } else {
-                            y2[idx] = b2v.wrapping_sub(qe2_byte);
-                            d |= 0x40;
-                        }
-                        let p_idx = (r * n_col_ + block as usize - st_block as usize) * 16 + lane;
-                        p[p_idx] = d;
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(zero_v, a);
+                        x[base..base + 16].copy_from_slice(&s2n_lite::_mm_sub_epi8(
+                            s2n_lite::_mm_andnot_si128(tmp, a),
+                            qe_v,
+                        ));
+                        d = s2n_lite::_mm_or_si128(d, s2n_lite::_mm_andnot_si128(tmp, flag8_v));
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(zero_v, b);
+                        y[base..base + 16].copy_from_slice(&s2n_lite::_mm_sub_epi8(
+                            s2n_lite::_mm_andnot_si128(tmp, b),
+                            qe_v,
+                        ));
+                        d = s2n_lite::_mm_or_si128(d, s2n_lite::_mm_andnot_si128(tmp, flag16_v));
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(zero_v, a2);
+                        x2[base..base + 16].copy_from_slice(&s2n_lite::_mm_sub_epi8(
+                            s2n_lite::_mm_andnot_si128(tmp, a2),
+                            qe2_v,
+                        ));
+                        d = s2n_lite::_mm_or_si128(d, s2n_lite::_mm_andnot_si128(tmp, flag32_v));
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(zero_v, b2);
+                        y2[base..base + 16].copy_from_slice(&s2n_lite::_mm_sub_epi8(
+                            s2n_lite::_mm_andnot_si128(tmp, b2),
+                            qe2_v,
+                        ));
+                        d = s2n_lite::_mm_or_si128(d, s2n_lite::_mm_andnot_si128(tmp, flag64_v));
+                        let p_idx = (r * n_col_ + block as usize - st_block as usize) * 16;
+                        p[p_idx..p_idx + 16].copy_from_slice(&d);
                     }
+                    x1_lane = old_x_tail;
+                    x21_lane = old_x2_tail;
+                    v1_lane = old_v_tail;
+                    continue;
                 }
-                x1_lane = old_x_tail;
-                x21_lane = old_x2_tail;
-                v1_lane = old_v_tail;
             }
 
             if !approx_max {
@@ -10846,21 +12487,52 @@ pub mod ksw2_extd2_sse {
                     max_h_mut = h[en0 as usize];
                     max_t_mut = en0;
                     let en1 = st0 + (en0 - st0) / 4 * 4;
-                    let mut hh = [max_h_mut; 4];
-                    let mut tt = [max_t_mut; 4];
+                    let mut max_h_v = s2n_lite::_mm_set1_epi32(max_h_mut);
+                    let mut max_t_v = s2n_lite::_mm_set1_epi32(max_t_mut);
                     let mut t = st0;
                     while t < en1 {
+                        let base = t as usize;
+                        let mut h_v = [0u8; 16];
                         for lane in 0..4 {
-                            let k = (t + lane) as usize;
-                            h[k] += v[k] as i8 as i32;
-                            if h[k] > hh[lane as usize] {
-                                hh[lane as usize] = h[k];
-                                tt[lane as usize] = t;
-                            }
+                            h_v[lane * 4..lane * 4 + 4]
+                                .copy_from_slice(&h[base + lane].to_le_bytes());
                         }
+                        let v_v = s2n_lite::_mm_setr_epi32(
+                            v[base] as i8 as i32,
+                            v[base + 1] as i8 as i32,
+                            v[base + 2] as i8 as i32,
+                            v[base + 3] as i8 as i32,
+                        );
+                        h_v = s2n_lite::_mm_add_epi32(h_v, v_v);
+                        for lane in 0..4 {
+                            h[base + lane] = i32::from_le_bytes([
+                                h_v[lane * 4],
+                                h_v[lane * 4 + 1],
+                                h_v[lane * 4 + 2],
+                                h_v[lane * 4 + 3],
+                            ]);
+                        }
+                        let t_v = s2n_lite::_mm_set1_epi32(t);
+                        let gt = s2n_lite::_mm_cmpgt_epi32(h_v, max_h_v);
+                        max_h_v = s2n_lite::_mm_blendv_epi8(max_h_v, h_v, gt);
+                        max_t_v = s2n_lite::_mm_blendv_epi8(max_t_v, t_v, gt);
                         t += 4;
                     }
+                    let mut hh = [0i32; 4];
+                    let mut tt = [0i32; 4];
                     for lane in 0..4 {
+                        hh[lane] = i32::from_le_bytes([
+                            max_h_v[lane * 4],
+                            max_h_v[lane * 4 + 1],
+                            max_h_v[lane * 4 + 2],
+                            max_h_v[lane * 4 + 3],
+                        ]);
+                        tt[lane] = i32::from_le_bytes([
+                            max_t_v[lane * 4],
+                            max_t_v[lane * 4 + 1],
+                            max_t_v[lane * 4 + 2],
+                            max_t_v[lane * 4 + 3],
+                        ]);
                         if max_h_mut < hh[lane] {
                             max_h_mut = hh[lane];
                             max_t_mut = tt[lane] + lane as i32;
@@ -10985,6 +12657,18 @@ pub mod ksw2_extd2_sse {
                 );
             }
         }
+        put_u8(&EXTD_U, u);
+        put_u8(&EXTD_V, v);
+        put_u8(&EXTD_X, x);
+        put_u8(&EXTD_Y, y);
+        put_u8(&EXTD_X2, x2);
+        put_u8(&EXTD_Y2, y2);
+        put_u8(&EXTD_S, s);
+        put_u8(&EXTD_SF_QR, sf_qr);
+        put_i32(&EXTD_H, h);
+        put_u8(&EXTD_P, p);
+        put_i32(&EXTD_OFF, off);
+        put_i32(&EXTD_OFF_END, off_end);
     }
 
     #[cfg(test)]
@@ -11229,6 +12913,23 @@ pub mod ksw2_extz2_sse {
         KSW_EZ_APPROX_MAX, KSW_EZ_EXTZ_ONLY, KSW_EZ_GENERIC_SC, KSW_EZ_REV_CIGAR, KSW_EZ_RIGHT,
         KSW_EZ_SCORE_ONLY, KSW_NEG_INF,
     };
+    use crate::s2n_lite;
+
+    #[inline(always)]
+    unsafe fn load16_at(slice: &[u8], offset: usize) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        unsafe {
+            std::ptr::copy_nonoverlapping(slice.as_ptr().add(offset), out.as_mut_ptr(), 16);
+        }
+        out
+    }
+
+    #[inline(always)]
+    unsafe fn store16_at(slice: &mut [u8], offset: usize, value: [u8; 16]) {
+        unsafe {
+            std::ptr::copy_nonoverlapping(value.as_ptr(), slice.as_mut_ptr().add(offset), 16);
+        }
+    }
 
     /// Original C global function `ksw_extz2_sse` from `minibwa/ksw2_extz2_sse.c:16`.
     pub fn ksw_extz2_sse(
@@ -11247,9 +12948,14 @@ pub mod ksw2_extz2_sse {
         flag: i32,
         ez: &mut ksw_extz_t,
     ) {
-        // SIMD TODO: this is a scalar lane-for-lane translation of the original
-        // SSE2/NEON diagonal byte-state kernel. Replace the 16-byte block loop
-        // with native SIMD after conformance is locked down.
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if crate::ksw2_c_sse::maybe_extz2(
+            qlen, query, tlen, target, m, mat, q, e, w, zdrop, end_bonus, flag, ez,
+        ) {
+            return;
+        }
+        // SIMD note: the byte-state DP and exact-max scans use the
+        // native-backed s2n_lite shim.
         ksw_reset_extz(ez);
         if m <= 0 || qlen <= 0 || tlen <= 0 {
             return;
@@ -11287,9 +12993,9 @@ pub mod ksw2_extz2_sse {
         let mut v = vec![0u8; n_vec_bytes.max(1)];
         let mut x = vec![0u8; n_vec_bytes.max(1)];
         let mut y = vec![0u8; n_vec_bytes.max(1)];
-        let mut s = vec![0u8; n_vec_bytes.max(1)];
+        let mut s = vec![0u8; (n_vec_bytes + 16).max(1)];
         let mut qr = vec![0u8; ((qlen_ + 1) * 16).max(1)];
-        let mut sf = vec![0u8; n_vec_bytes.max(1)];
+        let mut sf = vec![0u8; (n_vec_bytes + 16).max(1)];
         let mut h = if approx_max {
             Vec::new()
         } else {
@@ -11323,6 +13029,18 @@ pub mod ksw2_extz2_sse {
             mat[m * m - 1] as u8
         };
         let wildcard = (m - 1) as u8;
+        let sc_mch_v = s2n_lite::_mm_set1_epi8(sc_mch as i32);
+        let sc_mis_v = s2n_lite::_mm_set1_epi8(sc_mis as i32);
+        let sc_n_v = s2n_lite::_mm_set1_epi8(sc_n as i32);
+        let wildcard_v = s2n_lite::_mm_set1_epi8(wildcard as i32);
+        let zero_v = s2n_lite::_mm_setzero_si128();
+        let q_v = s2n_lite::_mm_set1_epi8(q_byte as i32);
+        let qe2_v = s2n_lite::_mm_set1_epi8(qe2 as i32);
+        let max_sc_v = s2n_lite::_mm_set1_epi8(max_sc_byte as i32);
+        let flag1_v = s2n_lite::_mm_set1_epi8(1);
+        let flag2_v = s2n_lite::_mm_set1_epi8(2);
+        let flag8_v = s2n_lite::_mm_set1_epi8(0x08);
+        let flag16_v = s2n_lite::_mm_set1_epi8(0x10);
         let mut h0 = 0i32;
         let mut last_h0_t = 0i32;
         let mut last_st = -1i32;
@@ -11374,24 +13092,17 @@ pub mod ksw2_extz2_sse {
             if (flag & KSW_EZ_GENERIC_SC) == 0 {
                 let mut score_t = st0;
                 while score_t <= en0 {
-                    for lane in 0..16 {
-                        let t = score_t + lane;
-                        let q_base = qlen as i32 - 1 - r_i32 + t;
-                        let t_usize = t as usize;
-                        if t_usize >= s.len() {
-                            continue;
-                        }
-                        let q_usize = q_base as usize;
-                        let sq = sf[t_usize];
-                        let stq = qr[q_usize];
-                        s[t_usize] = if sq == wildcard || stq == wildcard {
-                            sc_n
-                        } else if sq == stq {
-                            sc_mch
-                        } else {
-                            sc_mis
-                        };
-                    }
+                    let t_usize = score_t as usize;
+                    let q_usize = (qlen as i32 - 1 - r_i32 + score_t) as usize;
+                    let sq = unsafe { load16_at(&sf, t_usize) };
+                    let stq = unsafe { load16_at(&qr, q_usize) };
+                    let eq = s2n_lite::_mm_cmpeq_epi8(sq, stq);
+                    let sq_wild = s2n_lite::_mm_cmpeq_epi8(sq, wildcard_v);
+                    let st_wild = s2n_lite::_mm_cmpeq_epi8(stq, wildcard_v);
+                    let wild = s2n_lite::_mm_or_si128(sq_wild, st_wild);
+                    let mut score = s2n_lite::_mm_blendv_epi8(sc_mis_v, sc_mch_v, eq);
+                    score = s2n_lite::_mm_blendv_epi8(score, sc_n_v, wild);
+                    unsafe { store16_at(&mut s, t_usize, score) };
                     score_t += 16;
                 }
             } else {
@@ -11413,109 +13124,71 @@ pub mod ksw2_extz2_sse {
             let mut v1_lane = v1;
             for block in st_block..=en_block {
                 let base = block as usize * 16;
-                let mut old_x = [0u8; 16];
-                let mut old_v = [0u8; 16];
-                let mut old_u = [0u8; 16];
-                let mut old_y = [0u8; 16];
-                old_x.copy_from_slice(&x[base..base + 16]);
-                old_v.copy_from_slice(&v[base..base + 16]);
-                old_u.copy_from_slice(&u[base..base + 16]);
-                old_y.copy_from_slice(&y[base..base + 16]);
+                let old_x = unsafe { load16_at(&x, base) };
+                let old_v = unsafe { load16_at(&v, base) };
+                let old_u = unsafe { load16_at(&u, base) };
+                let old_y = unsafe { load16_at(&y, base) };
                 let old_x_tail = old_x[15];
                 let old_v_tail = old_v[15];
-                let mut d_lanes = [0u8; 16];
-                let mut z_lanes = [0u8; 16];
-                let mut a_lanes = [0u8; 16];
-                let mut b_lanes = [0u8; 16];
-                let mut vt1_lanes = [0u8; 16];
-                let mut ut_lanes = [0u8; 16];
-                for lane in 0..16 {
-                    let idx = base + lane;
-                    let xt1 = if lane == 0 { x1_lane } else { old_x[lane - 1] };
-                    let vt1 = if lane == 0 { v1_lane } else { old_v[lane - 1] };
-                    let ut = old_u[lane];
-                    let mut z = s[idx].wrapping_add(qe2);
-                    let a = xt1.wrapping_add(vt1);
-                    let b = old_y[lane].wrapping_add(ut);
-                    let mut d = 0u8;
-                    if !with_cigar {
-                        if (a as i8) > (z as i8) {
-                            z = a;
-                        }
-                    } else if (flag & KSW_EZ_RIGHT) == 0 {
-                        if (a as i8) > (z as i8) {
-                            d = 1;
-                            z = a;
-                        }
-                        if (b as i8) > (z as i8) {
-                            d = 2;
-                        }
+                {
+                    let s_block = unsafe { load16_at(&s, base) };
+                    let xt1 = s2n_lite::_mm_or_si128(
+                        s2n_lite::_mm_slli_si128::<1>(old_x),
+                        s2n_lite::_mm_cvtsi32_si128(x1_lane as i32),
+                    );
+                    let vt1 = s2n_lite::_mm_or_si128(
+                        s2n_lite::_mm_slli_si128::<1>(old_v),
+                        s2n_lite::_mm_cvtsi32_si128(v1_lane as i32),
+                    );
+                    let ut = old_u;
+                    let mut z = s2n_lite::_mm_add_epi8(s_block, qe2_v);
+                    let mut a = s2n_lite::_mm_add_epi8(xt1, vt1);
+                    let mut b = s2n_lite::_mm_add_epi8(old_y, ut);
+                    let mut d;
+                    if (flag & KSW_EZ_RIGHT) == 0 {
+                        d = s2n_lite::_mm_and_si128(s2n_lite::_mm_cmpgt_epi8(a, z), flag1_v);
+                        z = s2n_lite::_mm_max_epi8(z, a);
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(b, z);
+                        d = s2n_lite::_mm_blendv_epi8(d, flag2_v, tmp);
                     } else {
-                        d = if (z as i8) > (a as i8) { 0 } else { 1 };
-                        if (a as i8) > (z as i8) {
-                            z = a;
-                        }
-                        if (z as i8) <= (b as i8) {
-                            d = 2;
-                        }
+                        d = s2n_lite::_mm_andnot_si128(s2n_lite::_mm_cmpgt_epi8(z, a), flag1_v);
+                        z = s2n_lite::_mm_max_epi8(z, a);
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(z, b);
+                        d = s2n_lite::_mm_blendv_epi8(flag2_v, d, tmp);
                     }
-                    z = z.max(b).min(max_sc_byte);
-                    u[idx] = z.wrapping_sub(vt1);
-                    v[idx] = z.wrapping_sub(ut);
-                    let z_gap = z.wrapping_sub(q_byte);
-                    z_lanes[lane] = z;
-                    a_lanes[lane] = a.wrapping_sub(z_gap);
-                    b_lanes[lane] = b.wrapping_sub(z_gap);
-                    d_lanes[lane] = d;
-                    vt1_lanes[lane] = vt1;
-                    ut_lanes[lane] = ut;
-                }
-                for lane in 0..16 {
-                    let idx = base + lane;
-                    let a = a_lanes[lane];
-                    let b = b_lanes[lane];
+                    z = s2n_lite::_mm_max_epu8(z, b);
+                    z = s2n_lite::_mm_min_epu8(z, max_sc_v);
+                    unsafe { store16_at(&mut u, base, s2n_lite::_mm_sub_epi8(z, vt1)) };
+                    unsafe { store16_at(&mut v, base, s2n_lite::_mm_sub_epi8(z, ut)) };
+                    let z_gap = s2n_lite::_mm_sub_epi8(z, q_v);
+                    a = s2n_lite::_mm_sub_epi8(a, z_gap);
+                    b = s2n_lite::_mm_sub_epi8(b, z_gap);
                     if !with_cigar {
-                        x[idx] = if (a as i8) > 0 { a } else { 0 };
-                        y[idx] = if (b as i8) > 0 { b } else { 0 };
+                        unsafe { store16_at(&mut x, base, s2n_lite::_mm_max_epi8(a, zero_v)) };
+                        unsafe { store16_at(&mut y, base, s2n_lite::_mm_max_epi8(b, zero_v)) };
                     } else if (flag & KSW_EZ_RIGHT) == 0 {
-                        let mut d = d_lanes[lane];
-                        if (a as i8) > 0 {
-                            x[idx] = a;
-                            d |= 0x08;
-                        } else {
-                            x[idx] = 0;
-                        }
-                        if (b as i8) > 0 {
-                            y[idx] = b;
-                            d |= 0x10;
-                        } else {
-                            y[idx] = 0;
-                        }
-                        let p_idx = (r * n_col_ + block as usize - st_block as usize) * 16 + lane;
-                        p[p_idx] = d;
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(a, zero_v);
+                        unsafe { store16_at(&mut x, base, s2n_lite::_mm_and_si128(tmp, a)) };
+                        d = s2n_lite::_mm_or_si128(d, s2n_lite::_mm_and_si128(tmp, flag8_v));
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(b, zero_v);
+                        unsafe { store16_at(&mut y, base, s2n_lite::_mm_and_si128(tmp, b)) };
+                        d = s2n_lite::_mm_or_si128(d, s2n_lite::_mm_and_si128(tmp, flag16_v));
+                        let p_idx = (r * n_col_ + block as usize - st_block as usize) * 16;
+                        unsafe { store16_at(&mut p, p_idx, d) };
                     } else {
-                        let mut d = d_lanes[lane];
-                        if 0i8 > a as i8 {
-                            x[idx] = 0;
-                        } else {
-                            x[idx] = a;
-                            d |= 0x08;
-                        }
-                        if 0i8 > b as i8 {
-                            y[idx] = 0;
-                        } else {
-                            y[idx] = b;
-                            d |= 0x10;
-                        }
-                        let p_idx = (r * n_col_ + block as usize - st_block as usize) * 16 + lane;
-                        p[p_idx] = d;
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(zero_v, a);
+                        unsafe { store16_at(&mut x, base, s2n_lite::_mm_andnot_si128(tmp, a)) };
+                        d = s2n_lite::_mm_or_si128(d, s2n_lite::_mm_andnot_si128(tmp, flag8_v));
+                        let tmp = s2n_lite::_mm_cmpgt_epi8(zero_v, b);
+                        unsafe { store16_at(&mut y, base, s2n_lite::_mm_andnot_si128(tmp, b)) };
+                        d = s2n_lite::_mm_or_si128(d, s2n_lite::_mm_andnot_si128(tmp, flag16_v));
+                        let p_idx = (r * n_col_ + block as usize - st_block as usize) * 16;
+                        unsafe { store16_at(&mut p, p_idx, d) };
                     }
+                    x1_lane = old_x_tail;
+                    v1_lane = old_v_tail;
+                    continue;
                 }
-                let _ = z_lanes;
-                let _ = vt1_lanes;
-                let _ = ut_lanes;
-                x1_lane = old_x_tail;
-                v1_lane = old_v_tail;
             }
 
             if !approx_max {
@@ -11530,21 +13203,54 @@ pub mod ksw2_extz2_sse {
                     max_h_mut = h[en0 as usize];
                     max_t_mut = en0;
                     let en1 = st0 + (en0 - st0) / 4 * 4;
-                    let mut hh = [max_h_mut; 4];
-                    let mut tt = [max_t_mut; 4];
+                    let mut max_h_v = s2n_lite::_mm_set1_epi32(max_h_mut);
+                    let mut max_t_v = s2n_lite::_mm_set1_epi32(max_t_mut);
+                    let qe_v = s2n_lite::_mm_set1_epi32(qe);
                     let mut t = st0;
                     while t < en1 {
+                        let base = t as usize;
+                        let mut h_v = [0u8; 16];
                         for lane in 0..4 {
-                            let k = (t + lane) as usize;
-                            h[k] += v[k] as i32 - qe;
-                            if h[k] > hh[lane as usize] {
-                                hh[lane as usize] = h[k];
-                                tt[lane as usize] = t;
-                            }
+                            h_v[lane * 4..lane * 4 + 4]
+                                .copy_from_slice(&h[base + lane].to_le_bytes());
                         }
+                        let v_v = s2n_lite::_mm_setr_epi32(
+                            v[base] as i32,
+                            v[base + 1] as i32,
+                            v[base + 2] as i32,
+                            v[base + 3] as i32,
+                        );
+                        h_v = s2n_lite::_mm_add_epi32(h_v, v_v);
+                        h_v = s2n_lite::_mm_sub_epi32(h_v, qe_v);
+                        for lane in 0..4 {
+                            h[base + lane] = i32::from_le_bytes([
+                                h_v[lane * 4],
+                                h_v[lane * 4 + 1],
+                                h_v[lane * 4 + 2],
+                                h_v[lane * 4 + 3],
+                            ]);
+                        }
+                        let t_v = s2n_lite::_mm_set1_epi32(t);
+                        let gt = s2n_lite::_mm_cmpgt_epi32(h_v, max_h_v);
+                        max_h_v = s2n_lite::_mm_blendv_epi8(max_h_v, h_v, gt);
+                        max_t_v = s2n_lite::_mm_blendv_epi8(max_t_v, t_v, gt);
                         t += 4;
                     }
+                    let mut hh = [0i32; 4];
+                    let mut tt = [0i32; 4];
                     for lane in 0..4 {
+                        hh[lane] = i32::from_le_bytes([
+                            max_h_v[lane * 4],
+                            max_h_v[lane * 4 + 1],
+                            max_h_v[lane * 4 + 2],
+                            max_h_v[lane * 4 + 3],
+                        ]);
+                        tt[lane] = i32::from_le_bytes([
+                            max_t_v[lane * 4],
+                            max_t_v[lane * 4 + 1],
+                            max_t_v[lane * 4 + 2],
+                            max_t_v[lane * 4 + 3],
+                        ]);
                         if max_h_mut < hh[lane] {
                             max_h_mut = hh[lane];
                             max_t_mut = tt[lane] + lane as i32;
@@ -12209,23 +13915,14 @@ pub mod ksw2_ll_sse {
     }
 
     /// Original C static function `ksw_le_epi16` from `minibwa/ksw2_ll_sse.c:224`.
-    pub fn ksw_le_epi16(a: &[i16; 8], b: &[i16; 8]) -> i32 {
-        let mut av = [0u8; 16];
-        let mut bv = [0u8; 16];
-        for i in 0..8 {
-            av[i * 2..i * 2 + 2].copy_from_slice(&a[i].to_le_bytes());
-            bv[i * 2..i * 2 + 2].copy_from_slice(&b[i].to_le_bytes());
-        }
-        let gt = crate::s2n_lite::_mm_cmpgt_epi16(av, bv);
+    pub fn ksw_le_epi16(a: [u8; 16], b: [u8; 16]) -> i32 {
+        let gt = crate::s2n_lite::_mm_cmpgt_epi16(a, b);
         (crate::s2n_lite::_mm_movemask_epi8(gt) == 0) as i32
     }
 
     /// Original C static function `ksw_max_i16` from `minibwa/ksw2_ll_sse.c:233`.
-    pub fn ksw_max_i16(x: &[i16; 8]) -> i32 {
-        let mut v = [0u8; 16];
-        for i in 0..8 {
-            v[i * 2..i * 2 + 2].copy_from_slice(&x[i].to_le_bytes());
-        }
+    pub fn ksw_max_i16(x: [u8; 16]) -> i32 {
+        let mut v = x;
         v = crate::s2n_lite::_mm_max_epi16(v, crate::s2n_lite::_mm_srli_si128::<8>(v));
         v = crate::s2n_lite::_mm_max_epi16(v, crate::s2n_lite::_mm_srli_si128::<4>(v));
         v = crate::s2n_lite::_mm_max_epi16(v, crate::s2n_lite::_mm_srli_si128::<2>(v));
@@ -12298,22 +13995,12 @@ pub mod ksw2_ll_sse {
                     *h1_j = h;
                     h = crate::s2n_lite::_mm_subs_epu16(h, gapoe);
                     f = crate::s2n_lite::_mm_subs_epu16(f, gape);
-                    let mut f_lanes = [0i16; 8];
-                    let mut h_lanes = [0i16; 8];
-                    for lane in 0..8 {
-                        f_lanes[lane] = i16::from_le_bytes([f[lane * 2], f[lane * 2 + 1]]);
-                        h_lanes[lane] = i16::from_le_bytes([h[lane * 2], h[lane * 2 + 1]]);
-                    }
-                    if ksw_le_epi16(&f_lanes, &h_lanes) != 0 {
+                    if ksw_le_epi16(f, h) != 0 {
                         break 'lazy_f_i16;
                     }
                 }
             }
-            let mut max_lanes = [0i16; 8];
-            for lane in 0..8 {
-                max_lanes[lane] = i16::from_le_bytes([max[lane * 2], max[lane * 2 + 1]]);
-            }
-            let row_max = ksw_max_i16(&max_lanes);
+            let row_max = ksw_max_i16(max);
             if row_max >= minsc {
                 if b.last().map_or(true, |&v| (v as i32) + 1 != i as i32) {
                     b.push(((row_max as u64) << 32) | i as u64);
@@ -12433,17 +14120,25 @@ pub mod ksw2_ll_sse {
 
         #[test]
         fn vector_predicates_match_intrinsic_intent() {
+            let pack_i16 = |lanes: [i16; 8]| {
+                let mut out = [0u8; 16];
+                for (i, lane) in lanes.iter().enumerate() {
+                    out[i * 2..i * 2 + 2].copy_from_slice(&lane.to_le_bytes());
+                }
+                out
+            };
+
             assert_eq!(ksw_le_u8(&[1; 16], &[2; 16]), 1);
             assert_eq!(ksw_le_u8(&[3; 16], &[2; 16]), 0);
             assert_eq!(
                 ksw_max_u8(&[1, 7, 2, 3, 4, 5, 6, 0, 1, 1, 1, 1, 1, 1, 1, 1]),
                 7
             );
-            assert_eq!(ksw_le_epi16(&[1; 8], &[1; 8]), 1);
-            assert_eq!(ksw_le_epi16(&[-2; 8], &[-1; 8]), 1);
-            assert_eq!(ksw_le_epi16(&[-1; 8], &[-2; 8]), 0);
-            assert_eq!(ksw_max_i16(&[1, -2, 9, 3, 4, 5, 6, 7]), 9);
-            assert_eq!(ksw_max_i16(&[-12, -2, -9, -3, -4, -5, -6, -7]), -2);
+            assert_eq!(ksw_le_epi16(pack_i16([1; 8]), pack_i16([1; 8])), 1);
+            assert_eq!(ksw_le_epi16(pack_i16([-2; 8]), pack_i16([-1; 8])), 1);
+            assert_eq!(ksw_le_epi16(pack_i16([-1; 8]), pack_i16([-2; 8])), 0);
+            assert_eq!(ksw_max_i16(pack_i16([1, -2, 9, 3, 4, 5, 6, 7])), 9);
+            assert_eq!(ksw_max_i16(pack_i16([-12, -2, -9, -3, -4, -5, -6, -7])), -2);
         }
     }
 }
@@ -12664,7 +14359,7 @@ pub mod l2bit {
 
     use flate2::read::MultiGzDecoder;
     use std::fs::File;
-    use std::io::{self, BufRead, BufReader, Read, Write};
+    use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
     use std::path::Path;
 
     const L2B_MAGIC: &[u8; 4] = b"L2B\x01";
@@ -12685,6 +14380,7 @@ pub mod l2bit {
         pub off: u64,
     }
 
+    #[repr(C)]
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct l2b_intv_t {
         pub st: u64,
@@ -12800,8 +14496,16 @@ pub mod l2bit {
         }
         st += ctg.off as i64;
         en += ctg.off as i64;
-        for i in st..en {
-            seq[(i - st) as usize] = l2b_get0(l2b, i as u64) as u8;
+        let len = (en - st).max(0) as usize;
+        let pac = l2b.pac.as_ptr();
+        let seq_ptr = seq.as_mut_ptr();
+        let start = st as u64;
+        for j in 0..len {
+            let i = start + j as u64;
+            let c = unsafe { (*pac.add((i >> 5) as usize) >> ((i & 31) << 1)) & 3 };
+            unsafe {
+                *seq_ptr.add(j) = c as u8;
+            }
         }
         let mut n_ambi = 0i32;
         let aid = l2b_getambi(
@@ -12823,7 +14527,11 @@ pub mod l2bit {
                     e = en;
                 }
                 if s < e {
-                    seq[(s - st) as usize..(e - st) as usize].fill(4);
+                    let off = (s - st) as usize;
+                    let len = (e - s) as usize;
+                    unsafe {
+                        std::ptr::write_bytes(seq_ptr.add(off), 4, len);
+                    }
                 }
             }
         }
@@ -12860,6 +14568,7 @@ pub mod l2bit {
     }
 
     /// Original C static function `l2b_get0` from `minibwa/l2bit.h:43`.
+    #[inline(always)]
     pub fn l2b_get0(l2b: &l2b_t, i: u64) -> i32 {
         ((l2b.pac[(i >> 5) as usize] >> ((i & 31) << 1)) & 3) as i32
     }
@@ -13038,24 +14747,28 @@ pub mod l2bit {
         } else {
             Box::new(File::open(fn_.as_ref()).ok()?)
         };
-        let mut buffered = BufReader::new(raw);
+        let mut buffered = BufReader::with_capacity(1 << 20, raw);
         let is_gzip = buffered.fill_buf().ok()?.starts_with(&[0x1f, 0x8b]);
-        let mut reader: Box<dyn Read> = if is_gzip {
-            Box::new(MultiGzDecoder::new(buffered))
+        let mut reader: Box<dyn BufRead> = if is_gzip {
+            Box::new(BufReader::with_capacity(
+                1 << 20,
+                MultiGzDecoder::new(buffered),
+            ))
         } else {
             Box::new(buffered)
         };
-        let mut input = Vec::new();
-        if reader.read_to_end(&mut input).is_err() {
-            return None;
-        }
         let mut l2b = l2b_t::default();
         let mut rng = seed;
-        let text = String::from_utf8_lossy(&input);
         let mut name = String::new();
         let mut comm: Option<String> = None;
         let mut seq = Vec::new();
-        for line in text.lines() {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).ok()? == 0 {
+                break;
+            }
+            let line = line.trim_end_matches(['\n', '\r']);
             if let Some(header) = line.strip_prefix('>') {
                 if !name.is_empty() {
                     l2b_format_seq(seq.len() as u64, &mut seq, &mut rng);
@@ -13100,10 +14813,10 @@ pub mod l2bit {
     pub fn l2b_save<P: AsRef<Path>>(fn_: P, l2b: &l2b_t) -> i32 {
         let path = fn_.as_ref().to_string_lossy();
         let mut fp: Box<dyn Write> = if path == "-" {
-            Box::new(io::stdout())
+            Box::new(BufWriter::with_capacity(1 << 20, io::stdout()))
         } else {
             match File::create(fn_.as_ref()) {
-                Ok(fp) => Box::new(fp),
+                Ok(fp) => Box::new(BufWriter::with_capacity(1 << 20, fp)),
                 Err(_) => return -1,
             }
         };
@@ -13148,10 +14861,8 @@ pub mod l2bit {
                 return -1;
             }
         }
-        for &x in &l2b.pac {
-            if fp.write_all(&x.to_le_bytes()).is_err() {
-                return -1;
-            }
+        if write_u64_slice_le(&mut fp, &l2b.pac).is_err() {
+            return -1;
         }
         for ctg in &l2b.ctg {
             if fp.write_all(ctg.name.as_bytes()).is_err() || fp.write_all(&[0]).is_err() {
@@ -13168,7 +14879,54 @@ pub mod l2bit {
                 return -1;
             }
         }
-        0
+        if fp.flush().is_err() {
+            -1
+        } else {
+            0
+        }
+    }
+
+    fn write_u64_slice_le<W: Write + ?Sized>(writer: &mut W, words: &[u64]) -> std::io::Result<()> {
+        #[cfg(target_endian = "little")]
+        {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    words.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(words),
+                )
+            };
+            writer.write_all(bytes)
+        }
+        #[cfg(not(target_endian = "little"))]
+        {
+            for &word in words {
+                writer.write_all(&word.to_le_bytes())?;
+            }
+            Ok(())
+        }
+    }
+
+    fn read_intv_vec_le<R: Read + ?Sized>(reader: &mut R, n: u64) -> Option<Vec<l2b_intv_t>> {
+        let n = n as usize;
+        let mut v = Vec::<l2b_intv_t>::with_capacity(n);
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(
+                v.as_mut_ptr() as *mut u8,
+                n.checked_mul(std::mem::size_of::<l2b_intv_t>())?,
+            )
+        };
+        reader.read_exact(bytes).ok()?;
+        unsafe {
+            v.set_len(n);
+        }
+        #[cfg(target_endian = "big")]
+        {
+            for x in &mut v {
+                x.st = u64::from_le(x.st);
+                x.en = u64::from_le(x.en);
+            }
+        }
+        Some(v)
     }
 
     /// Original C global function `l2b_load` from `minibwa/l2bit.c:234`.
@@ -13223,26 +14981,21 @@ pub mod l2bit {
         if off != tot_len {
             return None;
         }
-        for _ in 0..n_ambi {
-            let mut buf = [0u8; 16];
-            fp.read_exact(&mut buf).ok()?;
-            l2b.ambi.push(l2b_intv_t {
-                st: u64::from_le_bytes(buf[0..8].try_into().unwrap()),
-                en: u64::from_le_bytes(buf[8..16].try_into().unwrap()),
-            });
+        l2b.ambi = read_intv_vec_le(&mut *fp, n_ambi)?;
+        l2b.mask = read_intv_vec_le(&mut *fp, n_mask)?;
+        l2b.pac = Vec::with_capacity(n_pac as usize);
+        let pac_bytes = unsafe {
+            std::slice::from_raw_parts_mut(l2b.pac.as_mut_ptr() as *mut u8, n_pac as usize * 8)
+        };
+        fp.read_exact(pac_bytes).ok()?;
+        unsafe {
+            l2b.pac.set_len(n_pac as usize);
         }
-        for _ in 0..n_mask {
-            let mut buf = [0u8; 16];
-            fp.read_exact(&mut buf).ok()?;
-            l2b.mask.push(l2b_intv_t {
-                st: u64::from_le_bytes(buf[0..8].try_into().unwrap()),
-                en: u64::from_le_bytes(buf[8..16].try_into().unwrap()),
-            });
-        }
-        for _ in 0..n_pac {
-            let mut buf = [0u8; 8];
-            fp.read_exact(&mut buf).ok()?;
-            l2b.pac.push(u64::from_le_bytes(buf));
+        #[cfg(target_endian = "big")]
+        {
+            for x in &mut l2b.pac {
+                *x = u64::from_le(*x);
+            }
         }
         l2b.cat_name = vec![0; len_name as usize];
         l2b.cat_comm = vec![0; len_comm as usize];
@@ -13562,6 +15315,83 @@ pub mod lchain {
         pub y: u64,
     }
 
+    fn radix_insert_sort_mb128x(a: &mut [mb128_t]) {
+        for i in 1..a.len() {
+            if a[i].x < a[i - 1].x {
+                let tmp = a[i];
+                let mut j = i;
+                while j > 0 && tmp.x < a[j - 1].x {
+                    a[j] = a[j - 1];
+                    j -= 1;
+                }
+                a[j] = tmp;
+            }
+        }
+    }
+
+    fn radix_sort_mb128x_rec(a: &mut [mb128_t], n_bits: u32, s: u32) {
+        const RS_MIN_SIZE: usize = 64;
+        let size = 1usize << n_bits;
+        let mask = size as u64 - 1;
+        let mut counts = [0usize; 256];
+        for x in a.iter() {
+            counts[((x.x >> s) & mask) as usize] += 1;
+        }
+        let mut starts = [0usize; 256];
+        let mut ends = [0usize; 256];
+        let mut sum = 0usize;
+        for k in 0..size {
+            starts[k] = sum;
+            sum += counts[k];
+            ends[k] = sum;
+        }
+        let mut b = starts;
+        let mut k = 0usize;
+        while k < size {
+            if b[k] != ends[k] {
+                let mut l = ((a[b[k]].x >> s) & mask) as usize;
+                if l != k {
+                    let mut tmp = a[b[k]];
+                    loop {
+                        std::mem::swap(&mut tmp, &mut a[b[l]]);
+                        b[l] += 1;
+                        l = ((tmp.x >> s) & mask) as usize;
+                        if l == k {
+                            break;
+                        }
+                    }
+                    a[b[k]] = tmp;
+                    b[k] += 1;
+                } else {
+                    b[k] += 1;
+                }
+            } else {
+                k += 1;
+            }
+        }
+        if s != 0 {
+            let next_s = s.saturating_sub(n_bits);
+            for k in 0..size {
+                let st = starts[k];
+                let en = ends[k];
+                if en - st > RS_MIN_SIZE {
+                    radix_sort_mb128x_rec(&mut a[st..en], n_bits, next_s);
+                } else if en - st > 1 {
+                    radix_insert_sort_mb128x(&mut a[st..en]);
+                }
+            }
+        }
+    }
+
+    fn radix_sort_mb128x(a: &mut [mb128_t]) {
+        const RS_MIN_SIZE: usize = 64;
+        if a.len() <= RS_MIN_SIZE {
+            radix_insert_sort_mb128x(a);
+        } else {
+            radix_sort_mb128x_rec(a, 8, 56);
+        }
+    }
+
     pub fn mb_log2(x: f32) -> f32 {
         let mut i = x.to_bits();
         let mut log_2 = ((i >> 23) & 255) as f32 - 128.0;
@@ -13643,7 +15473,7 @@ pub mod lchain {
                 });
             }
         }
-        z.sort_by_key(|a| a.x);
+        radix_sort_mb128x(&mut z);
 
         t[..n as usize].fill(0);
         let mut n_v = 0i64;
@@ -13734,7 +15564,7 @@ pub mod lchain {
             w[i].y = (k as u64) << 32 | i as u64;
             k += u[i] as u32 as usize;
         }
-        w.sort_by_key(|a| a.x);
+        radix_sort_mb128x(&mut w);
         let mut u2 = vec![0u64; n_u as usize];
         k = 0;
         for i in 0..n_u as usize {
@@ -13936,21 +15766,6 @@ pub mod lchain {
         use super::*;
         use crate::l2bit::{l2b_ctg_t, l2b_t};
 
-        fn test_l2b() -> l2b_t {
-            l2b_t {
-                tot_len: 1000,
-                n_ctg: 1,
-                m_ctg: 1,
-                ctg: vec![l2b_ctg_t {
-                    name: "ctg".to_string(),
-                    comm: None,
-                    len: 1000,
-                    off: 0,
-                }],
-                ..Default::default()
-            }
-        }
-
         #[test]
         fn comput_sc_accepts_colinear_same_target_anchors() {
             let a0 = mb_anchor_t {
@@ -13978,7 +15793,18 @@ pub mod lchain {
 
         #[test]
         fn lchain_dp_chains_simple_colinear_anchors() {
-            let l2b = test_l2b();
+            let l2b = l2b_t {
+                tot_len: 1000,
+                n_ctg: 1,
+                m_ctg: 1,
+                ctg: vec![l2b_ctg_t {
+                    name: "ctg".to_string(),
+                    comm: None,
+                    len: 1000,
+                    off: 0,
+                }],
+                ..Default::default()
+            };
             let anchors = vec![
                 mb_anchor_t {
                     sid: 0,
@@ -14032,7 +15858,18 @@ pub mod lchain {
 
         #[test]
         fn lchain_dp_splits_different_targets() {
-            let mut l2b = test_l2b();
+            let mut l2b = l2b_t {
+                tot_len: 1000,
+                n_ctg: 1,
+                m_ctg: 1,
+                ctg: vec![l2b_ctg_t {
+                    name: "ctg".to_string(),
+                    comm: None,
+                    len: 1000,
+                    off: 0,
+                }],
+                ..Default::default()
+            };
             l2b.n_ctg = 2;
             l2b.tot_len = 2000;
             l2b.ctg.push(l2b_ctg_t {
@@ -14141,7 +15978,7 @@ pub mod api_test_ex_one {
                     Some(&s.name),
                 );
                 for h in hit.iter().take(n_hit as usize) {
-                    let strand = if h.rev != 0 { '-' } else { '+' };
+                    let strand = if h.rev() != 0 { '-' } else { '+' };
                     out.push_str(&format!(
                         "{}\t{}\t{}\t{}\t{}\t",
                         s.name, s.l_seq, h.qs, h.qe, strand
@@ -14157,7 +15994,7 @@ pub mod api_test_ex_one {
                         h.mapq
                     ));
                     if let Some(extra) = &h.p {
-                        for &c in extra.cigar.iter().take(extra.n_cigar as usize) {
+                        for &c in extra.cigar().iter().take(extra.n_cigar as usize) {
                             let op = MB_CIGAR_STR.as_bytes()[(c & 0xf) as usize] as char;
                             out.push_str(&format!("{}{}", c >> 4, op));
                         }
@@ -14206,11 +16043,11 @@ pub mod api_test_ex_batch {
         tbuf: Option<&mut mb_tbuf_t>,
         n_seq: i32,
         qlen: &[i32],
-        seq: &[String],
-        name: &[String],
+        seq: &[Box<str>],
+        name: &[Box<str>],
     ) -> String {
-        let seq_refs = seq.iter().map(|s| s.as_str()).collect::<Vec<_>>();
-        let name_refs = name.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+        let seq_refs = seq.iter().map(|s| &**s).collect::<Vec<_>>();
+        let name_refs = name.iter().map(|s| &**s).collect::<Vec<_>>();
         let mut n_hit = vec![0i32; n_seq.max(0) as usize];
         let hit = mb_map_batch(
             opt,
@@ -14225,7 +16062,7 @@ pub mod api_test_ex_batch {
         let mut out = String::new();
         for k in 0..n_seq as usize {
             for h in hit[k].iter().take(n_hit[k] as usize) {
-                let strand = if h.rev != 0 { '-' } else { '+' };
+                let strand = if h.rev() != 0 { '-' } else { '+' };
                 out.push_str(&format!(
                     "{}\t{}\t{}\t{}\t{}\t",
                     name[k], qlen[k], h.qs, h.qe, strand
@@ -14241,7 +16078,7 @@ pub mod api_test_ex_batch {
                     h.mapq
                 ));
                 if let Some(extra) = &h.p {
-                    for &c in extra.cigar.iter().take(extra.n_cigar as usize) {
+                    for &c in extra.cigar().iter().take(extra.n_cigar as usize) {
                         let op = MB_CIGAR_STR.as_bytes()[(c & 0xf) as usize] as char;
                         out.push_str(&format!("{}{}", c >> 4, op));
                     }
@@ -14349,7 +16186,7 @@ pub mod main {
     use crate::index::{
         main_fa2bit, main_genbwt, main_genraw, main_gensa, main_index, main_raw2bwt,
     };
-    use crate::ketopt::{ketopt, ketopt_t, ko_longopt_t};
+    use crate::ketopt::{ketopt, ko_longopt_t, KETOPT_INIT};
     use crate::kommon::{
         kom_cputime, kom_panic, kom_parse_num, kom_peakrss, kom_realtime, kom_splitmix64,
     };
@@ -14456,7 +16293,7 @@ pub mod main {
         }];
         let argc = argv.len() as i32;
         let mut args = argv.to_vec();
-        let mut o = ketopt_t::default();
+        let mut o = KETOPT_INIT.clone();
         let mut type_ = mb_bench_type_t::MB_BENCH_2A;
         let mut x = 11u64;
         let mut cs = 1u64;
@@ -14591,7 +16428,7 @@ pub mod main {
 pub mod map_algo {
     #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
-    use crate::align::mb_align_skeleton;
+    use crate::align::mb_align_skeleton_with_scratch;
     use crate::bwt::mb_sai_v;
     use crate::bwt::{mb_bwt_cache, mb_bwt_load, mb_bwt_t, mb_sai_t};
     use crate::l2bit::{l2b_load, l2b_meth_t, l2b_t};
@@ -14602,7 +16439,9 @@ pub mod map_algo {
     };
     use crate::options::{mb_opt_adap, mb_opt_t, MB_F_METH, MB_F_NO_ALN, MB_F_PE, MB_F_PRIMARY5};
     use crate::pe::mb_hit_t;
-    use crate::seed::{mb_anchor, mb_anchor_sort, mb_anchor_v, mb_seed_intv, mb_seed_intv_batch};
+    use crate::seed::{
+        mb_anchor_sort, mb_anchor_v, mb_anchor_with_scratch, mb_seed_intv, mb_seed_intv_batch,
+    };
     use std::sync::atomic::Ordering;
 
     pub const MB_PARENT_UNSET: i32 = -1;
@@ -14619,19 +16458,59 @@ pub mod map_algo {
     #[derive(Clone, Debug, Default, PartialEq, Eq)]
     pub struct mb_tbuf_s {
         pub km: bool,
+        pub se_len: Vec<i32>,
+        pub se_buf: Vec<u8>,
+        pub se_seq_ptrs: Vec<usize>,
+        pub se_sai: Vec<mb_sai_v>,
+        pub anchor_v: mb_anchor_v,
+        pub anchor_aux: Vec<(i64, i64)>,
+        pub anchor_sa: Vec<u64>,
+        pub anchor_sa_batch: Vec<(u64, u64)>,
+        pub anchor_batch: Vec<(i64, i64)>,
+        pub chain_w: Vec<u64>,
+        pub align_tseq: Vec<u8>,
+        pub align_qseq0: Vec<u8>,
     }
     pub type mb_tbuf_t = mb_tbuf_s;
 
     /// Original C global function `mb_idx_load` from `minibwa/map-algo.c:19`.
     pub fn mb_idx_load(prefix: &str, is_meth: i32) -> Option<mb_idx_t> {
+        let t0 = std::env::var_os("MINIBWA_RS_LOAD_TIMING").map(|_| std::time::Instant::now());
         let l2b = l2b_load(format!("{prefix}.l2b"))?;
+        let t_l2b = t0.map(|t0| {
+            let t_l2b = std::time::Instant::now();
+            eprintln!(
+                "[minibwa-rs load] l2b {:.3} ms",
+                (t_l2b - t0).as_secs_f64() * 1000.0
+            );
+            t_l2b
+        });
         let bwt_name = if is_meth != 0 {
             format!("{prefix}.meth.mbw")
         } else {
             format!("{prefix}.mbw")
         };
         let mut bwt = mb_bwt_load(bwt_name)?;
+        let t_bwt = t_l2b.map(|t_l2b| {
+            let t_bwt = std::time::Instant::now();
+            eprintln!(
+                "[minibwa-rs load] bwt {:.3} ms",
+                (t_bwt - t_l2b).as_secs_f64() * 1000.0
+            );
+            t_bwt
+        });
         mb_bwt_cache(&mut bwt, 10);
+        if let (Some(t0), Some(t_bwt)) = (t0, t_bwt) {
+            let t_cache = std::time::Instant::now();
+            eprintln!(
+                "[minibwa-rs load] cache {:.3} ms",
+                (t_cache - t_bwt).as_secs_f64() * 1000.0
+            );
+            eprintln!(
+                "[minibwa-rs load] total {:.3} ms",
+                (t_cache - t0).as_secs_f64() * 1000.0
+            );
+        }
         Some(mb_idx_t {
             is_meth: (is_meth != 0) as i32,
             l2b,
@@ -14664,7 +16543,21 @@ pub mod map_algo {
 
     /// Original C global function `mb_tbuf_init` from `minibwa/map-algo.c:59`.
     pub fn mb_tbuf_init(no_kalloc: i32) -> mb_tbuf_t {
-        mb_tbuf_t { km: no_kalloc == 0 }
+        mb_tbuf_t {
+            km: no_kalloc == 0,
+            se_len: Vec::new(),
+            se_buf: Vec::new(),
+            se_seq_ptrs: Vec::new(),
+            se_sai: Vec::new(),
+            anchor_v: mb_anchor_v::default(),
+            anchor_aux: Vec::new(),
+            anchor_sa: Vec::new(),
+            anchor_sa_batch: Vec::new(),
+            anchor_batch: Vec::new(),
+            chain_w: Vec::new(),
+            align_tseq: Vec::new(),
+            align_qseq0: Vec::new(),
+        }
     }
 
     /// Original C global function `mb_tbuf_km` from `minibwa/map-algo.c:67`.
@@ -14719,10 +16612,10 @@ pub mod map_algo {
         let ak0 = &a[k];
         let ak1 = &a[k + r.cnt as usize - 1];
         r.tid = (ak0.sid >> 1) as i64;
-        r.rev = (ak0.sid & 1) as u32;
+        r.set_rev((ak0.sid & 1) as u8);
         r.ts = ak0.tpos + 1 - ak0.len as i64;
         r.te = ak1.tpos + 1;
-        if r.rev == 0 {
+        if r.rev() == 0 {
             r.qs = ak0.qpos + 1 - ak0.len;
             r.qe = ak1.qpos + 1;
         } else {
@@ -14763,12 +16656,12 @@ pub mod map_algo {
 
     /// Original C global function `mb_sync_high_cov` from `minibwa/map-algo.c:165`.
     pub fn mb_sync_high_cov(n: i32, h: &mut [mb_hit_t]) {
-        let mut max_frac = 0u32;
+        let mut max_frac = 0u8;
         for x in h.iter().take(n as usize) {
-            max_frac = max_frac.max(x.frac_high);
+            max_frac = max_frac.max(x.frac_high());
         }
         for x in h.iter_mut().take(n as usize) {
-            x.frac_high = max_frac;
+            x.set_frac_high(max_frac);
         }
     }
 
@@ -14914,7 +16807,7 @@ pub mod map_algo {
                 ..Default::default()
             };
             mb_hit_set_coor(&mut hit, 100, &l2b, &anchors);
-            assert_eq!((hit.tid, hit.rev, hit.ts, hit.te), (0, 0, 100, 150));
+            assert_eq!((hit.tid, hit.rev(), hit.ts, hit.te), (0, 0, 100, 150));
             assert_eq!((hit.qs, hit.qe, hit.mlen, hit.blen), (10, 60, 30, 50));
 
             let mut rev = hit.clone();
@@ -14923,7 +16816,7 @@ pub mod map_algo {
                 a.sid = 1;
             }
             mb_hit_set_coor(&mut rev, 100, &l2b, &rev_anchors);
-            assert_eq!((rev.rev, rev.qs, rev.qe), (1, 40, 90));
+            assert_eq!((rev.rev(), rev.qs, rev.qe), (1, 40, 90));
         }
 
         #[test]
@@ -14954,21 +16847,21 @@ pub mod map_algo {
 
             let mut hits = vec![
                 mb_hit_t {
-                    frac_high: 3,
+                    flags: mb_hit_t::flags_with(0, 0, 0, 0, 0, 0, 0, 0, 3),
                     ..Default::default()
                 },
                 mb_hit_t {
-                    frac_high: 9,
+                    flags: mb_hit_t::flags_with(0, 0, 0, 0, 0, 0, 0, 0, 9),
                     ..Default::default()
                 },
                 mb_hit_t {
-                    frac_high: 1,
+                    flags: mb_hit_t::flags_with(0, 0, 0, 0, 0, 0, 0, 0, 1),
                     ..Default::default()
                 },
             ];
             mb_sync_high_cov(hits.len() as i32, &mut hits);
             assert_eq!(
-                hits.iter().map(|h| h.frac_high).collect::<Vec<_>>(),
+                hits.iter().map(|h| h.frac_high()).collect::<Vec<_>>(),
                 vec![9, 9, 9]
             );
         }
@@ -15066,15 +16959,15 @@ pub mod map_algo {
                 cnt: 3,
                 score: 99,
                 as_: 0,
-                sam_pri: 1,
-                p: Some(Default::default()),
+                flags: mb_hit_t::flags_with(0, 0, 1, 0, 0, 0, 0, 0, 0),
+                p: Some(mb_extra_t::default().boxed()),
                 ..Default::default()
             };
             mb_hit_set_coor(&mut left, 100, &l2b, &anchors);
             let mut right = mb_hit_t::default();
             mb_split_hit(&mut left, &mut right, 1, 100, &anchors, &l2b);
             assert_eq!(
-                (left.cnt, left.score, left.qs, left.qe, left.split),
+                (left.cnt, left.score, left.qs, left.qe, left.split()),
                 (1, 33, 10, 20, 1)
             );
             assert_eq!(
@@ -15083,11 +16976,11 @@ pub mod map_algo {
             );
             assert_eq!(
                 (
-                    right.sam_pri,
+                    right.sam_pri(),
                     right.p.is_none(),
                     right.qs,
                     right.qe,
-                    right.split
+                    right.split()
                 ),
                 (0, true, 32, 60, 2)
             );
@@ -15127,13 +17020,13 @@ pub mod map_algo {
                 vec![(0, 0), (1, 0), (2, 2)]
             );
             assert_eq!(
-                hits.iter().map(|h| h.sam_pri).collect::<Vec<_>>(),
+                hits.iter().map(|h| h.sam_pri()).collect::<Vec<_>>(),
                 vec![1, 0, 0]
             );
 
             mb_set_sam_pri(hits.len() as i32, &mut hits, 1);
             assert_eq!(
-                hits.iter().map(|h| h.sam_pri).collect::<Vec<_>>(),
+                hits.iter().map(|h| h.sam_pri()).collect::<Vec<_>>(),
                 vec![1, 0, 0]
             );
 
@@ -15203,10 +17096,13 @@ pub mod map_algo {
                     te: 90,
                     score: 80,
                     hash: 1,
-                    p: Some(mb_extra_t {
-                        dp_max: 90,
-                        ..Default::default()
-                    }),
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 90,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    ),
                     ..Default::default()
                 },
                 mb_hit_t {
@@ -15232,10 +17128,13 @@ pub mod map_algo {
 
             hits[0].score = 30;
             hits[1].score = 20;
-            hits[1].p = Some(mb_extra_t {
-                dp_max: 120,
-                ..Default::default()
-            });
+            hits[1].p = Some(
+                mb_extra_t {
+                    dp_max: 120,
+                    ..Default::default()
+                }
+                .boxed(),
+            );
             mb_hit_sort((), &mut n, &mut hits);
             assert_eq!(hits.iter().map(|h| h.hash).collect::<Vec<_>>(), vec![1, 3]);
 
@@ -15246,10 +17145,13 @@ pub mod map_algo {
             opt.a = 2;
             hits[0].mlen = 100;
             hits[1].mlen = 10;
-            hits[1].p = Some(mb_extra_t {
-                dp_max: 200,
-                ..Default::default()
-            });
+            hits[1].p = Some(
+                mb_extra_t {
+                    dp_max: 200,
+                    ..Default::default()
+                }
+                .boxed(),
+            );
             mb_filter_hits(&opt, 100, &mut n, &mut hits);
             assert_eq!(n, 1);
             assert_eq!(hits[0].hash, 1);
@@ -15311,11 +17213,14 @@ pub mod map_algo {
                     subsc: 40,
                     mlen: 90,
                     blen: 100,
-                    p: Some(mb_extra_t {
-                        dp_max: 120,
-                        dp_max2: 60,
-                        ..Default::default()
-                    }),
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 120,
+                            dp_max2: 60,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    ),
                     tid: 0,
                     ts: 10,
                     ..Default::default()
@@ -15332,7 +17237,7 @@ pub mod map_algo {
                 mb_hit_t {
                     id: 2,
                     parent: 2,
-                    inv: 1,
+                    flags: mb_hit_t::flags_with(0, 0, 0, 0, 1, 0, 0, 0, 0),
                     tid: 0,
                     ts: 20,
                     ..Default::default()
@@ -15345,11 +17250,14 @@ pub mod map_algo {
                     subsc: 40,
                     mlen: 85,
                     blen: 100,
-                    p: Some(mb_extra_t {
-                        dp_max: 100,
-                        dp_max2: 40,
-                        ..Default::default()
-                    }),
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 100,
+                            dp_max2: 40,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    ),
                     tid: 0,
                     ts: 40,
                     ..Default::default()
@@ -15422,9 +17330,9 @@ pub mod map_algo {
         }
         *r2 = r.clone();
         r2.id = -1;
-        r2.sam_pri = 0;
+        r2.set_sam_pri(0);
         r2.p = None;
-        r2.split_inv = 0;
+        r2.set_split_inv(0);
         r2.cnt = r.cnt - n;
         r2.score = ((r.score as f32 * (r2.cnt as f32 / r.cnt as f32)) + 0.499) as i32;
         r2.as_ = r.as_ + n;
@@ -15435,8 +17343,8 @@ pub mod map_algo {
         r.cnt -= r2.cnt;
         r.score -= r2.score;
         mb_hit_set_coor(r, qlen, l2b, a);
-        r.split |= 1;
-        r2.split |= 2;
+        r.set_split(r.split() | 1);
+        r2.set_split(r2.split() | 2);
     }
 
     /// Original C global function `mb_sync_hits` from `minibwa/map-algo.c:230`.
@@ -15669,7 +17577,7 @@ pub mod map_algo {
         let mut min_qs = -1;
         let mut first_i = -1;
         for (i, ri) in r.iter_mut().take(n as usize).enumerate() {
-            ri.sam_pri = 0;
+            ri.set_sam_pri(0);
             if ri.id != ri.parent {
                 continue;
             }
@@ -15684,9 +17592,9 @@ pub mod map_algo {
         }
         assert!(n_pri > 0);
         if is_primary5 != 0 {
-            r[min_i as usize].sam_pri = 1;
+            r[min_i as usize].set_sam_pri(1);
         } else {
-            r[first_i as usize].sam_pri = 1;
+            r[first_i as usize].set_sam_pri(1);
         }
     }
 
@@ -15705,7 +17613,7 @@ pub mod map_algo {
             let mut n_2nd = 0;
             for i in 0..n {
                 let p = r[i].parent;
-                if p == i as i32 || r[i].inv != 0 {
+                if p == i as i32 || r[i].inv() != 0 {
                     keep[i] = 1;
                 } else if p >= 0
                     && (p as usize) < r.len()
@@ -15726,7 +17634,7 @@ pub mod map_algo {
             for i in 0..n {
                 if keep[i] != 0 {
                     if k < i {
-                        r[k] = r[i].clone();
+                        r[k] = std::mem::take(&mut r[i]);
                     }
                     k += 1;
                 } else if r[i].p.is_some() {
@@ -15749,7 +17657,7 @@ pub mod map_algo {
         }
         let mut aux = Vec::new();
         for i in 0..n {
-            if r[i].inv != 0 || r[i].cnt >= 0 {
+            if r[i].inv() != 0 || r[i].cnt >= 0 {
                 let score = r[i].p.as_ref().map(|p| p.dp_max).unwrap_or(r[i].score);
                 aux.push((((score as u64) << 32) | r[i].hash as u64, i));
             } else if r[i].p.is_some() {
@@ -15757,20 +17665,20 @@ pub mod map_algo {
             }
         }
         aux.sort_by_key(|&(x, _)| x);
+        let mut old = std::mem::take(r);
         let mut t = Vec::with_capacity(aux.len());
         for &(_, idx) in aux.iter().rev() {
-            t.push(r[idx].clone());
+            t.push(std::mem::take(&mut old[idx]));
         }
         *n_regs = t.len() as i32;
-        r.truncate(t.len());
-        r[..t.len()].clone_from_slice(&t);
+        *r = t;
     }
 
     /// Original C global function `mb_filter_hits` from `minibwa/map-algo.c:394`.
     pub fn mb_filter_hits(opt: &mb_opt_t, qlen: i32, n_regs: &mut i32, regs: &mut Vec<mb_hit_t>) {
         let mut k = 0usize;
         for i in 0..*n_regs as usize {
-            let mut flt = regs[i].flt != 0;
+            let mut flt = regs[i].flt() != 0;
             if regs[i].p.is_some() {
                 let dp_max = regs[i].p.as_ref().unwrap().dp_max;
                 if regs[i].mlen < opt.min_chain_score {
@@ -15784,7 +17692,7 @@ pub mod map_algo {
             }
             if !flt {
                 if k < i {
-                    regs[k] = regs[i].clone();
+                    regs[k] = std::mem::take(&mut regs[i]);
                 }
                 k += 1;
             }
@@ -15807,8 +17715,7 @@ pub mod map_algo {
             if r.as_ as usize != as_ {
                 let src = r.as_ as usize;
                 let cnt = r.cnt as usize;
-                let tmp = a[src..src + cnt].to_vec();
-                a[as_..as_ + cnt].clone_from_slice(&tmp);
+                a.copy_within(src..src + cnt, as_);
                 r.as_ = as_ as i32;
             }
             as_ += r.cnt as usize;
@@ -15822,7 +17729,7 @@ pub mod map_algo {
         if n_regs < 3 {
             return;
         }
-        if !regs.iter().take(n).any(|r| r.inv != 0) {
+        if !regs.iter().take(n).any(|r| r.inv() != 0) {
             return;
         }
         let mut aux = Vec::new();
@@ -15834,7 +17741,7 @@ pub mod map_algo {
         aux.sort_by_key(|&(x, _)| x);
         for i in 1..aux.len().saturating_sub(1) {
             let inv_i = aux[i].1;
-            if regs[inv_i].inv != 0 {
+            if regs[inv_i].inv() != 0 {
                 let l_mapq = regs[aux[i - 1].1].mapq;
                 let r_mapq = regs[aux[i + 1].1].mapq;
                 regs[inv_i].mapq = l_mapq.min(r_mapq);
@@ -15860,7 +17767,7 @@ pub mod map_algo {
             return;
         }
         for r in regs.iter_mut().take(n_regs as usize) {
-            if r.inv != 0 {
+            if r.inv() != 0 {
                 r.mapq = 0;
             } else if r.parent == r.id {
                 let subsc = r.subsc.max(min_chain_sc);
@@ -16002,37 +17909,55 @@ pub mod map_algo {
         let sub_diff = (opt.a + opt.b).max(opt.q + opt.e);
         let chn_pen_gap = opt.chain_gap_scale * 0.01 * opt.min_len as f32;
 
-        let mut v = mb_anchor_v::default();
+        let mut v = std::mem::take(&mut b.anchor_v);
         if (KOM_DBG_FLAG.load(Ordering::Relaxed) & MB_DBG_QNAME) != 0 {
             eprintln!("QN\t{}", qname.unwrap_or(""));
         }
         if (KOM_DBG_FLAG.load(Ordering::Relaxed) & MB_DBG_SEED) != 0 {
             mb_dbg_seed(u.n as i64, &u.a, qname);
         }
-        mb_anchor((), idx, u, qlen as i32, mt, opt.max_occ, &mut v);
+        crate::stage_time::measure(crate::stage_time::Bucket::Anchor, || {
+            mb_anchor_with_scratch(
+                (),
+                idx,
+                u,
+                qlen as i32,
+                mt,
+                opt.max_occ,
+                &mut v,
+                &mut b.anchor_aux,
+                &mut b.anchor_sa,
+                &mut b.anchor_sa_batch,
+                &mut b.anchor_batch,
+            );
+        });
         u.n = 0;
         u.a.clear();
 
         let mut n_hit = 0;
-        let mut w = Vec::new();
+        let mut w = std::mem::take(&mut b.chain_w);
+        w.clear();
         if (KOM_DBG_FLAG.load(Ordering::Relaxed) & MB_DBG_ANCHOR) != 0 {
             mb_dbg_anchor(idx, qlen as i32, v.n, &v.a, qname);
         }
-        let mut a = mb_lchain_dp(
-            (),
-            &idx.l2b,
-            opt.max_gap,
-            opt.max_gap,
-            opt.bw,
-            opt.max_chain_skip,
-            opt.max_chain_iter,
-            opt.min_chain_score,
-            chn_pen_gap,
-            v.n,
-            v.a,
-            &mut n_hit,
-            &mut w,
-        );
+        let anchors = std::mem::take(&mut v.a);
+        let mut a = crate::stage_time::measure(crate::stage_time::Bucket::Chain, || {
+            mb_lchain_dp(
+                (),
+                &idx.l2b,
+                opt.max_gap,
+                opt.max_gap,
+                opt.bw,
+                opt.max_chain_skip,
+                opt.max_chain_iter,
+                opt.min_chain_score,
+                chn_pen_gap,
+                v.n,
+                anchors,
+                &mut n_hit,
+                &mut w,
+            )
+        });
 
         if opt.bw_long > opt.bw * 2 && is_sr == 0 && n_hit > 0 {
             let mut best = 0usize;
@@ -16058,21 +17983,23 @@ pub mod map_algo {
                     .sum::<i64>();
                 mb_anchor_sort(&idx.l2b, n_a, &mut a);
                 w.clear();
-                a = mb_lchain_dp(
-                    (),
-                    &idx.l2b,
-                    opt.max_gap,
-                    opt.max_gap,
-                    opt.bw_long,
-                    opt.max_chain_skip,
-                    opt.max_chain_iter,
-                    opt.min_chain_score,
-                    chn_pen_gap,
-                    n_a,
-                    a,
-                    &mut n_hit,
-                    &mut w,
-                );
+                a = crate::stage_time::measure(crate::stage_time::Bucket::Chain, || {
+                    mb_lchain_dp(
+                        (),
+                        &idx.l2b,
+                        opt.max_gap,
+                        opt.max_gap,
+                        opt.bw_long,
+                        opt.max_chain_skip,
+                        opt.max_chain_iter,
+                        opt.min_chain_score,
+                        chn_pen_gap,
+                        n_a,
+                        a,
+                        &mut n_hit,
+                        &mut w,
+                    )
+                });
             }
         }
 
@@ -16096,17 +18023,21 @@ pub mod map_algo {
         );
 
         if (opt.flag & MB_F_NO_ALN) == 0 {
-            mb_align_skeleton(
-                (),
-                opt,
-                idx,
-                qlen as i32,
-                seq,
-                mt,
-                &mut n_hit,
-                &mut hit,
-                &mut a,
-            );
+            crate::stage_time::measure(crate::stage_time::Bucket::Align, || {
+                mb_align_skeleton_with_scratch(
+                    (),
+                    opt,
+                    idx,
+                    qlen as i32,
+                    seq,
+                    mt,
+                    &mut n_hit,
+                    &mut hit,
+                    &mut a,
+                    &mut b.align_tseq,
+                    &mut b.align_qseq0,
+                );
+            });
             mb_set_parent(
                 (),
                 opt.mask_level,
@@ -16126,20 +18057,27 @@ pub mod map_algo {
             );
             mb_set_sam_pri(n_hit, &mut hit, ((opt.flag & MB_F_PRIMARY5) != 0) as i32);
         }
-        for h in hit.iter_mut().take(n_hit as usize) {
-            h.frac_high = (255.0 * hi_cov as f64 / qlen as f64) as u32;
-        }
-        mb_set_mapq(
-            (),
-            qlen as i32,
-            n_hit,
-            &mut hit,
-            opt.min_chain_score,
-            opt.a,
-            is_sr,
-            opt.max_sr_len,
-        );
+        crate::stage_time::measure(crate::stage_time::Bucket::MapqPost, || {
+            for h in hit.iter_mut().take(n_hit as usize) {
+                h.set_frac_high((255.0 * hi_cov as f64 / qlen as f64) as u8);
+            }
+            mb_set_mapq(
+                (),
+                qlen as i32,
+                n_hit,
+                &mut hit,
+                opt.min_chain_score,
+                opt.a,
+                is_sr,
+                opt.max_sr_len,
+            );
+        });
         *n_hit_ = n_hit;
+        v.n = 0;
+        v.m = a.capacity() as i64;
+        v.a = a;
+        b.anchor_v = v;
+        b.chain_w = w;
         hit
     }
 
@@ -16244,25 +18182,28 @@ pub mod map_algo {
                 }
                 for k in 0..sb_n as usize {
                     let idx_k = sb_st as usize + k;
-                    seq4[k] = seq[idx_k]
-                        .bytes()
-                        .take(qlen[idx_k] as usize)
-                        .map(|c| match c {
+                    seq4[k].clear();
+                    seq4[k].extend(seq[idx_k].bytes().take(qlen[idx_k] as usize).map(
+                        |c| match c {
                             b'A' | b'a' => 0,
                             b'C' | b'c' => 1,
                             b'G' | b'g' => 2,
                             b'T' | b't' => 3,
                             _ => 4,
-                        })
-                        .collect();
+                        },
+                    ));
                     sai[k] = mb_sai_v::default();
                 }
+                let seq4_refs = seq4[..sb_n as usize]
+                    .iter()
+                    .map(|s| s.as_ptr())
+                    .collect::<Vec<_>>();
                 mb_seed_intv_batch(
                     (),
                     &idx.bwt,
                     sb_n,
                     &qlen[sb_st as usize..],
-                    &seq4[..sb_n as usize],
+                    &seq4_refs,
                     opt.min_len,
                     opt.max_sub_occ,
                     &mut sai[..sb_n as usize],
@@ -16317,8 +18258,8 @@ pub mod map_main {
     };
     use crate::bwt::mb_sai_v;
     use crate::format::{mb_fmt_sam_hdr, mb_format};
-    use crate::ketopt::{ketopt, ketopt_t, ko_longopt_t};
-    use crate::kommon::{kom_panic, kom_parse_num, kstring_t};
+    use crate::ketopt::{ketopt, ko_longopt_t, KETOPT_INIT};
+    use crate::kommon::{kom_panic, kom_parse_num, kstring_t, KOM_NT4_TABLE};
     use crate::l2bit::l2b_meth_t;
     use crate::main::MB_VERSION;
     use crate::map_algo::{
@@ -16334,14 +18275,21 @@ pub mod map_main {
         MB_F_PE_PREDEF, MB_F_PRIMARY5, MB_F_SAM, MB_F_SUPP_SOFT, MB_F_WRITE_CS, MB_F_WRITE_DS,
         MB_F_WRITE_MD,
     };
-    use crate::pe::{mb_hit_t, mb_pair, mb_pestat, mb_pestat_t};
+    use crate::pe::{mb_hit_buf_t, mb_hit_t, mb_pair, mb_pestat, mb_pestat_t};
     use crate::seed::mb_seed_intv_batch;
+    use rayon::prelude::*;
+    use rayon::ThreadPool;
+    use std::cell::RefCell;
     use std::ffi::CStr;
     use std::sync::atomic::Ordering;
-    use std::{fs, io::Write};
+    use std::sync::mpsc;
+    use std::{fs, io::BufWriter, io::Write};
 
-    #[derive(Debug)]
-    pub struct pipeline_t<'a> {
+    thread_local! {
+        static MAIN_MAP_OUTPUT_WRITER: RefCell<Option<*mut dyn Write>> = RefCell::new(None);
+    }
+
+    pub struct pipeline_t<'a, 'w, 'p> {
         pub n_fp: i32,
         pub n_threads: i32,
         pub n_base: i64,
@@ -16350,7 +18298,10 @@ pub mod map_main {
         pub opt: &'a mb_opt_t,
         pub fp: Vec<mb_bseq_file_t>,
         pub idx: &'a mb_idx_t,
+        pub worker_pool: Option<&'p ThreadPool>,
         pub output: String,
+        pub output_writer: Option<&'w mut dyn Write>,
+        pub output_error: bool,
     }
 
     #[derive(Debug)]
@@ -16368,85 +18319,215 @@ pub mod map_main {
         pub sb_cnt: Vec<i32>,
         pub pes: [mb_pestat_t; 4],
         pub seq: Vec<mb_bseq1_t>,
-        pub hit: Vec<Vec<mb_hit_t>>,
+        pub hit: Vec<mb_hit_buf_t>,
         pub tbuf: Vec<mb_tbuf_t>,
     }
 
+    #[derive(Clone, Copy)]
+    struct SeBatchView<'a> {
+        opt: &'a mb_opt_t,
+        idx: &'a mb_idx_t,
+        seq: &'a [mb_bseq1_t],
+        seg_off: &'a [i32],
+        seg_cnt: &'a [i32],
+        sb_off: &'a [i32],
+        sb_cnt: &'a [i32],
+    }
+
+    #[derive(Clone, Copy)]
+    struct SeBatchOutputs {
+        n_hit: *mut i32,
+        hit: *mut mb_hit_buf_t,
+    }
+
+    unsafe impl Send for SeBatchOutputs {}
+    unsafe impl Sync for SeBatchOutputs {}
+
+    impl SeBatchOutputs {
+        unsafe fn write(self, idx: usize, n_hit: i32, hit: Vec<mb_hit_t>) {
+            // SAFETY: callers partition work by non-overlapping sub-batches,
+            // so each read slot is written by at most one worker.
+            unsafe {
+                *self.n_hit.add(idx) = n_hit;
+                *self.hit.add(idx) = mb_hit_buf_t::from_vec(hit);
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct SeBatchScratch {
+        tbuf: *mut mb_tbuf_t,
+        len: usize,
+    }
+
+    unsafe impl Send for SeBatchScratch {}
+    unsafe impl Sync for SeBatchScratch {}
+
+    impl SeBatchScratch {
+        unsafe fn get(self, tid: usize) -> &'static mut mb_tbuf_t {
+            debug_assert!(tid < self.len);
+            // SAFETY: Rayon runs at most one task on a worker thread at a time.
+            // Each worker indexes its own scratch buffer by current_thread_index().
+            unsafe { &mut *self.tbuf.add(tid.min(self.len - 1)) }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct PePairView<'a> {
+        opt: &'a mb_opt_t,
+        idx: &'a mb_idx_t,
+        seq: &'a [mb_bseq1_t],
+        seg_off: &'a [i32],
+        seg_cnt: &'a [i32],
+        pes: &'a [mb_pestat_t; 4],
+    }
+
+    #[derive(Clone, Copy)]
+    struct PePairOutputs {
+        n_hit: *mut i32,
+        hit: *mut mb_hit_buf_t,
+    }
+
+    unsafe impl Send for PePairOutputs {}
+    unsafe impl Sync for PePairOutputs {}
+
+    impl PePairOutputs {
+        unsafe fn pair_in_place(self, view: PePairView<'_>, frag: usize, tid: i32) {
+            if view.seg_cnt[frag] != 2 {
+                return;
+            }
+            let off = view.seg_off[frag] as usize;
+            if (KOM_DBG_FLAG.load(Ordering::Relaxed) & MB_DBG_QNAME) != 0 {
+                eprintln!("QP\t{}\t{}", view.seq[off].name, tid);
+            }
+            let len = [view.seq[off].l_seq as i32, view.seq[off + 1].l_seq as i32];
+            let seq = [&*view.seq[off].seq, &*view.seq[off + 1].seq];
+            // SAFETY: paired-end work is partitioned by fragment. Each
+            // two-read hit slot is owned by exactly one fragment.
+            unsafe {
+                let mut n_pair = [*self.n_hit.add(off), *self.n_hit.add(off + 1)];
+                let mut hit_pair = [
+                    std::mem::take(&mut *self.hit.add(off)).into_vec(),
+                    std::mem::take(&mut *self.hit.add(off + 1)).into_vec(),
+                ];
+                mb_pair(
+                    (),
+                    view.opt,
+                    &view.idx.l2b,
+                    &mut n_pair,
+                    &mut hit_pair,
+                    view.pes,
+                    len,
+                    seq,
+                );
+                *self.n_hit.add(off) = n_pair[0];
+                *self.n_hit.add(off + 1) = n_pair[1];
+                *self.hit.add(off) = mb_hit_buf_t::from_vec(std::mem::take(&mut hit_pair[0]));
+                *self.hit.add(off + 1) = mb_hit_buf_t::from_vec(std::mem::take(&mut hit_pair[1]));
+            }
+        }
+    }
+
+    fn release_step_tbuf(s: &mut step_t<'_>) {
+        for b in std::mem::take(&mut s.tbuf) {
+            mb_tbuf_destroy(Some(b));
+        }
+    }
+
     /// Original C static function `worker_for_se_batch` from `minibwa/map-main.c:33`.
-    pub fn worker_for_se_batch(s: &mut step_t<'_>, i: i64, tid: i32) {
-        let opt = s.opt;
-        let idx = s.idx;
-        let b = &mut s.tbuf[tid.max(0) as usize];
+    fn worker_for_se_batch_collect_view(
+        view: SeBatchView<'_>,
+        i: i64,
+        tid: i32,
+        b: &mut mb_tbuf_t,
+    ) -> Vec<(usize, i32, Vec<mb_hit_t>)> {
+        let opt = view.opt;
+        let idx = view.idx;
         let sb_i = i.max(0) as usize;
         let mut n = 0usize;
         let mut tot = 0usize;
-        for k in 0..s.sb_cnt[sb_i] as usize {
-            let frag = s.sb_off[sb_i] as usize + k;
-            let off = s.seg_off[frag] as usize;
-            let cnt = s.seg_cnt[frag] as usize;
+        let mut out = Vec::with_capacity(n);
+        for k in 0..view.sb_cnt[sb_i] as usize {
+            let frag = view.sb_off[sb_i] as usize + k;
+            let off = view.seg_off[frag] as usize;
+            let cnt = view.seg_cnt[frag] as usize;
             n += cnt;
             for j in 0..cnt {
-                tot += s.seq[off + j].l_seq as usize;
+                tot += view.seq[off + j].l_seq as usize;
             }
         }
-        let mut len = vec![0i32; n];
-        let mut seq = vec![Vec::<u8>::new(); n];
-        let mut sai = vec![mb_sai_v::default(); n];
+        let mut len = std::mem::take(&mut b.se_len);
+        len.clear();
+        len.resize(n, 0);
+        let mut buf = std::mem::take(&mut b.se_buf);
+        buf.clear();
+        buf.reserve(tot.saturating_sub(buf.capacity()));
+        let mut sai = std::mem::take(&mut b.se_sai);
+        sai.clear();
+        sai.resize(n, mb_sai_v::default());
         let mut p = 0usize;
-        for k in 0..s.sb_cnt[sb_i] as usize {
-            let frag = s.sb_off[sb_i] as usize + k;
-            let off = s.seg_off[frag] as usize;
-            let cnt = s.seg_cnt[frag] as usize;
-            for j in 0..cnt {
-                let t = &s.seq[off + j];
-                len[p] = t.l_seq as i32;
-                let mut q = Vec::with_capacity(t.l_seq as usize);
-                for c in t.seq.bytes().take(t.l_seq as usize) {
-                    q.push(match c {
-                        b'A' | b'a' => 0,
-                        b'C' | b'c' => 1,
-                        b'G' | b'g' => 2,
-                        b'T' | b't' => 3,
-                        _ => 4,
-                    });
-                }
-                if idx.is_meth != 0 {
-                    if (j & 1) == 0 {
-                        for x in &mut q {
-                            if *x == 1 {
-                                *x = 3;
+        crate::stage_time::measure(crate::stage_time::Bucket::Encode, || {
+            for k in 0..view.sb_cnt[sb_i] as usize {
+                let frag = view.sb_off[sb_i] as usize + k;
+                let off = view.seg_off[frag] as usize;
+                let cnt = view.seg_cnt[frag] as usize;
+                for j in 0..cnt {
+                    let t = &view.seq[off + j];
+                    len[p] = t.l_seq as i32;
+                    let range_st = buf.len();
+                    buf.extend(
+                        t.seq
+                            .bytes()
+                            .take(t.l_seq as usize)
+                            .map(|c| KOM_NT4_TABLE[c as usize]),
+                    );
+                    if idx.is_meth != 0 {
+                        if (j & 1) == 0 {
+                            for x in &mut buf[range_st..] {
+                                if *x == 1 {
+                                    *x = 3;
+                                }
                             }
-                        }
-                    } else {
-                        for x in &mut q {
-                            if *x == 2 {
-                                *x = 0;
+                        } else {
+                            for x in &mut buf[range_st..] {
+                                if *x == 2 {
+                                    *x = 0;
+                                }
                             }
                         }
                     }
+                    p += 1;
                 }
-                seq[p] = q;
-                p += 1;
             }
-        }
+        });
         assert_eq!(p, n);
-        mb_seed_intv_batch(
-            (),
-            &idx.bwt,
-            n as i32,
-            &len,
-            &seq,
-            opt.min_len,
-            opt.max_sub_occ,
-            &mut sai,
-        );
+        let mut seq = std::mem::take(&mut b.se_seq_ptrs);
+        seq.clear();
+        seq.reserve(n.saturating_sub(seq.capacity()));
+        let mut range_st = 0usize;
+        for &l in &len {
+            seq.push(unsafe { buf.as_ptr().add(range_st) } as usize);
+            range_st += l as usize;
+        }
+        crate::stage_time::measure(crate::stage_time::Bucket::Seed, || {
+            mb_seed_intv_batch(
+                (),
+                &idx.bwt,
+                n as i32,
+                &len,
+                unsafe { std::slice::from_raw_parts(seq.as_ptr() as *const *const u8, seq.len()) },
+                opt.min_len,
+                opt.max_sub_occ,
+                &mut sai,
+            );
+        });
         p = 0;
-        for k in 0..s.sb_cnt[sb_i] as usize {
-            let frag = s.sb_off[sb_i] as usize + k;
-            let off = s.seg_off[frag] as usize;
-            let cnt = s.seg_cnt[frag] as usize;
+        for k in 0..view.sb_cnt[sb_i] as usize {
+            let frag = view.sb_off[sb_i] as usize + k;
+            let off = view.seg_off[frag] as usize;
+            let cnt = view.seg_cnt[frag] as usize;
             for j in 0..cnt {
-                let t = &s.seq[off + j];
+                let t = &view.seq[off + j];
                 let mt = if idx.is_meth == 0 {
                     l2b_meth_t::L2B_METH_NONE
                 } else if (j & 1) == 0 {
@@ -16456,22 +18537,100 @@ pub mod map_main {
                 };
                 let mut opt_adap = mb_opt_t::default();
                 mb_opt_adap(opt, len[p], &mut opt_adap);
-                s.hit[off + j] = mb_map_sai(
+                let mut n_hit = 0;
+                let hit = mb_map_sai(
                     &opt_adap,
                     idx,
                     len[p] as i64,
-                    &seq[p],
+                    unsafe { std::slice::from_raw_parts(seq[p] as *const u8, len[p] as usize) },
                     mt,
                     &mut sai[p],
-                    &mut s.n_hit[off + j],
+                    &mut n_hit,
                     b,
                     Some(&t.name),
                 );
+                out.push((off + j, n_hit, hit));
                 p += 1;
             }
         }
         let _ = tot;
+        let _ = tid;
         mb_tbuf_reset(b, opt.cap_kalloc);
+        b.se_len = len;
+        b.se_buf = buf;
+        b.se_seq_ptrs = seq;
+        b.se_sai = sai;
+        crate::stage_time::flush_local();
+        out
+    }
+
+    fn worker_for_se_batch_collect(
+        s: &mut step_t<'_>,
+        i: i64,
+        tid: i32,
+    ) -> Vec<(usize, i32, Vec<mb_hit_t>)> {
+        let tid_idx = tid.max(0) as usize;
+        let mut b = mb_tbuf_init(((s.opt.flag & MB_F_NO_KALLOC) != 0) as i32);
+        let b = if tid_idx < s.tbuf.len() {
+            &mut s.tbuf[tid_idx]
+        } else {
+            &mut b
+        };
+        worker_for_se_batch_collect_view(
+            SeBatchView {
+                opt: s.opt,
+                idx: s.idx,
+                seq: &s.seq,
+                seg_off: &s.seg_off,
+                seg_cnt: &s.seg_cnt,
+                sb_off: &s.sb_off,
+                sb_cnt: &s.sb_cnt,
+            },
+            i,
+            tid,
+            b,
+        )
+    }
+
+    /// Original C static function `worker_for_se_batch` from `minibwa/map-main.c:33`.
+    pub fn worker_for_se_batch(s: &mut step_t<'_>, i: i64, tid: i32) {
+        for (idx, n_hit, hit) in worker_for_se_batch_collect(s, i, tid) {
+            s.n_hit[idx] = n_hit;
+            s.hit[idx] = mb_hit_buf_t::from_vec(hit);
+        }
+    }
+
+    fn worker_for_pe_collect(
+        s: &step_t<'_>,
+        i: i64,
+        tid: i32,
+    ) -> Option<(usize, [i32; 2], [Vec<mb_hit_t>; 2])> {
+        let frag = i.max(0) as usize;
+        if s.seg_cnt[frag] != 2 {
+            return None;
+        }
+        let off = s.seg_off[frag] as usize;
+        if (KOM_DBG_FLAG.load(Ordering::Relaxed) & MB_DBG_QNAME) != 0 {
+            eprintln!("QP\t{}\t{}", s.seq[off].name, tid);
+        }
+        let len = [s.seq[off].l_seq as i32, s.seq[off + 1].l_seq as i32];
+        let seq = [&*s.seq[off].seq, &*s.seq[off + 1].seq];
+        let mut n_pair = [s.n_hit[off], s.n_hit[off + 1]];
+        let mut hit_pair = [
+            s.hit[off].as_slice().to_vec(),
+            s.hit[off + 1].as_slice().to_vec(),
+        ];
+        mb_pair(
+            (),
+            s.opt,
+            &s.idx.l2b,
+            &mut n_pair,
+            &mut hit_pair,
+            &s.pes,
+            len,
+            seq,
+        );
+        Some((off, n_pair, hit_pair))
     }
 
     /// Original C static function `worker_for_pe` from `minibwa/map-main.c:82`.
@@ -16485,9 +18644,12 @@ pub mod map_main {
             eprintln!("QP\t{}\t{}", s.seq[off].name, tid);
         }
         let len = [s.seq[off].l_seq as i32, s.seq[off + 1].l_seq as i32];
-        let seq = [s.seq[off].seq.as_str(), s.seq[off + 1].seq.as_str()];
+        let seq = [&*s.seq[off].seq, &*s.seq[off + 1].seq];
         let mut n_pair = [s.n_hit[off], s.n_hit[off + 1]];
-        let mut hit_pair = [s.hit[off].clone(), s.hit[off + 1].clone()];
+        let mut hit_pair = [
+            std::mem::take(&mut s.hit[off]).into_vec(),
+            std::mem::take(&mut s.hit[off + 1]).into_vec(),
+        ];
         mb_pair(
             (),
             s.opt,
@@ -16500,14 +18662,14 @@ pub mod map_main {
         );
         s.n_hit[off] = n_pair[0];
         s.n_hit[off + 1] = n_pair[1];
-        s.hit[off] = hit_pair[0].clone();
-        s.hit[off + 1] = hit_pair[1].clone();
+        s.hit[off] = mb_hit_buf_t::from_vec(std::mem::take(&mut hit_pair[0]));
+        s.hit[off + 1] = mb_hit_buf_t::from_vec(std::mem::take(&mut hit_pair[1]));
         let _ = tid;
     }
 
     /// Original C static function `worker_pipeline` from `minibwa/map-main.c:98`.
-    pub fn worker_pipeline<'a>(
-        p: &mut pipeline_t<'a>,
+    pub fn worker_pipeline<'a, 'w, 'p>(
+        p: &mut pipeline_t<'a, 'w, 'p>,
         step: i32,
         input: Option<step_t<'a>>,
     ) -> Option<step_t<'a>> {
@@ -16518,27 +18680,29 @@ pub mod map_main {
             let with_comment = ((opt.flag & MB_F_COPY_COMMENT) != 0) as i32;
             let frag_mode = (p.n_fp > 1 || (opt.flag & MB_F_PE) != 0) as i32;
             let mut n_seq = 0;
-            let mut seq = if p.n_fp > 1 {
-                mb_bseq_read_frag(
-                    p.n_fp,
-                    &mut p.fp,
-                    p.mb_size,
-                    with_qual,
-                    with_comment,
-                    &mut n_seq,
-                )
-            } else {
-                mb_bseq_read(
-                    &mut p.fp[0],
-                    p.mb_size,
-                    with_qual,
-                    with_comment,
-                    frag_mode,
-                    MIN_READ_CNT,
-                    opt.max_mb_size,
-                    &mut n_seq,
-                )
-            };
+            let mut seq = crate::stage_time::measure(crate::stage_time::Bucket::ReadIo, || {
+                if p.n_fp > 1 {
+                    mb_bseq_read_frag(
+                        p.n_fp,
+                        &mut p.fp,
+                        p.mb_size,
+                        with_qual,
+                        with_comment,
+                        &mut n_seq,
+                    )
+                } else {
+                    mb_bseq_read(
+                        &mut p.fp[0],
+                        p.mb_size,
+                        with_qual,
+                        with_comment,
+                        frag_mode,
+                        MIN_READ_CNT,
+                        opt.max_mb_size,
+                        &mut n_seq,
+                    )
+                }
+            });
             if seq.is_empty() {
                 return None;
             }
@@ -16558,7 +18722,7 @@ pub mod map_main {
                     failed: 1,
                     ..Default::default()
                 }; 4],
-                hit: vec![Vec::new(); n_seq as usize],
+                hit: vec![mb_hit_buf_t::default(); n_seq as usize],
                 tbuf: Vec::with_capacity(opt.n_thread.max(1) as usize),
                 seq: Vec::new(),
             };
@@ -16601,8 +18765,8 @@ pub mod map_main {
                         && s.seq[j0].name.as_bytes()[l0 - 1] != s.seq[j1].name.as_bytes()[l1 - 1]
                         && s.seq[j0].name.as_bytes()[l0 - 2] == b'/'
                     {
-                        s.seq[j0].name.truncate(l0 - 2);
-                        s.seq[j1].name.truncate(l1 - 2);
+                        s.seq[j0].name = s.seq[j0].name[..l0 - 2].into();
+                        s.seq[j1].name = s.seq[j1].name[..l1 - 2].into();
                     }
                 }
             }
@@ -16626,8 +18790,40 @@ pub mod map_main {
             Some(s)
         } else if step == 1 {
             let mut s = input?;
-            for i in 0..s.n_sb {
-                worker_for_se_batch(&mut s, i as i64, 0);
+            if let Some(pool) = p.worker_pool {
+                let view = SeBatchView {
+                    opt: s.opt,
+                    idx: s.idx,
+                    seq: &s.seq,
+                    seg_off: &s.seg_off,
+                    seg_cnt: &s.seg_cnt,
+                    sb_off: &s.sb_off,
+                    sb_cnt: &s.sb_cnt,
+                };
+                let outputs = SeBatchOutputs {
+                    n_hit: s.n_hit.as_mut_ptr(),
+                    hit: s.hit.as_mut_ptr(),
+                };
+                let scratch = SeBatchScratch {
+                    tbuf: s.tbuf.as_mut_ptr(),
+                    len: s.tbuf.len(),
+                };
+                pool.install(|| {
+                    (0..s.n_sb as usize).into_par_iter().for_each(|i| {
+                        let tid = rayon::current_thread_index()
+                            .expect("map workers must run inside the configured Rayon pool");
+                        let b = unsafe { scratch.get(tid) };
+                        for (idx, n_hit, hit) in
+                            worker_for_se_batch_collect_view(view, i as i64, tid as i32, b)
+                        {
+                            unsafe { outputs.write(idx, n_hit, hit) };
+                        }
+                    })
+                });
+            } else {
+                for i in 0..s.n_sb {
+                    worker_for_se_batch(&mut s, i as i64, 0);
+                }
             }
             if (opt.flag & MB_F_PE) != 0 && s.n_frag < s.n_seq && (opt.flag & MB_F_NO_PAIRING) == 0
             {
@@ -16649,22 +18845,60 @@ pub mod map_main {
                         &mut s.pes,
                     );
                 }
-                for i in 0..s.n_frag {
-                    worker_for_pe(&mut s, i as i64, 0);
+                let _pair_t0 = if crate::stage_time::enabled() {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
+                if let Some(pool) = p.worker_pool {
+                    let view = PePairView {
+                        opt: s.opt,
+                        idx: s.idx,
+                        seq: &s.seq,
+                        seg_off: &s.seg_off,
+                        seg_cnt: &s.seg_cnt,
+                        pes: &s.pes,
+                    };
+                    let outputs = PePairOutputs {
+                        n_hit: s.n_hit.as_mut_ptr(),
+                        hit: s.hit.as_mut_ptr(),
+                    };
+                    pool.install(|| {
+                        (0..s.n_frag as usize).into_par_iter().for_each(|i| {
+                            let tid = rayon::current_thread_index().unwrap_or(0) as i32;
+                            unsafe { outputs.pair_in_place(view, i, tid) };
+                        })
+                    });
+                } else {
+                    for i in 0..s.n_frag {
+                        worker_for_pe(&mut s, i as i64, 0);
+                    }
+                }
+                if let Some(t0) = _pair_t0 {
+                    crate::stage_time::accumulate_global(
+                        crate::stage_time::Bucket::Pair,
+                        t0.elapsed().as_nanos() as u64,
+                    );
                 }
             }
             Some(s)
         } else if step == 2 {
-            let s = input?;
+            let mut s = input?;
             let mut out = kstring_t::default();
+            const OUTPUT_FLUSH_BYTES: usize = 1 << 20;
             let mut tot_len = 0i64;
-            for b in s.tbuf {
-                mb_tbuf_destroy(Some(b));
-            }
+            release_step_tbuf(&mut s);
+            let _stage2 = if crate::stage_time::enabled() {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
             for k in 0..s.n_frag as usize {
                 let seg_st = s.seg_off[k] as usize;
                 let seg_en = seg_st + s.seg_cnt[k] as usize;
-                out.l = 0;
+                if p.output_writer.is_none() {
+                    out.l = 0;
+                }
                 for i in seg_st..seg_en {
                     let mate_qlen = if seg_en - seg_st > 1 {
                         let mate_idx = if i != seg_en - 1 { i + 1 } else { seg_st };
@@ -16712,7 +18946,32 @@ pub mod map_main {
                         );
                     }
                 }
-                p.output.push_str(&String::from_utf8_lossy(&out.s[..out.l]));
+                if p.output_writer.is_some() {
+                    if out.l >= OUTPUT_FLUSH_BYTES {
+                        if let Some(writer) = p.output_writer.as_mut() {
+                            if writer.write_all(&out.s[..out.l]).is_err() {
+                                p.output_error = true;
+                            }
+                        }
+                        out.l = 0;
+                    }
+                } else {
+                    p.output
+                        .push_str(std::str::from_utf8(&out.s[..out.l]).unwrap());
+                }
+            }
+            if out.l > 0 && p.output_writer.is_some() {
+                if let Some(writer) = p.output_writer.as_mut() {
+                    if writer.write_all(&out.s[..out.l]).is_err() {
+                        p.output_error = true;
+                    }
+                }
+            }
+            if let Some(t0) = _stage2 {
+                crate::stage_time::accumulate_global(
+                    crate::stage_time::Bucket::Output,
+                    t0.elapsed().as_nanos() as u64,
+                );
             }
             p.n_base += tot_len;
             None
@@ -16751,13 +19010,34 @@ pub mod map_main {
         fn_: &[&str],
         fn_out: Option<&str>,
     ) -> (i32, String) {
+        let worker_pool = if opt.n_thread > 1 {
+            Some(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(opt.n_thread as usize)
+                    .build()
+                    .expect("failed to build Rayon thread pool"),
+            )
+        } else {
+            None
+        };
+        mb_map_file_with_pool(opt, idx, n, fn_, fn_out, worker_pool.as_ref())
+    }
+
+    pub fn mb_map_file_with_pool(
+        opt: &mb_opt_t,
+        idx: &mb_idx_t,
+        n: i32,
+        fn_: &[&str],
+        fn_out: Option<&str>,
+        worker_pool: Option<&ThreadPool>,
+    ) -> (i32, String) {
         if n < 1 {
             return (-1, String::new());
         }
         let mut output_file = if let Some(name) = fn_out {
             if name != "-" {
                 match fs::File::create(name) {
-                    Ok(fp) => Some(fp),
+                    Ok(fp) => Some(BufWriter::with_capacity(1 << 20, fp)),
                     Err(_) => return (-1, String::new()),
                 }
             } else {
@@ -16769,37 +19049,157 @@ pub mod map_main {
         let Some(fp) = mb_open_bseqs(n, fn_) else {
             return (-1, String::new());
         };
-        let mut pl = pipeline_t {
-            n_fp: n,
-            n_threads: if opt.n_thread <= 2 { opt.n_thread } else { 3 },
-            n_base: 0,
-            n_seq: 0,
-            mb_size: opt.mb_size,
-            opt,
-            fp,
-            idx,
-            output: String::new(),
+        let output_writer: Option<&mut dyn Write> = if fn_out.is_none() {
+            MAIN_MAP_OUTPUT_WRITER.with(|writer| {
+                // SAFETY: main_map_write installs this pointer only for the
+                // synchronous dynamic extent of its main_map call.
+                writer.borrow().map(|ptr| unsafe { &mut *ptr })
+            })
+        } else {
+            None
         };
-        while let Some(s0) = worker_pipeline(&mut pl, 0, None) {
-            let Some(s1) = worker_pipeline(&mut pl, 1, Some(s0)) else {
-                break;
+        let run =
+            |fp: Vec<mb_bseq_file_t>, output_writer: Option<&mut dyn Write>| -> (i32, String) {
+                if worker_pool.is_some() && opt.mb_size <= 20_000_000 {
+                    return std::thread::scope(|scope| {
+                        let (read_tx, read_rx) = mpsc::sync_channel(0);
+                        let (map_tx, map_rx) = mpsc::sync_channel(0);
+                        scope.spawn(move || {
+                            let mut read_pl = pipeline_t {
+                                n_fp: n,
+                                n_threads: if opt.n_thread <= 2 { opt.n_thread } else { 3 },
+                                n_base: 0,
+                                n_seq: 0,
+                                mb_size: opt.mb_size,
+                                opt,
+                                fp,
+                                idx,
+                                worker_pool,
+                                output: String::new(),
+                                output_writer: None,
+                                output_error: false,
+                            };
+                            while let Some(s0) = worker_pipeline(&mut read_pl, 0, None) {
+                                if read_tx.send(s0).is_err() {
+                                    break;
+                                }
+                            }
+                            let fp = std::mem::take(&mut read_pl.fp);
+                            for f in fp {
+                                mb_bseq_close(Some(f));
+                            }
+                        });
+                        scope.spawn(move || {
+                            let mut map_pl = pipeline_t {
+                                n_fp: n,
+                                n_threads: if opt.n_thread <= 2 { opt.n_thread } else { 3 },
+                                n_base: 0,
+                                n_seq: 0,
+                                mb_size: opt.mb_size,
+                                opt,
+                                fp: Vec::new(),
+                                idx,
+                                worker_pool,
+                                output: String::new(),
+                                output_writer: None,
+                                output_error: false,
+                            };
+                            for s0 in read_rx {
+                                if let Some(s1) = worker_pipeline(&mut map_pl, 1, Some(s0)) {
+                                    let mut s1 = s1;
+                                    release_step_tbuf(&mut s1);
+                                    if map_tx.send(s1).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                        let mut out_pl = pipeline_t {
+                            n_fp: n,
+                            n_threads: if opt.n_thread <= 2 { opt.n_thread } else { 3 },
+                            n_base: 0,
+                            n_seq: 0,
+                            mb_size: opt.mb_size,
+                            opt,
+                            fp: Vec::new(),
+                            idx,
+                            worker_pool,
+                            output: String::new(),
+                            output_writer,
+                            output_error: false,
+                        };
+                        for s1 in map_rx {
+                            worker_pipeline(&mut out_pl, 2, Some(s1));
+                            if out_pl.output_error {
+                                break;
+                            }
+                        }
+                        if out_pl.output_error {
+                            (-1, String::new())
+                        } else if let Some(writer) = out_pl.output_writer.as_mut() {
+                            if writer.flush().is_err() {
+                                (-1, String::new())
+                            } else {
+                                (0, out_pl.output)
+                            }
+                        } else {
+                            (0, out_pl.output)
+                        }
+                    });
+                }
+                let mut pl = pipeline_t {
+                    n_fp: n,
+                    n_threads: if opt.n_thread <= 2 { opt.n_thread } else { 3 },
+                    n_base: 0,
+                    n_seq: 0,
+                    mb_size: opt.mb_size,
+                    opt,
+                    fp,
+                    idx,
+                    worker_pool,
+                    output: String::new(),
+                    output_writer,
+                    output_error: false,
+                };
+                while let Some(s0) = worker_pipeline(&mut pl, 0, None) {
+                    let Some(s1) = worker_pipeline(&mut pl, 1, Some(s0)) else {
+                        break;
+                    };
+                    worker_pipeline(&mut pl, 2, Some(s1));
+                    if pl.output_error {
+                        break;
+                    }
+                }
+                let fp = std::mem::take(&mut pl.fp);
+                for f in fp {
+                    mb_bseq_close(Some(f));
+                }
+                if pl.output_error {
+                    (-1, String::new())
+                } else if let Some(writer) = pl.output_writer.as_mut() {
+                    if writer.flush().is_err() {
+                        (-1, String::new())
+                    } else {
+                        (0, pl.output)
+                    }
+                } else {
+                    (0, pl.output)
+                }
             };
-            worker_pipeline(&mut pl, 2, Some(s1));
+        if let Some(writer) = output_writer {
+            return run(fp, Some(writer));
         }
-        let fp = std::mem::take(&mut pl.fp);
-        for f in fp {
-            mb_bseq_close(Some(f));
-        }
-        if let Some(fp) = output_file.as_mut() {
-            if fp.write_all(pl.output.as_bytes()).is_err() {
-                return (-1, String::new());
+        if let Some(fp_out) = output_file.as_mut() {
+            let (ret, _) = run(fp, Some(fp_out));
+            if ret != 0 {
+                return (ret, String::new());
             }
-            if fp.flush().is_err() {
+            if fp_out.flush().is_err() {
                 return (-1, String::new());
             }
             return (0, String::new());
         }
-        (0, pl.output)
+        run(fp, None)
     }
 
     /// Original C static function `usage` from `minibwa/map-main.c:296`.
@@ -16938,6 +19338,7 @@ pub mod map_main {
 
     /// Original C global function `main_map` from `minibwa/map-main.c:351`.
     pub fn main_map(argv: &[String]) -> (i32, String) {
+        let has_output_writer = MAIN_MAP_OUTPUT_WRITER.with(|writer| writer.borrow().is_some());
         let opt_str = "x:o:k:c:m:p:A:B:b:O:E:t:K:N:PyYR:aul:w:W:g:5s:";
         let long_options = [
             ko_longopt_t {
@@ -17040,7 +19441,7 @@ pub mod map_main {
         let mut args = argv.to_vec();
         let mut mo = mb_opt_t::default();
         mb_opt_init(&mut mo);
-        let mut o = ketopt_t::default();
+        let mut o = KETOPT_INIT.clone();
         loop {
             let c = ketopt(&mut o, argc, &mut args, 1, opt_str, Some(&long_options));
             if c < 0 {
@@ -17071,7 +19472,7 @@ pub mod map_main {
         }
         let mut fn_out: Option<String> = None;
         let mut rg_line: Option<String> = None;
-        o = ketopt_t::default();
+        o = KETOPT_INIT.clone();
         loop {
             let c = ketopt(&mut o, argc, &mut args, 1, opt_str, Some(&long_options));
             if c < 0 {
@@ -17231,11 +19632,42 @@ pub mod map_main {
             {
                 return (1, String::new());
             }
-            out.push_str(&String::from_utf8_lossy(&hdr.s[..hdr.l]));
+            if has_output_writer {
+                let write_ok = MAIN_MAP_OUTPUT_WRITER.with(|writer| {
+                    // SAFETY: main_map_write installs this pointer only for the
+                    // synchronous dynamic extent of this main_map call.
+                    writer
+                        .borrow()
+                        .map(|ptr| unsafe { (&mut *ptr).write_all(&hdr.s[..hdr.l]).is_ok() })
+                        .unwrap_or(false)
+                });
+                if !write_ok {
+                    return (-1, String::new());
+                }
+            } else {
+                out.push_str(std::str::from_utf8(&hdr.s[..hdr.l]).unwrap());
+            }
         }
-        let (_ret, body) = mb_map_file(&mo, &idx, inputs.len() as i32, &inputs, fn_out.as_deref());
-        out.push_str(&body);
-        (0, out)
+        let (ret, body) = mb_map_file(&mo, &idx, inputs.len() as i32, &inputs, fn_out.as_deref());
+        if fn_out.is_none() && !has_output_writer {
+            out.push_str(&body);
+        }
+        (ret, out)
+    }
+
+    pub fn main_map_write(argv: &[String], output_writer: &mut dyn Write) -> (i32, String) {
+        MAIN_MAP_OUTPUT_WRITER.with(|writer| {
+            // SAFETY: the pointer is restored before main_map_write returns,
+            // and main_map only borrows it synchronously through the
+            // thread-local slot.
+            let output_writer = unsafe {
+                std::mem::transmute::<&mut dyn Write, *mut (dyn Write + 'static)>(output_writer)
+            };
+            let old = writer.replace(Some(output_writer));
+            let ret = main_map(argv);
+            writer.replace(old);
+            ret
+        })
     }
 
     #[cfg(test)]
@@ -17720,19 +20152,325 @@ pub mod pe {
     };
     use crate::mbpriv::{mb_is_sr_mode, mb_seq_rev, KOM_DBG_FLAG, MB_DBG_ALN_PE};
     use crate::options::{mb_opt_t, MB_F_METH, MB_F_PRIMARY5};
+    use std::ptr::NonNull;
     use std::sync::atomic::Ordering;
 
-    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct mb_extra_t {
         pub cap: u32,
         pub dp_score: i32,
         pub dp_max0: i32,
         pub dp_max: i32,
         pub dp_max2: i32,
-        pub n_ambi: u32,
-        pub cs: u32,
+        pub n_ambi_cs: u32,
         pub n_cigar: i32,
-        pub cigar: Vec<u32>,
+    }
+
+    impl mb_extra_t {
+        pub(crate) const CS_FLAG: u32 = 1 << 31;
+        const N_AMBI_MASK: u32 = !Self::CS_FLAG;
+
+        pub fn boxed(self) -> mb_extra_ptr_t {
+            mb_extra_ptr_t::from_header_and_cigar(self, &[])
+        }
+
+        pub fn with_cigar(self, cigar: &[u32]) -> mb_extra_ptr_t {
+            mb_extra_ptr_t::from_header_and_cigar(self, cigar)
+        }
+
+        #[inline(always)]
+        pub fn n_ambi(&self) -> u32 {
+            self.n_ambi_cs & Self::N_AMBI_MASK
+        }
+
+        #[inline(always)]
+        pub fn set_n_ambi(&mut self, value: u32) {
+            self.n_ambi_cs = (self.n_ambi_cs & Self::CS_FLAG) | (value & Self::N_AMBI_MASK);
+        }
+
+        #[inline(always)]
+        pub fn add_n_ambi(&mut self, value: u32) {
+            self.set_n_ambi(self.n_ambi().saturating_add(value));
+        }
+
+        #[inline(always)]
+        pub fn cs(&self) -> u32 {
+            (self.n_ambi_cs >> 31) & 1
+        }
+
+        #[inline(always)]
+        pub fn set_cs(&mut self, value: u32) {
+            if value != 0 {
+                self.n_ambi_cs |= Self::CS_FLAG;
+            } else {
+                self.n_ambi_cs &= !Self::CS_FLAG;
+            }
+        }
+    }
+
+    pub struct mb_extra_ptr_t {
+        ptr: NonNull<mb_extra_t>,
+    }
+
+    unsafe impl Send for mb_extra_ptr_t {}
+    unsafe impl Sync for mb_extra_ptr_t {}
+
+    impl mb_extra_ptr_t {
+        pub fn new(cap: u32) -> Self {
+            let cap = cap.max(1);
+            let size =
+                std::mem::size_of::<mb_extra_t>() + cap as usize * std::mem::size_of::<u32>();
+            let align = std::mem::align_of::<mb_extra_t>();
+            let layout = std::alloc::Layout::from_size_align(size, align).unwrap();
+            let raw = unsafe { std::alloc::alloc_zeroed(layout) as *mut mb_extra_t };
+            if raw.is_null() {
+                std::alloc::handle_alloc_error(layout);
+            }
+            unsafe {
+                (*raw).cap = cap;
+            }
+            Self {
+                ptr: unsafe { NonNull::new_unchecked(raw) },
+            }
+        }
+
+        pub fn from_header_and_cigar(mut header: mb_extra_t, cigar: &[u32]) -> Self {
+            let cap = header.cap.max(cigar.len() as u32).max(1);
+            header.cap = cap;
+            header.n_cigar = cigar.len() as i32;
+            Self::from_header_and_words(header, cigar)
+        }
+
+        pub fn from_header_and_words(mut header: mb_extra_t, words: &[u32]) -> Self {
+            let cap = header.cap.max(words.len() as u32).max(1);
+            header.cap = cap;
+            header.n_cigar = header.n_cigar.min(words.len() as i32).max(0);
+            let mut out = Self::new(cap);
+            unsafe {
+                *out.ptr.as_mut() = header;
+            }
+            if !words.is_empty() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(words.as_ptr(), out.cigar_mut_ptr(), words.len());
+                }
+            }
+            out
+        }
+
+        pub fn cigar(&self) -> &[u32] {
+            let len = self.n_cigar.max(0) as usize;
+            if len == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(self.cigar_ptr(), len) }
+            }
+        }
+
+        pub fn cigar_mut(&mut self) -> &mut [u32] {
+            let len = self.n_cigar.max(0) as usize;
+            if len == 0 {
+                &mut []
+            } else {
+                unsafe { std::slice::from_raw_parts_mut(self.cigar_mut_ptr(), len) }
+            }
+        }
+
+        pub fn cigar_all(&self) -> &[u32] {
+            let mut len = self.n_cigar.max(0) as usize;
+            if self.cs() != 0 {
+                let cap = self.cap as usize;
+                while len < cap {
+                    let w = unsafe { *self.cigar_ptr().add(len) };
+                    len += 1;
+                    if w.to_le_bytes().contains(&0) {
+                        break;
+                    }
+                }
+            }
+            if len == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(self.cigar_ptr(), len.min(self.cap as usize)) }
+            }
+        }
+
+        pub fn set_cigar_from_vec(&mut self, values: Vec<u32>) {
+            self.ensure_capacity(values.len() as u32);
+            self.n_cigar = values.len() as i32;
+            self.set_cs(0);
+            if !values.is_empty() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        values.as_ptr(),
+                        self.cigar_mut_ptr(),
+                        values.len(),
+                    );
+                }
+            }
+        }
+
+        pub fn truncate_cigar(&mut self, len: usize) {
+            self.n_cigar = self.n_cigar.min(len as i32);
+            self.set_cs(0);
+        }
+
+        pub fn push_cigar(&mut self, value: u32) {
+            let len = self.n_cigar.max(0) as usize;
+            self.ensure_capacity((len + 1) as u32);
+            unsafe {
+                *self.cigar_mut_ptr().add(len) = value;
+            }
+            self.n_cigar = len as i32 + 1;
+            self.set_cs(0);
+        }
+
+        pub fn set_tag_words_from_slice(&mut self, values: &[u32]) {
+            let len = self.n_cigar.max(0) as usize;
+            self.ensure_capacity((len + values.len()) as u32);
+            if !values.is_empty() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        values.as_ptr(),
+                        self.cigar_mut_ptr().add(len),
+                        values.len(),
+                    );
+                }
+            }
+            self.set_cs(!values.is_empty() as u32);
+        }
+
+        pub fn push_word(&mut self, value: u32) {
+            let len = self.cigar_all().len();
+            self.ensure_capacity((len + 1) as u32);
+            unsafe {
+                *self.cigar_mut_ptr().add(len) = value;
+            }
+            self.set_cs(1);
+        }
+
+        pub fn extend_cigar_from_slice(&mut self, values: &[u32]) {
+            if values.is_empty() {
+                return;
+            }
+            let len = self.n_cigar.max(0) as usize;
+            self.ensure_capacity((len + values.len()) as u32);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    values.as_ptr(),
+                    self.cigar_mut_ptr().add(len),
+                    values.len(),
+                );
+            }
+            self.n_cigar = (len + values.len()) as i32;
+            self.set_cs(0);
+        }
+
+        pub fn remove_cigar(&mut self, index: usize) -> u32 {
+            let len = self.n_cigar.max(0) as usize;
+            assert!(index < len);
+            let ptr = self.cigar_mut_ptr();
+            let value = unsafe { *ptr.add(index) };
+            if index + 1 < len {
+                unsafe {
+                    std::ptr::copy(ptr.add(index + 1), ptr.add(index), len - index - 1);
+                }
+            }
+            self.n_cigar -= 1;
+            self.set_cs(0);
+            value
+        }
+
+        pub fn ensure_capacity(&mut self, needed: u32) {
+            if needed <= self.cap {
+                return;
+            }
+            let new_cap = needed.max(1);
+            let old_cap = self.cap.max(1);
+            let old_size =
+                std::mem::size_of::<mb_extra_t>() + old_cap as usize * std::mem::size_of::<u32>();
+            let new_size =
+                std::mem::size_of::<mb_extra_t>() + new_cap as usize * std::mem::size_of::<u32>();
+            let align = std::mem::align_of::<mb_extra_t>();
+            let layout = std::alloc::Layout::from_size_align(old_size, align).unwrap();
+            let raw = unsafe {
+                std::alloc::realloc(self.ptr.as_ptr().cast(), layout, new_size) as *mut mb_extra_t
+            };
+            if raw.is_null() {
+                std::alloc::handle_alloc_error(
+                    std::alloc::Layout::from_size_align(new_size, align).unwrap(),
+                );
+            }
+            self.ptr = unsafe { NonNull::new_unchecked(raw) };
+            self.cap = new_cap;
+        }
+
+        fn cigar_ptr(&self) -> *const u32 {
+            unsafe {
+                (self.ptr.as_ptr() as *const u8).add(std::mem::size_of::<mb_extra_t>())
+                    as *const u32
+            }
+        }
+
+        fn cigar_mut_ptr(&mut self) -> *mut u32 {
+            unsafe {
+                (self.ptr.as_ptr() as *mut u8).add(std::mem::size_of::<mb_extra_t>()) as *mut u32
+            }
+        }
+    }
+
+    impl Clone for mb_extra_ptr_t {
+        fn clone(&self) -> Self {
+            Self::from_header_and_words(**self, self.cigar_all())
+        }
+    }
+
+    impl Drop for mb_extra_ptr_t {
+        fn drop(&mut self) {
+            let cap = self.cap.max(1);
+            let size =
+                std::mem::size_of::<mb_extra_t>() + cap as usize * std::mem::size_of::<u32>();
+            let align = std::mem::align_of::<mb_extra_t>();
+            let layout = std::alloc::Layout::from_size_align(size, align).unwrap();
+            unsafe { std::alloc::dealloc(self.ptr.as_ptr().cast(), layout) };
+        }
+    }
+
+    impl std::fmt::Debug for mb_extra_ptr_t {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("mb_extra_ptr_t")
+                .field("header", &**self)
+                .field("cigar", &self.cigar())
+                .finish()
+        }
+    }
+
+    impl PartialEq for mb_extra_ptr_t {
+        fn eq(&self, other: &Self) -> bool {
+            **self == **other && self.cigar_all() == other.cigar_all()
+        }
+    }
+
+    impl Eq for mb_extra_ptr_t {}
+
+    impl Default for mb_extra_ptr_t {
+        fn default() -> Self {
+            Self::new(1)
+        }
+    }
+
+    impl std::ops::Deref for mb_extra_ptr_t {
+        type Target = mb_extra_t;
+
+        fn deref(&self) -> &Self::Target {
+            unsafe { self.ptr.as_ref() }
+        }
+    }
+
+    impl std::ops::DerefMut for mb_extra_ptr_t {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            unsafe { self.ptr.as_mut() }
+        }
     }
 
     #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -17754,16 +20492,252 @@ pub mod pe {
         pub blen: i32,
         pub mapq: i32,
         pub hash: u32,
-        pub rev: u32,
-        pub proper_pair: u32,
-        pub sam_pri: u32,
-        pub flt: u32,
-        pub inv: u32,
-        pub split: u32,
-        pub split_inv: u32,
-        pub rescued: u32,
-        pub frac_high: u32,
-        pub p: Option<mb_extra_t>,
+        pub flags: u32,
+        pub p: Option<mb_extra_ptr_t>,
+    }
+
+    impl mb_hit_t {
+        const REV: u32 = 1 << 0;
+        const PROPER_PAIR: u32 = 1 << 1;
+        const SAM_PRI: u32 = 1 << 2;
+        const FLT: u32 = 1 << 3;
+        const INV: u32 = 1 << 4;
+        const SPLIT_SHIFT: u32 = 5;
+        const SPLIT_MASK: u32 = 0b11 << Self::SPLIT_SHIFT;
+        const SPLIT_INV: u32 = 1 << 7;
+        const RESCUED: u32 = 1 << 8;
+        const FRAC_HIGH_SHIFT: u32 = 9;
+        const FRAC_HIGH_MASK: u32 = 0xff << Self::FRAC_HIGH_SHIFT;
+
+        #[inline(always)]
+        fn bit(&self, mask: u32) -> u8 {
+            ((self.flags & mask) != 0) as u8
+        }
+
+        #[inline(always)]
+        fn set_bit(&mut self, mask: u32, value: u8) {
+            if value != 0 {
+                self.flags |= mask;
+            } else {
+                self.flags &= !mask;
+            }
+        }
+
+        #[inline(always)]
+        pub fn rev(&self) -> u8 {
+            self.bit(Self::REV)
+        }
+
+        #[inline(always)]
+        pub fn set_rev(&mut self, value: u8) {
+            self.set_bit(Self::REV, value);
+        }
+
+        #[inline(always)]
+        pub fn proper_pair(&self) -> u8 {
+            self.bit(Self::PROPER_PAIR)
+        }
+
+        #[inline(always)]
+        pub fn set_proper_pair(&mut self, value: u8) {
+            self.set_bit(Self::PROPER_PAIR, value);
+        }
+
+        #[inline(always)]
+        pub fn sam_pri(&self) -> u8 {
+            self.bit(Self::SAM_PRI)
+        }
+
+        #[inline(always)]
+        pub fn set_sam_pri(&mut self, value: u8) {
+            self.set_bit(Self::SAM_PRI, value);
+        }
+
+        #[inline(always)]
+        pub fn flt(&self) -> u8 {
+            self.bit(Self::FLT)
+        }
+
+        #[inline(always)]
+        pub fn set_flt(&mut self, value: u8) {
+            self.set_bit(Self::FLT, value);
+        }
+
+        #[inline(always)]
+        pub fn inv(&self) -> u8 {
+            self.bit(Self::INV)
+        }
+
+        #[inline(always)]
+        pub fn set_inv(&mut self, value: u8) {
+            self.set_bit(Self::INV, value);
+        }
+
+        #[inline(always)]
+        pub fn split(&self) -> u8 {
+            ((self.flags & Self::SPLIT_MASK) >> Self::SPLIT_SHIFT) as u8
+        }
+
+        #[inline(always)]
+        pub fn set_split(&mut self, value: u8) {
+            self.flags = (self.flags & !Self::SPLIT_MASK)
+                | (((value as u32) << Self::SPLIT_SHIFT) & Self::SPLIT_MASK);
+        }
+
+        #[inline(always)]
+        pub fn split_inv(&self) -> u8 {
+            self.bit(Self::SPLIT_INV)
+        }
+
+        #[inline(always)]
+        pub fn set_split_inv(&mut self, value: u8) {
+            self.set_bit(Self::SPLIT_INV, value);
+        }
+
+        #[inline(always)]
+        pub fn rescued(&self) -> u8 {
+            self.bit(Self::RESCUED)
+        }
+
+        #[inline(always)]
+        pub fn set_rescued(&mut self, value: u8) {
+            self.set_bit(Self::RESCUED, value);
+        }
+
+        #[inline(always)]
+        pub fn frac_high(&self) -> u8 {
+            ((self.flags & Self::FRAC_HIGH_MASK) >> Self::FRAC_HIGH_SHIFT) as u8
+        }
+
+        #[inline(always)]
+        pub fn set_frac_high(&mut self, value: u8) {
+            self.flags =
+                (self.flags & !Self::FRAC_HIGH_MASK) | ((value as u32) << Self::FRAC_HIGH_SHIFT);
+        }
+
+        pub const fn flags_with(
+            rev: u8,
+            proper_pair: u8,
+            sam_pri: u8,
+            flt: u8,
+            inv: u8,
+            split: u8,
+            split_inv: u8,
+            rescued: u8,
+            frac_high: u8,
+        ) -> u32 {
+            (rev as u32 & 1)
+                | ((proper_pair as u32 & 1) << 1)
+                | ((sam_pri as u32 & 1) << 2)
+                | ((flt as u32 & 1) << 3)
+                | ((inv as u32 & 1) << 4)
+                | ((split as u32 & 3) << Self::SPLIT_SHIFT)
+                | ((split_inv as u32 & 1) << 7)
+                | ((rescued as u32 & 1) << 8)
+                | ((frac_high as u32) << Self::FRAC_HIGH_SHIFT)
+        }
+    }
+
+    pub struct mb_hit_buf_t {
+        ptr: *mut mb_hit_t,
+        len: u32,
+        cap: u32,
+    }
+
+    unsafe impl Send for mb_hit_buf_t {}
+    unsafe impl Sync for mb_hit_buf_t {}
+
+    impl mb_hit_buf_t {
+        #[inline]
+        pub fn from_vec(mut v: Vec<mb_hit_t>) -> Self {
+            let len = v.len();
+            let cap = v.capacity();
+            assert!(u32::try_from(len).is_ok() && u32::try_from(cap).is_ok());
+            if cap == 0 {
+                return Self::default();
+            }
+            let ptr = v.as_mut_ptr();
+            std::mem::forget(v);
+            Self {
+                ptr,
+                len: len as u32,
+                cap: cap as u32,
+            }
+        }
+
+        #[inline]
+        pub fn into_vec(mut self) -> Vec<mb_hit_t> {
+            let v = if self.cap == 0 {
+                Vec::new()
+            } else {
+                unsafe { Vec::from_raw_parts(self.ptr, self.len as usize, self.cap as usize) }
+            };
+            self.ptr = std::ptr::null_mut();
+            self.len = 0;
+            self.cap = 0;
+            v
+        }
+
+        #[inline]
+        pub fn as_slice(&self) -> &[mb_hit_t] {
+            if self.len == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(self.ptr, self.len as usize) }
+            }
+        }
+    }
+
+    impl Default for mb_hit_buf_t {
+        fn default() -> Self {
+            Self {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            }
+        }
+    }
+
+    impl Drop for mb_hit_buf_t {
+        fn drop(&mut self) {
+            if self.cap != 0 {
+                unsafe {
+                    drop(Vec::from_raw_parts(
+                        self.ptr,
+                        self.len as usize,
+                        self.cap as usize,
+                    ));
+                }
+            }
+        }
+    }
+
+    impl Clone for mb_hit_buf_t {
+        fn clone(&self) -> Self {
+            Self::from_vec(self.as_slice().to_vec())
+        }
+    }
+
+    impl std::fmt::Debug for mb_hit_buf_t {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_list().entries(self.as_slice()).finish()
+        }
+    }
+
+    impl AsRef<[mb_hit_t]> for mb_hit_buf_t {
+        #[inline]
+        fn as_ref(&self) -> &[mb_hit_t] {
+            self.as_slice()
+        }
+    }
+
+    impl std::ops::Deref for mb_hit_buf_t {
+        type Target = [mb_hit_t];
+
+        #[inline]
+        fn deref(&self) -> &Self::Target {
+            self.as_slice()
+        }
     }
 
     #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -17793,10 +20767,10 @@ pub mod pe {
 
     /// Original C static function `mb_insert_dir` from `minibwa/pe.c:10`.
     pub fn mb_insert_dir(h0: &mb_hit_t, h1: &mb_hit_t, dist: &mut i64) -> i32 {
-        let p0 = if h0.rev != 0 { h0.te } else { h0.ts };
-        let p1 = if h1.rev != 0 { h1.te } else { h1.ts };
+        let p0 = if h0.rev() != 0 { h0.te } else { h0.ts };
+        let p1 = if h1.rev() != 0 { h1.te } else { h1.ts };
         *dist = if p0 > p1 { p0 - p1 } else { p1 - p0 };
-        (((h0.rev as i32) << 1 | h1.rev as i32) ^ if p0 < p1 { 0 } else { 3 }) as i32
+        (((h0.rev() as i32) << 1 | h1.rev() as i32) ^ if p0 < p1 { 0 } else { 3 }) as i32
     }
 
     /// Original C static function `mb_pair_score` from `minibwa/pe.c:19`.
@@ -17883,14 +20857,14 @@ pub mod pe {
     }
 
     /// Original C global function `mb_pestat` from `minibwa/pe.c:68`.
-    pub fn mb_pestat(
+    pub fn mb_pestat<H: AsRef<[mb_hit_t]>>(
         km: (),
         opt: &mb_opt_t,
         n_frag: i32,
         seg_off: &[i32],
         seg_cnt: &[i32],
         n_hit: &[i32],
-        hit: &[Vec<mb_hit_t>],
+        hit: &[H],
         pes: &mut [mb_pestat_t; 4],
     ) {
         const MIN_DIR_CNT: i32 = 20;
@@ -17905,8 +20879,8 @@ pub mod pe {
                 continue;
             }
             let off = seg_off[i] as usize;
-            let r0 = mb_select_unique_se(n_hit[off], &hit[off]);
-            let r1 = mb_select_unique_se(n_hit[off + 1], &hit[off + 1]);
+            let r0 = mb_select_unique_se(n_hit[off], hit[off].as_ref());
+            let r1 = mb_select_unique_se(n_hit[off + 1], hit[off + 1].as_ref());
             let (Some(r0), Some(r1)) = (r0, r1) else {
                 continue;
             };
@@ -17998,9 +20972,9 @@ pub mod pe {
         for r in 0..2usize {
             for i in 0..n_hit[r] as usize {
                 let h = &mut hit[r][i];
-                h.proper_pair = 0;
-                let p = l2b.ctg[h.tid as usize].off + if h.rev != 0 { h.te } else { h.ts } as u64;
-                pa.push((p, ((i as u64) << 2) | ((h.rev as u64) << 1) | r as u64));
+                h.set_proper_pair(0);
+                let p = l2b.ctg[h.tid as usize].off + if h.rev() != 0 { h.te } else { h.ts } as u64;
+                pa.push((p, ((i as u64) << 2) | ((h.rev() as u64) << 1) | r as u64));
             }
         }
         pa.sort_unstable_by_key(|&(x, y)| (x, y));
@@ -18038,8 +21012,8 @@ pub mod pe {
                         break;
                     }
                     if dist >= pes[dir].lo as i64 {
-                        hit[pk_read][pk_idx].proper_pair = 1;
-                        hit[pi_read][pi_idx].proper_pair = 1;
+                        hit[pk_read][pk_idx].set_proper_pair(1);
+                        hit[pi_read][pi_idx].set_proper_pair(1);
                         let mut s = if pk_read == pi_read {
                             -1.0
                         } else {
@@ -18184,12 +21158,18 @@ pub mod pe {
         let mut mat = [0i8; 25];
         ksw_gen_nt4_mat(&mut mat, 1, b_mm as i8, b_ts as i8, b_ambi as i8);
         let sz = if max_sc < 255 - b_mm { 1 } else { 2 };
-        let qp = ksw_ll_qinit(km, sz, qlen, qseq, 5, &mat);
         let xtra = KSW_LL_SUBO | opt.min_len;
-        let rst = if sz == 1 {
-            ksw_ll_u8_core(&qp, tlen, tseq, gapo, gape, xtra)
+        let rst = if let Some(rst) =
+            crate::ksw2_c_sse::maybe_ll_core(sz, qlen, qseq, &mat, tlen, tseq, gapo, gape, xtra)
+        {
+            rst
         } else {
-            ksw_ll_i16_core(&qp, tlen, tseq, gapo, gape, xtra)
+            let qp = ksw_ll_qinit(km, sz, qlen, qseq, 5, &mat);
+            if sz == 1 {
+                ksw_ll_u8_core(&qp, tlen, tseq, gapo, gape, xtra)
+            } else {
+                ksw_ll_i16_core(&qp, tlen, tseq, gapo, gape, xtra)
+            }
         };
         if (KOM_DBG_FLAG.load(Ordering::Relaxed) & MB_DBG_ALN_PE) != 0 {
             eprintln!(
@@ -18250,10 +21230,10 @@ pub mod pe {
             mb_seq_rev(qe as u32, qseq);
             mb_seq_rev(te as u32, tseq);
             if ez.n_cigar > 0 && ez.max as i32 >= opt.min_dp_max * opt.a {
-                h.p = Some(mb_extra_t::default());
+                h.p = Some(mb_extra_t::default().boxed());
                 let cigar = ez.cigar.clone();
                 mb_append_cigar(h, ez.n_cigar as u32, &cigar);
-                h.rescued = 1;
+                h.set_rescued(1);
                 h.qe = qe;
                 h.te = te as i64;
                 h.ts = (te
@@ -18325,7 +21305,7 @@ pub mod pe {
         h1: &mut mb_hit_v,
         min_sc: i32,
         ez: &mut ksw_extz_t,
-    ) -> Option<mb_hit_t> {
+    ) -> Option<f64> {
         let mut skip = [false; 4];
         for dir in 0..4usize {
             skip[dir] = pes[dir].failed != 0;
@@ -18333,17 +21313,17 @@ pub mod pe {
         if skip.iter().all(|&x| x) {
             return None;
         }
-        let pos5 = if h0.rev != 0 { h0.te } else { h0.ts };
+        let pos5 = if h0.rev() != 0 { h0.te } else { h0.ts };
         let mut ret = None;
         for dir in 0..4usize {
             if skip[dir] {
                 continue;
             }
-            let is_rev = (((dir >> 1) != (dir & 1)) as u32 ^ h0.rev) != 0;
+            let is_rev = (((dir >> 1) != (dir & 1)) as u8 ^ h0.rev()) != 0;
             let is_larger = if (dir >> 1) != (dir & 1) {
                 (((dir >> 1) as i32) ^ is_rev as i32) != 0
             } else {
-                (((dir >> 1) as i32) ^ r0 ^ h0.rev as i32) != 0
+                (((dir >> 1) as i32) ^ r0 ^ h0.rev() as i32) != 0
             };
             let mut ts = (if is_larger {
                 pos5 + pes[dir].lo as i64
@@ -18416,16 +21396,17 @@ pub mod pe {
                     ht.tid = h0.tid;
                     ht.ts += ts2;
                     ht.te += ts2;
-                    ht.rev = is_rev as u32;
+                    ht.set_rev(is_rev as u8);
                     if is_rev {
                         let qt = ht.qs;
                         ht.qs = len - ht.qe;
                         ht.qe = len - qt;
                     }
-                    h1.a.push(ht.clone());
+                    let score = mb_pair_score(h0, &ht, pes, opt.a);
+                    h1.a.push(ht);
                     h1.n = h1.a.len() as i32;
                     h1.m = h1.n;
-                    ret = Some(ht);
+                    ret = Some(score);
                 }
             }
         }
@@ -18457,7 +21438,7 @@ pub mod pe {
                 }
                 let dp = hit[r][i].p.as_ref().map(|p| p.dp_max).unwrap_or(0);
                 let best = hit[r][0].p.as_ref().map(|p| p.dp_max).unwrap_or(0);
-                if hit[r][i].proper_pair == 0 && dp >= best - opt.pen_unpair * opt.a {
+                if hit[r][i].proper_pair() == 0 && dp >= best - opt.pen_unpair * opt.a {
                     m += 1;
                     n_res += 1;
                 }
@@ -18475,7 +21456,7 @@ pub mod pe {
                 }
                 let dp = hit[r][i].p.as_ref().map(|p| p.dp_max).unwrap_or(0);
                 let best = hit[r][0].p.as_ref().map(|p| p.dp_max).unwrap_or(0);
-                if hit[r][i].proper_pair == 0 && dp >= best - opt.pen_unpair * opt.a {
+                if hit[r][i].proper_pair() == 0 && dp >= best - opt.pen_unpair * opt.a {
                     a.push((
                         ((dp as u64) << 32) | hit[r][i].hash as u64,
                         ((i as u64) << 1) | r as u64,
@@ -18522,12 +21503,12 @@ pub mod pe {
             mb_hit_v {
                 n: n_hit[0],
                 m: n_hit[0],
-                a: hit[0].clone(),
+                a: std::mem::take(&mut hit[0]),
             },
             mb_hit_v {
                 n: n_hit[1],
                 m: n_hit[1],
-                a: hit[1].clone(),
+                a: std::mem::take(&mut hit[1]),
             },
         ];
         let mut max = [paux0.score, paux0.score];
@@ -18552,7 +21533,7 @@ pub mod pe {
                 l2b_meth_t::L2B_METH_C2T
             };
             let h0 = ha[r].a[j].clone();
-            if let Some(h1) = mb_matesw_core(
+            if let Some(sc) = mb_matesw_core(
                 km,
                 opt,
                 l2b,
@@ -18566,7 +21547,7 @@ pub mod pe {
                 min_sc[1 - r],
                 &mut ez,
             ) {
-                let sc = mb_pair_score(&h0, &h1, pes, opt.a) as i32;
+                let sc = sc as i32;
                 if sc > max[r] {
                     max2[r] = max[r];
                     max[r] = sc;
@@ -18581,7 +21562,7 @@ pub mod pe {
         let n_add = (ha[0].n - n_hit[0]) + (ha[1].n - n_hit[1]);
         for r in 0..2usize {
             n_hit[r] = ha[r].n;
-            hit[r] = ha[r].a.clone();
+            hit[r] = std::mem::take(&mut ha[r].a);
         }
         n_add
     }
@@ -18606,7 +21587,7 @@ pub mod pe {
             if mb_matesw(km, opt, l2b, n_hit, hit, pes, &paux, qlen, qseq, is_meth) > 0 {
                 for r in 0..2usize {
                     for h in hit[r].iter_mut().take(n_hit[r] as usize) {
-                        if h.rescued == 0 {
+                        if h.rescued() == 0 {
                             h.n_sub = 0;
                             h.subsc = 0;
                             if let Some(p) = &mut h.p {
@@ -18655,7 +21636,7 @@ pub mod pe {
                     score2 = score_se - opt.pen_unpair * opt.a;
                 }
                 let frac_high =
-                    hit[0][i0].frac_high as f64 / 255.0 + hit[1][i1].frac_high as f64 / 255.0;
+                    hit[0][i0].frac_high() as f64 / 255.0 + hit[1][i1].frac_high() as f64 / 255.0;
                 let mut mapq_pe = (6.02 * identity * identity * (paux.score - score2) as f64
                     / opt.a as f64
                     - 4.343 * ((paux.n_sub + 1) as f64).ln()
@@ -18728,13 +21709,12 @@ pub mod pe {
             let h0 = mb_hit_t {
                 ts: 100,
                 te: 150,
-                rev: 0,
                 ..Default::default()
             };
             let h1 = mb_hit_t {
                 ts: 300,
                 te: 350,
-                rev: 1,
+                flags: mb_hit_t::flags_with(1, 0, 0, 0, 0, 0, 0, 0, 0),
                 ..Default::default()
             };
             let mut dist = 0;
@@ -18775,21 +21755,26 @@ pub mod pe {
             let h0 = mb_hit_t {
                 ts: 100,
                 te: 150,
-                rev: 0,
-                p: Some(mb_extra_t {
-                    dp_max: 80,
-                    ..Default::default()
-                }),
+                p: Some(
+                    mb_extra_t {
+                        dp_max: 80,
+                        ..Default::default()
+                    }
+                    .boxed(),
+                ),
                 ..Default::default()
             };
             let h1 = mb_hit_t {
                 ts: 300,
                 te: 350,
-                rev: 1,
-                p: Some(mb_extra_t {
-                    dp_max: 70,
-                    ..Default::default()
-                }),
+                flags: mb_hit_t::flags_with(1, 0, 0, 0, 0, 0, 0, 0, 0),
+                p: Some(
+                    mb_extra_t {
+                        dp_max: 70,
+                        ..Default::default()
+                    }
+                    .boxed(),
+                ),
                 ..Default::default()
             };
             let mut pes = [mb_pestat_t {
@@ -18817,10 +21802,13 @@ pub mod pe {
                     parent: 0,
                     qs: 0,
                     qe: 100,
-                    p: Some(mb_extra_t {
-                        dp_max: 100,
-                        ..Default::default()
-                    }),
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 100,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    ),
                     ..Default::default()
                 },
                 mb_hit_t {
@@ -18828,10 +21816,13 @@ pub mod pe {
                     parent: 1,
                     qs: 50,
                     qe: 150,
-                    p: Some(mb_extra_t {
-                        dp_max: 80,
-                        ..Default::default()
-                    }),
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 80,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    ),
                     ..Default::default()
                 },
                 mb_hit_t {
@@ -18839,10 +21830,13 @@ pub mod pe {
                     parent: 0,
                     qs: 0,
                     qe: 150,
-                    p: Some(mb_extra_t {
-                        dp_max: 1000,
-                        ..Default::default()
-                    }),
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 1000,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    ),
                     ..Default::default()
                 },
             ];
@@ -18879,7 +21873,7 @@ pub mod pe {
                     id: 0,
                     parent: 0,
                     mapq: 60,
-                    rev: 1,
+                    flags: mb_hit_t::flags_with(1, 0, 0, 0, 0, 0, 0, 0, 0),
                     ..Default::default()
                 }]);
             }
@@ -18913,24 +21907,30 @@ pub mod pe {
                     id: 0,
                     parent: 0,
                     hash: 1,
-                    p: Some(mb_extra_t {
-                        dp_max: 80,
-                        ..Default::default()
-                    }),
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 80,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    ),
                     ..Default::default()
                 }],
                 vec![mb_hit_t {
                     tid: 0,
                     ts: 300,
                     te: 350,
-                    rev: 1,
+                    flags: mb_hit_t::flags_with(1, 0, 0, 0, 0, 0, 0, 0, 0),
                     id: 0,
                     parent: 0,
                     hash: 2,
-                    p: Some(mb_extra_t {
-                        dp_max: 70,
-                        ..Default::default()
-                    }),
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 70,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    ),
                     ..Default::default()
                 }],
             ];
@@ -18950,7 +21950,7 @@ pub mod pe {
             assert_eq!(ret.n_pp, 1);
             assert_eq!(ret.i, [0, 0]);
             assert!(ret.score > 140);
-            assert_eq!((hit[0][0].proper_pair, hit[1][0].proper_pair), (1, 1));
+            assert_eq!((hit[0][0].proper_pair(), hit[1][0].proper_pair()), (1, 1));
         }
 
         #[test]
@@ -18988,32 +21988,36 @@ pub mod s2n_lite {
         unreachable_code
     )]
 
-    // SIMD TODO: the diagonal extension kernels above now mirror the original
-    // packed diagonal algorithms lane-for-lane, but still run those lanes through
-    // scalar Rust arrays. Add native packed execution for performance parity.
+    // SIMD note: the KSW byte-state DP and exact-max scans above use this
+    // native-backed shim for parity with the original packed kernels.
     pub type __m128i = [u8; 16];
 
     /// Original C static function `_mm_load_si128` from `minibwa/s2n-lite.h:8`.
+    #[inline(always)]
     pub fn _mm_load_si128(ptr: &__m128i) -> __m128i {
         *ptr
     }
 
     /// Original C static function `_mm_loadu_si128` from `minibwa/s2n-lite.h:9`.
+    #[inline(always)]
     pub fn _mm_loadu_si128(ptr: &__m128i) -> __m128i {
         *ptr
     }
 
     /// Original C static function `_mm_store_si128` from `minibwa/s2n-lite.h:10`.
+    #[inline(always)]
     pub fn _mm_store_si128(ptr: &mut __m128i, a: __m128i) {
         *ptr = a;
     }
 
     /// Original C static function `_mm_storeu_si128` from `minibwa/s2n-lite.h:11`.
+    #[inline(always)]
     pub fn _mm_storeu_si128(ptr: &mut __m128i, a: __m128i) {
         *ptr = a;
     }
 
     /// Original C static function `_mm_setzero_si128` from `minibwa/s2n-lite.h:12`.
+    #[inline(always)]
     pub fn _mm_setzero_si128() -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19027,6 +22031,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_or_si128` from `minibwa/s2n-lite.h:13`.
+    #[inline(always)]
     pub fn _mm_or_si128(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19050,6 +22055,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_and_si128` from `minibwa/s2n-lite.h:14`.
+    #[inline(always)]
     pub fn _mm_and_si128(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19073,6 +22079,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_andnot_si128` from `minibwa/s2n-lite.h:15`.
+    #[inline(always)]
     pub fn _mm_andnot_si128(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19096,6 +22103,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_blendv_epi8` from `minibwa/s2n-lite.h:20`.
+    #[inline(always)]
     pub fn _mm_blendv_epi8(a: __m128i, b: __m128i, mask: __m128i) -> __m128i {
         #[cfg(all(target_arch = "x86", target_feature = "sse4.1"))]
         unsafe {
@@ -19112,26 +22120,6 @@ pub mod s2n_lite {
                 std::mem::transmute(b),
                 std::mem::transmute(mask),
             ));
-        }
-        #[cfg(all(target_arch = "x86", not(target_feature = "sse4.1")))]
-        unsafe {
-            if std::arch::is_x86_feature_detected!("sse4.1") {
-                return std::mem::transmute(std::arch::x86::_mm_blendv_epi8(
-                    std::mem::transmute(a),
-                    std::mem::transmute(b),
-                    std::mem::transmute(mask),
-                ));
-            }
-        }
-        #[cfg(all(target_arch = "x86_64", not(target_feature = "sse4.1")))]
-        unsafe {
-            if std::arch::is_x86_feature_detected!("sse4.1") {
-                return std::mem::transmute(std::arch::x86_64::_mm_blendv_epi8(
-                    std::mem::transmute(a),
-                    std::mem::transmute(b),
-                    std::mem::transmute(mask),
-                ));
-            }
         }
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19164,6 +22152,7 @@ pub mod s2n_lite {
     }
 
     /// Original C macro `_mm_slli_si128` from `minibwa/s2n-lite.h:17`.
+    #[inline(always)]
     pub fn _mm_slli_si128<const IMM8: i32>(a: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19186,6 +22175,7 @@ pub mod s2n_lite {
     }
 
     /// Original C macro `_mm_srli_si128` from `minibwa/s2n-lite.h:18`.
+    #[inline(always)]
     pub fn _mm_srli_si128<const IMM8: i32>(a: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19208,6 +22198,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_set1_epi8` from `minibwa/s2n-lite.h:22`.
+    #[inline(always)]
     pub fn _mm_set1_epi8(a: i32) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19221,6 +22212,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_add_epi8` from `minibwa/s2n-lite.h:23`.
+    #[inline(always)]
     pub fn _mm_add_epi8(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19244,6 +22236,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_adds_epu8` from `minibwa/s2n-lite.h:24`.
+    #[inline(always)]
     pub fn _mm_adds_epu8(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19267,6 +22260,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_sub_epi8` from `minibwa/s2n-lite.h:25`.
+    #[inline(always)]
     pub fn _mm_sub_epi8(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19290,6 +22284,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_subs_epu8` from `minibwa/s2n-lite.h:26`.
+    #[inline(always)]
     pub fn _mm_subs_epu8(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19313,6 +22308,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_cmpeq_epi8` from `minibwa/s2n-lite.h:27`.
+    #[inline(always)]
     pub fn _mm_cmpeq_epi8(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19336,6 +22332,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_cmpgt_epi8` from `minibwa/s2n-lite.h:28`.
+    #[inline(always)]
     pub fn _mm_cmpgt_epi8(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19359,6 +22356,7 @@ pub mod s2n_lite {
     }
 
     /// Original SSE intrinsic `_mm_cmplt_epi8` used in `minibwa/ksw2_extd2_sse.c`.
+    #[inline(always)]
     pub fn _mm_cmplt_epi8(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19382,6 +22380,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_max_epi8` from `minibwa/s2n-lite.h:29`.
+    #[inline(always)]
     pub fn _mm_max_epi8(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(all(target_arch = "x86", target_feature = "sse4.1"))]
         unsafe {
@@ -19396,24 +22395,6 @@ pub mod s2n_lite {
                 std::mem::transmute(a),
                 std::mem::transmute(b),
             ));
-        }
-        #[cfg(all(target_arch = "x86", not(target_feature = "sse4.1")))]
-        unsafe {
-            if std::arch::is_x86_feature_detected!("sse4.1") {
-                return std::mem::transmute(std::arch::x86::_mm_max_epi8(
-                    std::mem::transmute(a),
-                    std::mem::transmute(b),
-                ));
-            }
-        }
-        #[cfg(all(target_arch = "x86_64", not(target_feature = "sse4.1")))]
-        unsafe {
-            if std::arch::is_x86_feature_detected!("sse4.1") {
-                return std::mem::transmute(std::arch::x86_64::_mm_max_epi8(
-                    std::mem::transmute(a),
-                    std::mem::transmute(b),
-                ));
-            }
         }
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19443,6 +22424,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_min_epi8` from `minibwa/s2n-lite.h:30`.
+    #[inline(always)]
     pub fn _mm_min_epi8(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(all(target_arch = "x86", target_feature = "sse4.1"))]
         unsafe {
@@ -19457,24 +22439,6 @@ pub mod s2n_lite {
                 std::mem::transmute(a),
                 std::mem::transmute(b),
             ));
-        }
-        #[cfg(all(target_arch = "x86", not(target_feature = "sse4.1")))]
-        unsafe {
-            if std::arch::is_x86_feature_detected!("sse4.1") {
-                return std::mem::transmute(std::arch::x86::_mm_min_epi8(
-                    std::mem::transmute(a),
-                    std::mem::transmute(b),
-                ));
-            }
-        }
-        #[cfg(all(target_arch = "x86_64", not(target_feature = "sse4.1")))]
-        unsafe {
-            if std::arch::is_x86_feature_detected!("sse4.1") {
-                return std::mem::transmute(std::arch::x86_64::_mm_min_epi8(
-                    std::mem::transmute(a),
-                    std::mem::transmute(b),
-                ));
-            }
         }
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19504,6 +22468,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_max_epu8` from `minibwa/s2n-lite.h:31`.
+    #[inline(always)]
     pub fn _mm_max_epu8(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19527,6 +22492,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_min_epu8` from `minibwa/s2n-lite.h:32`.
+    #[inline(always)]
     pub fn _mm_min_epu8(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19550,6 +22516,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_set1_epi16` from `minibwa/s2n-lite.h:34`.
+    #[inline(always)]
     pub fn _mm_set1_epi16(a: i32) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19567,6 +22534,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_cmpgt_epi16` from `minibwa/s2n-lite.h:35`.
+    #[inline(always)]
     pub fn _mm_cmpgt_epi16(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19594,6 +22562,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_max_epi16` from `minibwa/s2n-lite.h:36`.
+    #[inline(always)]
     pub fn _mm_max_epi16(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19620,6 +22589,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_adds_epi16` from `minibwa/s2n-lite.h:37`.
+    #[inline(always)]
     pub fn _mm_adds_epi16(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19646,6 +22616,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_subs_epi16` from `minibwa/s2n-lite.h:38`.
+    #[inline(always)]
     pub fn _mm_subs_epi16(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19672,6 +22643,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_subs_epu16` from `minibwa/s2n-lite.h:39`.
+    #[inline(always)]
     pub fn _mm_subs_epu16(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19698,6 +22670,7 @@ pub mod s2n_lite {
     }
 
     /// Original C macro `_mm_extract_epi16` from `minibwa/s2n-lite.h:41`.
+    #[inline(always)]
     pub fn _mm_extract_epi16<const IMM8: i32>(a: __m128i) -> i32 {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19712,6 +22685,7 @@ pub mod s2n_lite {
     }
 
     /// Original SSE intrinsic `_mm_movemask_epi8` used in `minibwa/ksw2_ll_sse.c`.
+    #[inline(always)]
     pub fn _mm_movemask_epi8(a: __m128i) -> i32 {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19729,6 +22703,7 @@ pub mod s2n_lite {
     }
 
     /// Original C macro `_mm_insert_epi16` from `minibwa/s2n-lite.h:42`.
+    #[inline(always)]
     pub fn _mm_insert_epi16<const IMM8: i32>(a: __m128i, b: i32) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19751,6 +22726,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_set1_epi32` from `minibwa/s2n-lite.h:44`.
+    #[inline(always)]
     pub fn _mm_set1_epi32(a: i32) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19768,6 +22744,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_cvtsi32_si128` from `minibwa/s2n-lite.h:45`.
+    #[inline(always)]
     pub fn _mm_cvtsi32_si128(a: i32) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19783,6 +22760,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_setr_epi32` from `minibwa/s2n-lite.h:46`.
+    #[inline(always)]
     pub fn _mm_setr_epi32(a: i32, b: i32, c: i32, d: i32) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19801,6 +22779,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_cmpgt_epi32` from `minibwa/s2n-lite.h:50`.
+    #[inline(always)]
     pub fn _mm_cmpgt_epi32(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(all(target_arch = "x86", target_feature = "sse4.1"))]
         unsafe {
@@ -19816,24 +22795,6 @@ pub mod s2n_lite {
                 std::mem::transmute(b),
             ));
         }
-        #[cfg(all(target_arch = "x86", not(target_feature = "sse4.1")))]
-        unsafe {
-            if std::arch::is_x86_feature_detected!("sse4.1") {
-                return std::mem::transmute(std::arch::x86::_mm_cmpgt_epi32(
-                    std::mem::transmute(a),
-                    std::mem::transmute(b),
-                ));
-            }
-        }
-        #[cfg(all(target_arch = "x86_64", not(target_feature = "sse4.1")))]
-        unsafe {
-            if std::arch::is_x86_feature_detected!("sse4.1") {
-                return std::mem::transmute(std::arch::x86_64::_mm_cmpgt_epi32(
-                    std::mem::transmute(a),
-                    std::mem::transmute(b),
-                ));
-            }
-        }
         let mut r = [0; 16];
         for lane in 0..4 {
             let i = lane * 4;
@@ -19846,6 +22807,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_max_epi32` from `minibwa/s2n-lite.h:51`.
+    #[inline(always)]
     pub fn _mm_max_epi32(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(all(target_arch = "x86", target_feature = "sse4.1"))]
         unsafe {
@@ -19861,24 +22823,6 @@ pub mod s2n_lite {
                 std::mem::transmute(b),
             ));
         }
-        #[cfg(all(target_arch = "x86", not(target_feature = "sse4.1")))]
-        unsafe {
-            if std::arch::is_x86_feature_detected!("sse4.1") {
-                return std::mem::transmute(std::arch::x86::_mm_max_epi32(
-                    std::mem::transmute(a),
-                    std::mem::transmute(b),
-                ));
-            }
-        }
-        #[cfg(all(target_arch = "x86_64", not(target_feature = "sse4.1")))]
-        unsafe {
-            if std::arch::is_x86_feature_detected!("sse4.1") {
-                return std::mem::transmute(std::arch::x86_64::_mm_max_epi32(
-                    std::mem::transmute(a),
-                    std::mem::transmute(b),
-                ));
-            }
-        }
         let mut r = [0; 16];
         for lane in 0..4 {
             let i = lane * 4;
@@ -19890,6 +22834,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_add_epi32` from `minibwa/s2n-lite.h:52`.
+    #[inline(always)]
     pub fn _mm_add_epi32(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19916,6 +22861,7 @@ pub mod s2n_lite {
     }
 
     /// Original C static function `_mm_sub_epi32` from `minibwa/s2n-lite.h:53`.
+    #[inline(always)]
     pub fn _mm_sub_epi32(a: __m128i, b: __m128i) -> __m128i {
         #[cfg(target_arch = "x86")]
         unsafe {
@@ -19942,6 +22888,7 @@ pub mod s2n_lite {
     }
 
     /// Original C macro `_mm_insert_epi32` from `minibwa/s2n-lite.h:55`.
+    #[inline(always)]
     pub fn _mm_insert_epi32<const IMM8: i32>(a: __m128i, b: i32) -> __m128i {
         #[cfg(all(target_arch = "x86", target_feature = "sse4.1"))]
         unsafe {
@@ -19957,24 +22904,6 @@ pub mod s2n_lite {
                 b,
             ));
         }
-        #[cfg(all(target_arch = "x86", not(target_feature = "sse4.1")))]
-        unsafe {
-            if std::arch::is_x86_feature_detected!("sse4.1") {
-                return std::mem::transmute(std::arch::x86::_mm_insert_epi32::<IMM8>(
-                    std::mem::transmute(a),
-                    b,
-                ));
-            }
-        }
-        #[cfg(all(target_arch = "x86_64", not(target_feature = "sse4.1")))]
-        unsafe {
-            if std::arch::is_x86_feature_detected!("sse4.1") {
-                return std::mem::transmute(std::arch::x86_64::_mm_insert_epi32::<IMM8>(
-                    std::mem::transmute(a),
-                    b,
-                ));
-            }
-        }
         let mut r = a;
         let lane = (IMM8 & 3) as usize;
         r[lane * 4..lane * 4 + 4].copy_from_slice(&b.to_le_bytes());
@@ -19982,6 +22911,7 @@ pub mod s2n_lite {
     }
 
     /// Original C macro `_mm_prefetch` from `minibwa/s2n-lite.h:57`.
+    #[inline(always)]
     pub fn _mm_prefetch(ptr: *const u8, hint: i32) {
         let _ = hint;
         #[cfg(target_arch = "x86")]
@@ -20087,8 +23017,8 @@ pub mod seed {
     #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
     use crate::bwt::{
-        mb_bwt_sa_batch, mb_bwt_smem, mb_bwt_smem_batch, mb_bwt_t, mb_sai_t, mb_sai_v,
-        mb_smem_entry_t,
+        mb_bwt_sa_batch_with_scratch, mb_bwt_smem, mb_bwt_smem_batch_ref_with_queue, mb_bwt_t,
+        mb_sai_t, mb_sai_v, mb_smem_entry_ref, tiny_queue_t,
     };
     use crate::l2bit::{l2b_intv2cid, l2b_intv2cid_meth, l2b_meth_t, l2b_t};
     use crate::lchain::mb_anchor_t;
@@ -20163,7 +23093,7 @@ pub mod seed {
         bwt: &mb_bwt_t,
         n_seq: i32,
         len: &[i32],
-        seq: &[Vec<u8>],
+        seq: &[*const u8],
         min_len: i32,
         max_sub_occ: i32,
         v: &mut [mb_sai_v],
@@ -20173,31 +23103,35 @@ pub mod seed {
             vi.n = 0;
             vi.a.clear();
         }
+        let mut tq = tiny_queue_t::default();
+        let mut s = Vec::with_capacity(MAX_BATCH_SIZE);
         let mut i = 0usize;
         while i < n_seq as usize {
             let en = (i + MAX_BATCH_SIZE).min(n_seq as usize);
-            let mut s = Vec::with_capacity(en - i);
+            s.clear();
+            let v_ptr = v.as_mut_ptr();
             for j in i..en {
-                s.push(mb_smem_entry_t {
+                s.push(mb_smem_entry_ref {
                     min_len,
                     min_occ: 1,
                     st: 0,
                     en: len[j],
-                    q: seq[j].clone(),
-                    v: v[j].clone(),
-                    ..Default::default()
+                    q: seq[j],
+                    v: unsafe { v_ptr.add(j) },
+                    stage: 0,
+                    x: 0,
+                    i: 0,
+                    kmer: 0,
+                    p: mb_sai_t::default(),
                 });
             }
-            mb_bwt_smem_batch(km, bwt, (en - i) as i32, &mut s);
-            for (off, entry) in s.into_iter().enumerate() {
-                v[i + off] = entry.v;
-            }
+            mb_bwt_smem_batch_ref_with_queue(km, bwt, (en - i) as i32, &mut s, v, &mut tq);
             i = en;
         }
 
         let nv: Vec<usize> = v.iter().take(n_seq as usize).map(|x| x.n).collect();
-        let mut s = Vec::with_capacity(MAX_BATCH_SIZE);
-        let mut s_idx = Vec::with_capacity(MAX_BATCH_SIZE);
+        s.clear();
+        let v_ptr = v.as_mut_ptr();
         for i in 0..n_seq as usize {
             for j in 0..nv[i] {
                 let st = (v[i].a[j].info >> 32) as u32;
@@ -20205,29 +23139,27 @@ pub mod seed {
                 if en - st < (min_len * 2) as u32 || v[i].a[j].size > max_sub_occ as u64 {
                     continue;
                 }
-                s.push(mb_smem_entry_t {
+                s.push(mb_smem_entry_ref {
                     min_len: (((en - st) / 2) as i32).max(min_len),
                     min_occ: v[i].a[j].size as i32 + 1,
                     st: st as i32,
                     en: en as i32,
-                    q: seq[i].clone(),
-                    v: v[i].clone(),
-                    ..Default::default()
+                    q: seq[i],
+                    v: unsafe { v_ptr.add(i) },
+                    stage: 0,
+                    x: 0,
+                    i: 0,
+                    kmer: 0,
+                    p: mb_sai_t::default(),
                 });
-                s_idx.push(i);
                 if s.len() == MAX_BATCH_SIZE {
-                    mb_bwt_smem_batch(km, bwt, s.len() as i32, &mut s);
-                    for (seq_idx, entry) in s_idx.drain(..).zip(s.drain(..)) {
-                        v[seq_idx] = entry.v;
-                    }
+                    mb_bwt_smem_batch_ref_with_queue(km, bwt, s.len() as i32, &mut s, v, &mut tq);
+                    s.clear();
                 }
             }
         }
         if !s.is_empty() {
-            mb_bwt_smem_batch(km, bwt, s.len() as i32, &mut s);
-            for (seq_idx, entry) in s_idx.drain(..).zip(s.drain(..)) {
-                v[seq_idx] = entry.v;
-            }
+            mb_bwt_smem_batch_ref_with_queue(km, bwt, s.len() as i32, &mut s, v, &mut tq);
         }
         for vi in v.iter_mut().take(n_seq as usize) {
             vi.m = vi.a.capacity();
@@ -20239,20 +23171,20 @@ pub mod seed {
         if u.n <= 1 {
             return;
         }
-        u.a[..u.n].sort_by_key(|x| x.x[0]);
+        radix_sort_mb_sai_by_key(&mut u.a[..u.n], |x| x.x[0]);
         let mut i0 = 0usize;
         let mut i = 1usize;
         while i <= u.n {
             if i == u.n || u.a[i].x[0] != u.a[i0].x[0] {
                 if i - i0 > 1 {
-                    u.a[i0..i].sort_by_key(|x| x.size);
+                    radix_sort_mb_sai_by_key(&mut u.a[i0..i], |x| x.size);
                     u.a[..u.n].reverse();
                     let mut k0 = i0;
                     let mut k = i0 + 1;
                     while k <= i {
                         if k == i || u.a[k0].size != u.a[k].size {
                             if k - k0 > 1 {
-                                u.a[k0..k].sort_by_key(|x| x.info);
+                                radix_sort_mb_sai_by_key(&mut u.a[k0..k], |x| x.info);
                             }
                             k0 = k;
                         }
@@ -20276,6 +23208,89 @@ pub mod seed {
         u.n = j + 1;
         u.a.truncate(u.n);
         u.m = u.a.capacity();
+    }
+
+    fn radix_sort_mb_sai_by_key(a: &mut [mb_sai_t], key: fn(&mb_sai_t) -> u64) {
+        const RS_MIN_SIZE: usize = 64;
+        const RS_MAX_BITS: u32 = 8;
+
+        fn insertion_sort(a: &mut [mb_sai_t], key: fn(&mb_sai_t) -> u64) {
+            for i in 1..a.len() {
+                if key(&a[i]) < key(&a[i - 1]) {
+                    let tmp = a[i];
+                    let mut j = i;
+                    while j > 0 && key(&tmp) < key(&a[j - 1]) {
+                        a[j] = a[j - 1];
+                        j -= 1;
+                    }
+                    a[j] = tmp;
+                }
+            }
+        }
+
+        fn sort_rec(a: &mut [mb_sai_t], key: fn(&mb_sai_t) -> u64, n_bits: u32, s: u32) {
+            let size = 1usize << n_bits;
+            let mask = size - 1;
+            let mut b = vec![0usize; size];
+            let mut e = vec![0usize; size];
+            for x in a.iter() {
+                e[((key(x) >> s) as usize) & mask] += 1;
+            }
+            let mut sum = 0usize;
+            for k in 0..size {
+                let count = e[k];
+                b[k] = sum;
+                sum += count;
+                e[k] = sum;
+            }
+            let bucket_end = e.clone();
+
+            let mut k = 0usize;
+            while k < size {
+                if b[k] != e[k] {
+                    let mut l = ((key(&a[b[k]]) >> s) as usize) & mask;
+                    if l != k {
+                        let mut tmp = a[b[k]];
+                        loop {
+                            std::mem::swap(&mut tmp, &mut a[b[l]]);
+                            b[l] += 1;
+                            l = ((key(&tmp) >> s) as usize) & mask;
+                            if l == k {
+                                break;
+                            }
+                        }
+                        a[b[k]] = tmp;
+                        b[k] += 1;
+                    } else {
+                        b[k] += 1;
+                    }
+                } else {
+                    k += 1;
+                }
+            }
+
+            let mut bucket_start = vec![0usize; size];
+            bucket_start[1..size].copy_from_slice(&bucket_end[..size - 1]);
+            if s != 0 {
+                let next_s = s.saturating_sub(n_bits);
+                for k in 0..size {
+                    let start = bucket_start[k];
+                    let end = bucket_end[k];
+                    let len = end - start;
+                    if len > RS_MIN_SIZE {
+                        sort_rec(&mut a[start..end], key, n_bits, next_s);
+                    } else if len > 1 {
+                        insertion_sort(&mut a[start..end], key);
+                    }
+                }
+            }
+        }
+
+        if a.len() <= RS_MIN_SIZE {
+            insertion_sort(a, key);
+        } else {
+            sort_rec(a, key, RS_MAX_BITS, 7 * RS_MAX_BITS);
+        }
     }
 
     /// Original C static function `mb_anchor_dedup` from `minibwa/seed.c:142`.
@@ -20318,6 +23333,93 @@ pub mod seed {
         v.a.truncate(j);
     }
 
+    fn radix_sort_mb_anchor_by_tpos(a: &mut [mb_anchor_t]) {
+        const RS_MIN_SIZE: usize = 64;
+        const RS_MAX_BITS: u32 = 8;
+
+        fn key(x: &mb_anchor_t) -> u64 {
+            x.tpos as u64
+        }
+
+        fn insertion_sort(a: &mut [mb_anchor_t]) {
+            for i in 1..a.len() {
+                if key(&a[i]) < key(&a[i - 1]) {
+                    let tmp = a[i];
+                    let mut j = i;
+                    while j > 0 && key(&tmp) < key(&a[j - 1]) {
+                        a[j] = a[j - 1];
+                        j -= 1;
+                    }
+                    a[j] = tmp;
+                }
+            }
+        }
+
+        fn sort_rec(a: &mut [mb_anchor_t], n_bits: u32, s: u32) {
+            let size = 1usize << n_bits;
+            let mask = size - 1;
+            let mut b = vec![0usize; size];
+            let mut e = vec![0usize; size];
+            for x in a.iter() {
+                e[((key(x) >> s) as usize) & mask] += 1;
+            }
+            let mut sum = 0usize;
+            for k in 0..size {
+                let count = e[k];
+                b[k] = sum;
+                sum += count;
+                e[k] = sum;
+            }
+            let bucket_end = e.clone();
+
+            let mut k = 0usize;
+            while k < size {
+                if b[k] != e[k] {
+                    let mut l = ((key(&a[b[k]]) >> s) as usize) & mask;
+                    if l != k {
+                        let mut tmp = a[b[k]];
+                        loop {
+                            std::mem::swap(&mut tmp, &mut a[b[l]]);
+                            b[l] += 1;
+                            l = ((key(&tmp) >> s) as usize) & mask;
+                            if l == k {
+                                break;
+                            }
+                        }
+                        a[b[k]] = tmp;
+                        b[k] += 1;
+                    } else {
+                        b[k] += 1;
+                    }
+                } else {
+                    k += 1;
+                }
+            }
+
+            let mut bucket_start = vec![0usize; size];
+            bucket_start[1..size].copy_from_slice(&bucket_end[..size - 1]);
+            if s != 0 {
+                let next_s = s.saturating_sub(n_bits);
+                for k in 0..size {
+                    let start = bucket_start[k];
+                    let end = bucket_end[k];
+                    let len = end - start;
+                    if len > RS_MIN_SIZE {
+                        sort_rec(&mut a[start..end], n_bits, next_s);
+                    } else if len > 1 {
+                        insertion_sort(&mut a[start..end]);
+                    }
+                }
+            }
+        }
+
+        if a.len() <= RS_MIN_SIZE {
+            insertion_sort(a);
+        } else {
+            sort_rec(a, RS_MAX_BITS, 7 * RS_MAX_BITS);
+        }
+    }
+
     /// Original C static function `process_batch` from `minibwa/seed.c:175`.
     pub fn process_batch(
         km: (),
@@ -20326,6 +23428,7 @@ pub mod seed {
         m: i32,
         b: &[(i64, i64)],
         a: &mut [u64],
+        sa_batch: &mut Vec<(u64, u64)>,
         qlen: i32,
         mt: l2b_meth_t,
         u: &mb_sai_v,
@@ -20334,7 +23437,7 @@ pub mod seed {
         for k in 0..m as usize {
             a[k] = b[k].0 as u64;
         }
-        mb_bwt_sa_batch(km, &idx.bwt, m as i64, a);
+        mb_bwt_sa_batch_with_scratch(km, &idx.bwt, m as i64, a, sa_batch);
         for k in 0..m as usize {
             let p = aux[b[k].1 as usize];
             for j in p.0..p.1 {
@@ -20397,6 +23500,38 @@ pub mod seed {
         max_occ: i32,
         v: &mut mb_anchor_v,
     ) {
+        let mut aux = Vec::new();
+        let mut a = Vec::new();
+        let mut sa_batch = Vec::new();
+        let mut b = Vec::new();
+        mb_anchor_with_scratch(
+            km,
+            idx,
+            u,
+            qlen,
+            mt,
+            max_occ,
+            v,
+            &mut aux,
+            &mut a,
+            &mut sa_batch,
+            &mut b,
+        );
+    }
+
+    pub fn mb_anchor_with_scratch(
+        km: (),
+        idx: &mb_idx_t,
+        u: &mut mb_sai_v,
+        qlen: i32,
+        mt: l2b_meth_t,
+        max_occ: i32,
+        v: &mut mb_anchor_v,
+        aux: &mut Vec<(i64, i64)>,
+        a: &mut Vec<u64>,
+        sa_batch: &mut Vec<(u64, u64)>,
+        b: &mut Vec<(i64, i64)>,
+    ) {
         const BATCH_SIZE: i32 = 20;
         v.n = 0;
         v.a.clear();
@@ -20404,7 +23539,7 @@ pub mod seed {
             return;
         }
         mb_seed_sort_dedup(u);
-        let mut aux = Vec::new();
+        aux.clear();
         let mut i0 = 0usize;
         let mut i = 1usize;
         while i <= u.n {
@@ -20415,12 +23550,14 @@ pub mod seed {
             i += 1;
         }
         let m_a = max_occ.max(BATCH_SIZE) as usize;
-        let mut a = vec![0u64; m_a.max(1)];
-        let mut b = Vec::with_capacity(m_a.max(1));
+        a.clear();
+        a.resize(m_a.max(1), 0);
+        b.clear();
+        b.reserve(m_a.max(1).saturating_sub(b.capacity()));
         for (i, p) in aux.iter().enumerate() {
             let q = &u.a[p.0 as usize];
             if q.size as usize + b.len() > BATCH_SIZE as usize {
-                process_batch(km, idx, &aux, b.len() as i32, &b, &mut a, qlen, mt, u, v);
+                process_batch(km, idx, aux, b.len() as i32, b, a, sa_batch, qlen, mt, u, v);
                 b.clear();
             }
             if q.size <= max_occ as u64 {
@@ -20442,9 +23579,9 @@ pub mod seed {
             }
             assert!(b.len() <= m_a);
         }
-        process_batch(km, idx, &aux, b.len() as i32, &b, &mut a, qlen, mt, u, v);
+        process_batch(km, idx, aux, b.len() as i32, b, a, sa_batch, qlen, mt, u, v);
 
-        v.a.sort_by_key(|x| x.tpos);
+        radix_sort_mb_anchor_by_tpos(&mut v.a);
         for q in &mut v.a {
             let ctg = &idx.l2b.ctg[(q.sid >> 1) as usize];
             q.tpos -= (ctg.off * 2 + ctg.len * (q.sid & 1) as u64) as i64;
@@ -20462,7 +23599,7 @@ pub mod seed {
             let ctg = &l2b.ctg[(x.sid >> 1) as usize];
             x.tpos += (ctg.off * 2 + ctg.len * (x.sid & 1) as u64) as i64;
         }
-        a[..n_a as usize].sort_by_key(|x| x.tpos);
+        radix_sort_mb_anchor_by_tpos(&mut a[..n_a as usize]);
         for x in a.iter_mut().take(n_a as usize) {
             let ctg = &l2b.ctg[(x.sid >> 1) as usize];
             x.tpos -= (ctg.off * 2 + ctg.len * (x.sid & 1) as u64) as i64;
@@ -20475,22 +23612,19 @@ pub mod seed {
         use crate::bwt::mb_bwt_load;
         use crate::map_algo::mb_idx_load;
 
-        fn nt4(s: &str) -> Vec<u8> {
-            s.bytes()
-                .map(|c| match c {
+        #[test]
+        fn seed_intervals_are_found_on_real_chrm_bwt() {
+            let bwt = mb_bwt_load("minibwa/chrM-human.mbw").expect("load bwt");
+            let seq = b"GATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT"
+                .iter()
+                .map(|&c| match c {
                     b'A' | b'a' => 0,
                     b'C' | b'c' => 1,
                     b'G' | b'g' => 2,
                     b'T' | b't' => 3,
                     _ => 4,
                 })
-                .collect()
-        }
-
-        #[test]
-        fn seed_intervals_are_found_on_real_chrm_bwt() {
-            let bwt = mb_bwt_load("minibwa/chrM-human.mbw").expect("load bwt");
-            let seq = nt4("GATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT");
+                .collect::<Vec<_>>();
             let mut v = mb_sai_v::default();
             mb_seed_intv((), &bwt, seq.len() as i32, &seq, 19, 10, &mut v);
             assert!(v.n > 0);
@@ -20505,18 +23639,32 @@ pub mod seed {
         #[test]
         fn seed_batch_matches_single_seed_sets() {
             let bwt = mb_bwt_load("minibwa/chrM-human.mbw").expect("load bwt");
-            let seqs = vec![
-                nt4("GATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT"),
-                nt4("ATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT"),
-            ];
+            let seqs = [
+                "GATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT",
+                "ATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT",
+            ]
+            .iter()
+            .map(|s| {
+                s.bytes()
+                    .map(|c| match c {
+                        b'A' | b'a' => 0,
+                        b'C' | b'c' => 1,
+                        b'G' | b'g' => 2,
+                        b'T' | b't' => 3,
+                        _ => 4,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
             let lens = seqs.iter().map(|s| s.len() as i32).collect::<Vec<_>>();
+            let seq_refs = seqs.iter().map(|s| s.as_ptr()).collect::<Vec<_>>();
             let mut batch = vec![mb_sai_v::default(); seqs.len()];
             mb_seed_intv_batch(
                 (),
                 &bwt,
                 seqs.len() as i32,
                 &lens,
-                &seqs,
+                &seq_refs,
                 19,
                 10,
                 &mut batch,
@@ -20533,9 +23681,47 @@ pub mod seed {
         }
 
         #[test]
+        #[ignore = "requires .tmp/large-real/yeast fixtures prepared from the real yeast conformance data"]
+        fn seed_batch_matches_single_on_yeast_poly_t_read() {
+            let bwt = mb_bwt_load(".tmp/large-real/yeast/ref.orig.mbw").expect("load yeast bwt");
+            let seq = b"GGTTCCGATCTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTC"
+                .iter()
+                .map(|&c| match c {
+                    b'A' | b'a' => 0,
+                    b'C' | b'c' => 1,
+                    b'G' | b'g' => 2,
+                    b'T' | b't' => 3,
+                    _ => 4,
+                })
+                .collect::<Vec<_>>();
+            let seqs = [seq.clone()];
+            let lens = [seq.len() as i32];
+            let mut single = mb_sai_v::default();
+            mb_seed_intv((), &bwt, lens[0], &seq, 19, 10, &mut single);
+            let seq_refs = seqs.iter().map(|s| s.as_ptr()).collect::<Vec<_>>();
+            let mut batch = vec![mb_sai_v::default()];
+            mb_seed_intv_batch((), &bwt, 1, &lens, &seq_refs, 19, 10, &mut batch);
+
+            let mut a = single.a[..single.n].to_vec();
+            let mut b = batch[0].a[..batch[0].n].to_vec();
+            a.sort_by_key(|x| (x.x[0], x.size, x.info));
+            b.sort_by_key(|x| (x.x[0], x.size, x.info));
+            assert_eq!(b, a);
+        }
+
+        #[test]
         fn anchors_are_generated_on_real_chrm_index() {
             let idx = mb_idx_load("minibwa/chrM-human", 0).expect("load idx");
-            let seq = nt4("GATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT");
+            let seq = b"GATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT"
+                .iter()
+                .map(|&c| match c {
+                    b'A' | b'a' => 0,
+                    b'C' | b'c' => 1,
+                    b'G' | b'g' => 2,
+                    b'T' | b't' => 3,
+                    _ => 4,
+                })
+                .collect::<Vec<_>>();
             let mut u = mb_sai_v::default();
             mb_seed_intv((), &idx.bwt, seq.len() as i32, &seq, 19, 10, &mut u);
             let mut v = mb_anchor_v::default();
