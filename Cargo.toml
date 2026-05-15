@@ -15,17 +15,14 @@ autotests = false
 include = [
     "/Cargo.toml",
     "/README.md",
-    "/LICENSE.minibwa",
-    "/build.rs",
-    "/c/ksw2/**",
-    "/src/lib.rs",
-    "/src/main.rs",
+    "/LICENSE",
+    "/src/*.rs",
+    "/tests/**",
 ]
 
 [features]
 default = []
 cli = []
-c-ksw2 = []
 
 [lib]
 path = "src/lib.rs"
@@ -46,9 +43,6 @@ libc = "0.2"
 libm = "0.2"
 libsais-rs = { version = "0.1.1", path = "../libsais" }
 rayon = "1.10"
-
-[build-dependencies]
-cc = "1"
 
 [profile.release]
 codegen-units = 1

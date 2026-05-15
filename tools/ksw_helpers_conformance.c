@@ -1,4 +1,4 @@
-#include "ksw2.h"
+#include "../minibwa/ksw2.h"
 
 #include <stdint.h>
 #include <stdio.h>

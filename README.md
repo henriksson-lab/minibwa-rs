@@ -46,13 +46,11 @@ cargo install minibwa-rs --features cli
 The same feature also exposes `minibwa_rs::cli` for library users that want to
 embed the command dispatcher instead of spawning a process.
 
-The translated Rust KSW2 alignment path is used by default. On x86/x86_64, the
-original C KSW2 SIMD shims can be enabled explicitly with `c-ksw2`:
+The translated Rust KSW2 alignment path is always used; the crate does not link
+the original C KSW2 kernels.
 
-```toml
-[dependencies]
-minibwa-rs = { version = "0.1", features = ["c-ksw2"] }
-```
+Future feature audits should revisit CPU SIMD support and decide which
+architecture-specific acceleration paths belong in the public crate.
 
 For local development from this repository:
 
