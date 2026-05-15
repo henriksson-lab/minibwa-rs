@@ -294,8 +294,8 @@ fn worker_for_se_batch_collect_view(
             let hit = mb_map_sai(
                 &opt_adap,
                 idx,
-                len[p] as i64,
-                unsafe { std::slice::from_raw_parts(seq[p] as *const u8, len[p] as usize) },
+                t.l_seq as i64,
+                &t.seq,
                 mt,
                 &mut sai[p],
                 &mut n_hit,

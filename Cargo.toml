@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Rust translation of minibwa for BWT indexing and sequence alignment"
 readme = "README.md"
-license-file = "LICENSE"
+license = "MIT"
 repository = "https://github.com/henriksson-lab/minibwa-rs"
 homepage = "https://github.com/henriksson-lab/minibwa-rs"
 documentation = "https://docs.rs/minibwa-rs"
@@ -41,7 +41,7 @@ required-features = ["cli"]
 flate2 = "1"
 libc = "0.2"
 libm = "0.2"
-libsais-rs = { version = "0.1.1", path = "../libsais" }
+libsais-rs = "0.2"
 mimalloc = { version = "0.1.50", default-features = false, optional = true }
 rayon = "1.10"
 

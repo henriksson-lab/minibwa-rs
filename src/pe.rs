@@ -1329,6 +1329,12 @@ pub fn mb_matesw(
             }
         }
     }
+    if (opt.flag & MB_F_METH) != 0 {
+        crate::l2bit::l2b_meth_convert(l2b_meth_t::L2B_METH_C2T, qlen[0] as i64, &mut qs[0][0]);
+        crate::l2bit::l2b_meth_convert(l2b_meth_t::L2B_METH_G2A, qlen[0] as i64, &mut qs[0][1]);
+        crate::l2bit::l2b_meth_convert(l2b_meth_t::L2B_METH_G2A, qlen[1] as i64, &mut qs[1][0]);
+        crate::l2bit::l2b_meth_convert(l2b_meth_t::L2B_METH_C2T, qlen[1] as i64, &mut qs[1][1]);
+    }
     let min_sc = [
         mb_hit_sum_score(km, n_hit[0], &hit[0]) / opt.a - opt.pen_unpair,
         mb_hit_sum_score(km, n_hit[1], &hit[1]) / opt.a - opt.pen_unpair,

@@ -23,7 +23,7 @@ fn cli_prints_translated_top_level_usage_and_version() {
     assert_eq!(version.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(version.stdout).unwrap(),
-        "0.0-r310-dirty\n"
+        "0.0-r318-dirty\n"
     );
     assert!(version.stderr.is_empty());
 }

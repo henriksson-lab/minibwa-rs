@@ -5,7 +5,7 @@ use crate::bseq::{mb_bseq_close, mb_bseq_open, mb_bseq_read};
 use crate::map_algo::{
     mb_idx_ctg_len, mb_idx_ctg_name, mb_idx_destroy, mb_idx_load, mb_map_batch, mb_tbuf_t,
 };
-use crate::options::{mb_opt_init, mb_opt_t};
+use crate::options::{mb_opt_init, mb_opt_t, MB_F_PE};
 
 /// Original C static function `process_batch` from `minibwa/api-test/ex-batch.c:9`.
 pub fn process_batch(
@@ -64,6 +64,7 @@ pub fn process_batch(
 pub fn main(argv: &[String]) -> (i32, String) {
     let mut opt = mb_opt_t::default();
     mb_opt_init(&mut opt);
+    opt.flag &= !MB_F_PE;
     if argv.len() < 3 {
         return (1, "Usage: mbmap-batch <idxPrefix> <query.fa>\n".to_string());
     }

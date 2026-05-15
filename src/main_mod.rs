@@ -9,7 +9,7 @@ use crate::kommon::{
 };
 use crate::map_main::main_map;
 
-pub const MB_VERSION: &str = "0.0-r310-dirty";
+pub const MB_VERSION: &str = "0.0-r318-dirty";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]

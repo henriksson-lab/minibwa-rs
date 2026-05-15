@@ -50,7 +50,7 @@ pub struct mb_smem_entry_t {
     pub stage: i32,
     pub x: i32,
     pub i: i32,
-    pub kmer: i32,
+    pub kmer: u32,
     pub p: mb_sai_t,
 }
 
@@ -66,7 +66,7 @@ pub struct mb_smem_entry_ref {
     pub stage: i32,
     pub x: i32,
     pub i: i32,
-    pub kmer: i32,
+    pub kmer: u32,
     pub p: mb_sai_t,
 }
 
@@ -201,7 +201,7 @@ pub fn mb_bwt_block_prefetch(bwt: &mb_bwt_t, k: u64) {
 }
 
 #[inline(always)]
-pub fn mb_bwt_pre_prefetch(bwt: &mb_bwt_t, kmer: i32) {
+pub fn mb_bwt_pre_prefetch(bwt: &mb_bwt_t, kmer: u32) {
     if !bwt.pre.is_empty() {
         let p = unsafe { bwt.pre.as_ptr().add(kmer as usize) };
         crate::s2n_lite::_mm_prefetch(p as *const u8, 3);
@@ -638,7 +638,7 @@ pub fn mb_bwt_smem_batch(km: (), bwt: &mb_bwt_t, n: i32, a: &mut [mb_smem_entry_
                     s.kmer = 0;
                     let mut i = 0;
                     while i < bwt.pre_len as i32 {
-                        s.kmer = s.kmer << 2 | s.q[s.i as usize] as i32;
+                        s.kmer = s.kmer << 2 | s.q[s.i as usize] as u32;
                         s.i -= 1;
                         i += 1;
                     }
@@ -705,7 +705,7 @@ pub fn mb_bwt_smem_batch(km: (), bwt: &mb_bwt_t, n: i32, a: &mut [mb_smem_entry_
                         s.kmer = 0;
                         let mut i = 0;
                         while i < bwt.pre_len as i32 {
-                            s.kmer = s.kmer << 2 | s.q[s.i as usize] as i32;
+                            s.kmer = s.kmer << 2 | s.q[s.i as usize] as u32;
                             s.i -= 1;
                             i += 1;
                         }
@@ -802,7 +802,7 @@ pub fn mb_bwt_smem_batch_ref_with_queue(
                     s.kmer = 0;
                     let mut i = 0;
                     while i < bwt.pre_len as i32 {
-                        s.kmer = s.kmer << 2 | unsafe { smem_q_ref(s, s.i) } as i32;
+                        s.kmer = s.kmer << 2 | unsafe { smem_q_ref(s, s.i) } as u32;
                         s.i -= 1;
                         i += 1;
                     }
@@ -871,7 +871,7 @@ pub fn mb_bwt_smem_batch_ref_with_queue(
                         s.kmer = 0;
                         let mut i = 0;
                         while i < bwt.pre_len as i32 {
-                            s.kmer = s.kmer << 2 | unsafe { smem_q_ref(s, s.i) } as i32;
+                            s.kmer = s.kmer << 2 | unsafe { smem_q_ref(s, s.i) } as u32;
                             s.i -= 1;
                             i += 1;
                         }

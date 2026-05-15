@@ -224,6 +224,23 @@ pub fn l2b_getseq_meth(
     len
 }
 
+/// Original C global function `l2b_meth_convert` from `minibwa/l2bit.c:93`.
+pub fn l2b_meth_convert(mt: l2b_meth_t, len: i64, seq: &mut [u8]) {
+    if mt == l2b_meth_t::L2B_METH_C2T {
+        for i in 0..len as usize {
+            if seq[i] == 1 {
+                seq[i] = 3;
+            }
+        }
+    } else if mt == l2b_meth_t::L2B_METH_G2A {
+        for i in 0..len as usize {
+            if seq[i] == 2 {
+                seq[i] = 0;
+            }
+        }
+    }
+}
+
 /// Original C static function `l2b_get0` from `minibwa/l2bit.h:43`.
 #[inline(always)]
 pub fn l2b_get0(l2b: &l2b_t, i: u64) -> i32 {

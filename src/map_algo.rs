@@ -1450,7 +1450,7 @@ pub fn mb_map_sai(
     opt: &mb_opt_t,
     idx: &mb_idx_t,
     qlen: i64,
-    seq: &[u8],
+    seq0: &str,
     mt: l2b_meth_t,
     u: &mut mb_sai_v,
     n_hit_: &mut i32,
@@ -1467,6 +1467,11 @@ pub fn mb_map_sai(
     let mut hash = qname.map(mb_hash_str).unwrap_or(0);
     hash ^= (mb_hash64(qlen as u64).wrapping_add(mb_hash64(opt.seed as u64))) as u32;
     hash = mb_hash64(hash as u64) as u32;
+    let mut seq: Vec<u8> = seq0
+        .bytes()
+        .take(qlen as usize)
+        .map(|c| crate::kommon::KOM_NT4_TABLE[c as usize])
+        .collect();
     let hi_cov = mb_cal_high_cov((), u.n as i32, &u.a, opt.max_occ);
     let is_sr = mb_is_sr_mode(opt, qlen as i32);
     let sub_diff = (opt.a + opt.b).max(opt.q + opt.e);
@@ -1585,6 +1590,9 @@ pub fn mb_map_sai(
         &mut hit,
     );
 
+    if mt != l2b_meth_t::L2B_METH_NONE {
+        crate::l2bit::l2b_meth_convert(mt, qlen, &mut seq);
+    }
     if (opt.flag & MB_F_NO_ALN) == 0 {
         crate::stage_time::measure(crate::stage_time::Bucket::Align, || {
             mb_align_skeleton_with_scratch(
@@ -1592,7 +1600,7 @@ pub fn mb_map_sai(
                 opt,
                 idx,
                 qlen as i32,
-                seq,
+                &seq,
                 mt,
                 &mut n_hit,
                 &mut hit,
@@ -1674,13 +1682,7 @@ pub fn mb_map(
     let seq = seq0
         .bytes()
         .take(qlen as usize)
-        .map(|c| match c {
-            b'A' | b'a' => 0,
-            b'C' | b'c' => 1,
-            b'G' | b'g' => 2,
-            b'T' | b't' => 3,
-            _ => 4,
-        })
+        .map(|c| crate::kommon::KOM_NT4_TABLE[c as usize])
         .collect::<Vec<_>>();
     let mut u = mb_sai_v::default();
     mb_seed_intv(
@@ -1692,11 +1694,12 @@ pub fn mb_map(
         opt.max_sub_occ,
         &mut u,
     );
+    drop(seq);
     mb_map_sai(
         &opt_adap,
         idx,
         qlen as i64,
-        &seq,
+        seq0,
         mt,
         &mut u,
         n_hit_,
@@ -1775,6 +1778,9 @@ pub fn mb_map_batch(
                 &mut sai[..sb_n as usize],
             );
             for k in 0..sb_n as usize {
+                seq4[k] = Vec::new();
+            }
+            for k in 0..sb_n as usize {
                 let idx_k = sb_st as usize + k;
                 let mut opt_adap = mb_opt_t::default();
                 mb_opt_adap(opt, qlen[idx_k], &mut opt_adap);
@@ -1795,7 +1801,7 @@ pub fn mb_map_batch(
                     &opt_adap,
                     idx,
                     qlen[idx_k] as i64,
-                    &seq4[k],
+                    seq[idx_k],
                     mt,
                     &mut sai[k],
                     &mut n_hit[idx_k],

@@ -395,7 +395,7 @@ pub fn mb_bwt_libsais(
         std::env::var_os("MINIBWA_RS_INDEX_32BIT_SA").is_some() && len <= i32::MAX as usize - FS;
     let (primary, mut ssa) = if use_32bit_sa {
         let mut a = vec![0i32; len + FS + 1];
-        let rc = libsais_rs::libsais_upstream_c_omp(&seq, &mut a[1..], FS as i32, None, n_thread);
+        let rc = libsais_rs::libsais_omp(&seq, &mut a[1..], FS as i32, None, n_thread);
         assert_eq!(rc, 0, "libsais failed with status {rc}");
         if time_stages {
             eprintln!(
@@ -425,11 +425,8 @@ pub fn mb_bwt_libsais(
         drop(a);
         (primary, ssa)
     } else {
-        let mut a_storage = Vec::<std::mem::MaybeUninit<i64>>::with_capacity(len + FS + 1);
-        unsafe {
-            a_storage.set_len(len + FS + 1);
-        }
-        let rc = libsais_rs::libsais64::libsais64_upstream_c_omp_uninit(
+        let mut a_storage = vec![0i64; len + FS + 1];
+        let rc = libsais_rs::libsais64::libsais64_omp(
             &seq,
             &mut a_storage[1..],
             FS as i64,

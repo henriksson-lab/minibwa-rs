@@ -1,6 +1,5 @@
 #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
-use crate::kommon::kom_revcomp;
 use flate2::bufread::MultiGzDecoder;
 use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
 use std::fs::File;
@@ -175,18 +174,6 @@ pub fn mb_qname_same(s1: &str, s2: &str) -> i32 {
     let l1 = mb_qname_len(s1) as usize;
     let l2 = mb_qname_len(s2) as usize;
     (l1 == l2 && s1.as_bytes()[..l1] == s2.as_bytes()[..l2]) as i32
-}
-
-/// Original C static function `mb_revcomp_bseq` from `minibwa/bseq.h:41`.
-pub fn mb_revcomp_bseq(s: &mut mb_bseq1_t) {
-    let mut seq = s.seq.as_bytes().to_vec();
-    kom_revcomp(s.l_seq, &mut seq);
-    s.seq = String::from_utf8(seq).unwrap().into_boxed_str();
-    if let Some(qual) = &mut s.qual {
-        let mut q = qual.as_bytes().to_vec();
-        q.reverse();
-        *qual = mb_opt_str_t::from_string(String::from_utf8(q).unwrap());
-    }
 }
 
 /// Original C global function `mb_bseq_open` from `minibwa/bseq.c:43`.
@@ -502,19 +489,6 @@ mod tests {
         assert_eq!(mb_qname_len("read/x"), 6);
         assert_eq!(mb_qname_same("read/1", "read/2"), 1);
         assert_eq!(mb_qname_same("read/1", "readx/2"), 0);
-    }
-
-    #[test]
-    fn revcomp_bseq_reverses_sequence_and_quality() {
-        let mut s = mb_bseq1_t {
-            l_seq: 4,
-            seq: "ACGT".into(),
-            qual: Some("abcd".into()),
-            ..Default::default()
-        };
-        mb_revcomp_bseq(&mut s);
-        assert_eq!(&*s.seq, "ACGT");
-        assert_eq!(s.qual.as_deref(), Some("dcba"));
     }
 
     #[test]

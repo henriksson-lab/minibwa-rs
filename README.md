@@ -1,6 +1,6 @@
 # minibwa-rs
 
-This is a Rust translation of minibwa (commit: ...)
+This is a Rust translation of minibwa (commit: e89baa0732b4c69a80b029a0569e14b0c1ae03ef)
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code! 
 
@@ -66,8 +66,15 @@ mimalloc = { version = "0.1.50", default-features = false }
 The translated Rust KSW2 alignment path is always used; the crate does not link
 the original C KSW2 kernels.
 
-Future feature audits should revisit CPU SIMD support and decide which
-architecture-specific acceleration paths belong in the public crate.
+### SIMD and supported architectures
+
+Only `x86_64` is currently supported. The KSW2 alignment kernels
+(`src/ksw2_*_sse.rs`) use SSE2/SSE4.1 intrinsics via
+`std::arch::x86_64` and do not yet have non-x86 fallbacks, so the crate will
+not build on `aarch64`, `riscv64`, etc. The portable SIMD shim in
+`src/s2n_lite.rs` does include scalar emulation for non-x86 targets and could
+be extended to cover the KSW2 helpers; NEON and other native SIMD backends are
+not implemented.
 
 For local development from this repository:
 
