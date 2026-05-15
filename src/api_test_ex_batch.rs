@@ -1,4 +1,3 @@
-
 #![allow(unused_variables, dead_code, non_snake_case)]
 
 use crate::align::MB_CIGAR_STR;

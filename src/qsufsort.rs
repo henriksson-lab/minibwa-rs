@@ -1,4 +1,3 @@
-
 #![allow(unused_variables, dead_code, non_snake_case)]
 
 pub const INSERT_SORT_NUM_ITEM: i64 = 16;

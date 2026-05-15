@@ -1,4 +1,3 @@
-
 use std::process::Command;
 
 use crate::ksw2_ll_sse::{ksw_ll_i16_core, ksw_ll_qinit, ksw_ll_u8_core, ksw_llrst_t};

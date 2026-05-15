@@ -1,4 +1,3 @@
-
 #![allow(unused_variables, dead_code, non_snake_case)]
 
 use crate::options::{mb_opt_t, MB_F_ADAP, MB_F_LONG};

@@ -1,4 +1,3 @@
-
 use std::io::{self, BufWriter, Write};
 
 fn write_to<W: Write>(writer: &mut W, text: &str) -> io::Result<()> {

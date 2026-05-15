@@ -46,6 +46,23 @@ cargo install minibwa-rs --features cli
 The same feature also exposes `minibwa_rs::cli` for library users that want to
 embed the command dispatcher instead of spawning a process.
 
+The packaged CLI binary uses `mimalloc` as its global allocator. This is
+intentional: minibwa's mapping path performs many short-lived allocations, and
+the original C benchmark builds also use mimalloc. Library users keep control of
+their process-wide allocator, but high-throughput applications should strongly
+consider enabling mimalloc in their own binary:
+
+```rust
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+```
+
+with:
+
+```toml
+mimalloc = { version = "0.1.50", default-features = false }
+```
+
 The translated Rust KSW2 alignment path is always used; the crate does not link
 the original C KSW2 kernels.
 

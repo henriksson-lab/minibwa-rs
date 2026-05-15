@@ -22,7 +22,7 @@ include = [
 
 [features]
 default = []
-cli = []
+cli = ["dep:mimalloc"]
 
 [lib]
 path = "src/lib.rs"
@@ -42,6 +42,7 @@ flate2 = "1"
 libc = "0.2"
 libm = "0.2"
 libsais-rs = { version = "0.1.1", path = "../libsais" }
+mimalloc = { version = "0.1.50", default-features = false, optional = true }
 rayon = "1.10"
 
 [profile.release]

@@ -1,4 +1,3 @@
-
 #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
 use flate2::read::MultiGzDecoder;

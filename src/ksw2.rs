@@ -1,4 +1,3 @@
-
 #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
 pub const KSW_NEG_INF: i32 = -0x40000000;

@@ -1,4 +1,3 @@
-
 #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
 use crate::bwt::{mb_bwt_destroy, mb_bwt_load, mb_bwt_rank2a, mb_bwt_sa, mb_bwt_sa_batch};
