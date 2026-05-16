@@ -254,6 +254,11 @@ pub fn kom_revcomp(len: u64, seq: &mut [u8]) {
     }
 }
 
+/// timezone information is stored outside the kernel so tzp isn't used anymore.
+///
+/// Note: this function is not for Win32 high precision timing purpose. See
+/// elapsed_time().
+///
 /// Original C global function `gettimeofday` from `minibwa/kommon.c:261`.
 pub fn gettimeofday() -> timeval {
     let dur = SystemTime::now()
@@ -265,6 +270,8 @@ pub fn gettimeofday() -> timeval {
     }
 }
 
+/// taken from https://stackoverflow.com/questions/5272470/c-get-cpu-usage-on-linux-and-windows
+///
 /// Original C global function `kom_cputime` from `minibwa/kommon.c:279`.
 pub fn kom_cputime() -> f64 {
     let mut r: rusage = unsafe { std::mem::zeroed() };

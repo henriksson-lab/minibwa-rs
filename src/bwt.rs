@@ -129,6 +129,12 @@ pub fn mb_bwt_data_len(len: u64) -> u64 {
     bwt_len + occ_len
 }
 
+/// BWT layout. Each block consists of u64[4]+u32[8], 64 bytes in total. The
+/// lower 56 bits of each u64[4] (see BWT_CNT_SHIFT) store the accumulative
+/// count of A/C/G/T bases. The higher 8 bits store the count of A/C/G/T in the
+/// next 64nt. u32[8] keeps a BWT substring of 128nt in length. Because it
+/// follows little endian, it can also be considered as u64[4] etc.
+///
 /// Original C global function `mb_bwt_init_from_raw` from `minibwa/bwt.c:64`.
 pub fn mb_bwt_init_from_raw(is_byte: i32, raw: &[u8], len: u64, primary: u64) -> mb_bwt_t {
     let mut c = [0u64; 4];
@@ -428,6 +434,8 @@ pub fn mb_bwt_extend_back(bwt: &mb_bwt_t, ik: &mb_sai_t, ok: &mut [mb_sai_t; 4])
     ok[0].x[1] = ok[1].x[1] + tl[1];
 }
 
+/// Backward search from pos.
+///
 /// Original C static function `mb_bwt_back` from `minibwa/bwt.c:250`.
 pub fn mb_bwt_back(
     f: &mb_bwt_t,
@@ -473,6 +481,8 @@ pub fn mb_bwt_back(
     i
 }
 
+/// Find super MEMs (SMEMs). See ropebwt3.
+///
 /// Original C global function `mb_bwt_smem` from `minibwa/bwt.c:277`.
 pub fn mb_bwt_smem(
     f: &mb_bwt_t,
@@ -896,6 +906,8 @@ pub fn mb_bwt_smem_batch_ref_with_queue(
     }
 }
 
+/// Compute inverse CSA.
+///
 /// Original C static function `bwt_invPsi` from `minibwa/bwt.c:460`.
 #[inline(always)]
 pub fn bwt_invPsi(bwt: &mb_bwt_t, k: u64) -> u64 {
@@ -910,6 +922,8 @@ pub fn bwt_invPsi(bwt: &mb_bwt_t, k: u64) -> u64 {
     }
 }
 
+/// `bwt->bwt` and `bwt->occ` must be precalculated.
+///
 /// Original C global function `mb_bwt_gen_sa` from `minibwa/bwt.c:469`.
 pub fn mb_bwt_gen_sa(bwt: &mut mb_bwt_t, sa_bit: u32) {
     assert!(!bwt.data.is_empty());
@@ -1017,6 +1031,8 @@ pub fn mb_bwt_sa_batch_with_scratch(
     }
 }
 
+/// Adapted from `kount` in ropebwt3.
+///
 /// Original C global function `mb_bwt_count_kmer` from `minibwa/bwt.c:543`.
 pub fn mb_bwt_count_kmer(bwt: &mb_bwt_t, depth: i32, s: &mut [mb_sai_t]) {
     #[derive(Clone, Copy, Debug, Default)]

@@ -2,6 +2,11 @@
 
 pub const INSERT_SORT_NUM_ITEM: i64 = 16;
 
+/// Makes suffix array p of x. x becomes inverse of p. p and x are both of size
+/// n+1. Contents of x[0..n-1] are integers in the range l..k-1. Original
+/// contents of x[n] is disregarded, the n-th symbol being regarded as
+/// end-of-string smaller than all other symbols.
+///
 /// Original C global function `QSufSortSuffixSort` from `minibwa/QSufSort.c:56`.
 pub fn QSufSortSuffixSort(
     V: &mut [i64],
@@ -64,6 +69,12 @@ pub fn QSufSortGenerateSaFromInverse(V: &[i64], I: &mut [i64], numChar: i64) {
     }
 }
 
+/// Sorting routine called for each unsorted group. Sorts the array of integers
+/// (suffix numbers) of length n starting at p. The algorithm is a ternary-split
+/// quicksort taken from Bentley & McIlroy, "Engineering a Sort Function",
+/// Software -- Practice and Experience 23(11), 1249-1265 (November 1993). This
+/// function is based on Program 7.
+///
 /// Original C static function `QSufSortSortSplit` from `minibwa/QSufSort.c:113`.
 pub fn QSufSortSortSplit(
     V: &mut [i64],
@@ -153,6 +164,8 @@ pub fn QSufSortSortSplit(
     }
 }
 
+/// Algorithm by Bentley & McIlroy.
+///
 /// Original C static function `QSufSortChoosePivot` from `minibwa/QSufSort.c:194`.
 pub fn QSufSortChoosePivot(
     V: &[i64],
@@ -235,6 +248,8 @@ pub fn QSufSortChoosePivot(
     }
 }
 
+/// Quadratic sorting method to use for small subarrays.
+///
 /// Original C static function `QSufSortInsertSortSplit` from `minibwa/QSufSort.c:227`.
 pub fn QSufSortInsertSortSplit(
     V: &mut [i64],
@@ -287,6 +302,15 @@ pub fn QSufSortInsertSortSplit(
     }
 }
 
+/// Bucketsort for first iteration.
+///
+/// Input: x[0..n-1] holds integers in the range 1..k-1, all of which appear
+/// at least once. x[n] is 0. (This is the corresponding output of transform.) k
+/// must be at most n+1. p is array of size n+1 whose contents are disregarded.
+///
+/// Output: x is V and p is I after the initial sorting stage of the refined
+/// suffix sorting algorithm.
+///
 /// Original C static function `QSufSortBucketSort` from `minibwa/QSufSort.c:288`.
 pub fn QSufSortBucketSort(V: &mut [i64], I: &mut [i64], numChar: i64, alphabetSize: i64) {
     for i in 0..alphabetSize as usize {
@@ -321,6 +345,22 @@ pub fn QSufSortBucketSort(V: &mut [i64], I: &mut [i64], numChar: i64, alphabetSi
     }
 }
 
+/// Transforms the alphabet of x by attempting to aggregate several symbols into
+/// one, while preserving the suffix order of x. The alphabet may also be
+/// compacted, so that x on output comprises all integers of the new alphabet
+/// with no skipped numbers.
+///
+/// Input: x is an array of size n+1 whose first n elements are positive
+/// integers in the range l..k-1. p is array of size n+1, used for temporary
+/// storage. q controls aggregation and compaction by defining the maximum intue
+/// for any symbol during transformation: q must be at least k-l; if q<=n,
+/// compaction is guaranteed; if k-l>n, compaction is never done; if q is
+/// INT_MAX, the maximum number of symbols are aggregated into one.
+///
+/// Output: Returns an integer j in the range 1..q representing the size of the
+/// new alphabet. If j<=n+1, the alphabet is compacted. The global variable r is
+/// set to the number of old symbols grouped into one. Only x[n] is 0.
+///
 /// Original C static function `QSufSortTransform` from `minibwa/QSufSort.c:344`.
 pub fn QSufSortTransform(
     V: &mut [i64],

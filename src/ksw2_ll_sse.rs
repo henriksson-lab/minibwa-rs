@@ -46,6 +46,18 @@ impl Default for ksw_llrst_t {
     }
 }
 
+/// Initialize the query data structure.
+///
+/// # Arguments
+/// - `size`: Number of bytes used to store a score; valid valures are 1 or 2
+/// - `qlen`: Length of the query sequence
+/// - `query`: Query sequence
+/// - `m`: Size of the alphabet
+/// - `mat`: Scoring matrix in a one-dimension array
+///
+/// # Returns
+/// Query data structure
+///
 /// Original C global function `ksw_ll_qinit` from `minibwa/ksw2_ll_sse.c:50`.
 pub fn ksw_ll_qinit(km: (), size: i32, qlen: i32, query: &[u8], m: i32, mat: &[i8]) -> kswq_t {
     let size = if size > 1 { 2 } else { 1 };

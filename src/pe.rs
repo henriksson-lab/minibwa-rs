@@ -910,6 +910,8 @@ pub fn mb_pair_hits(
     }
 }
 
+/// A linear algorithm to find ungapped alignment.
+///
 /// Original C static function `mb_ungap` from `minibwa/pe.c:220`.
 pub fn mb_ungap(
     km: (),

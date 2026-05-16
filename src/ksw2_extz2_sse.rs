@@ -214,6 +214,23 @@ unsafe fn max_epi8_native(
     }
 }
 
+/// NW-like extension.
+///
+/// # Arguments
+/// - `km`: memory pool, when used with kalloc
+/// - `qlen`: query length
+/// - `query`: query sequence with 0 <= query[i] < m
+/// - `tlen`: target length
+/// - `target`: target sequence with 0 <= target[i] < m
+/// - `m`: number of residue types
+/// - `mat`: m*m scoring mattrix in one-dimension array
+/// - `q`: gap open penalty; a gap of length l cost "-(gapo+l*gape)"
+/// - `e`: gap extension penalty
+/// - `w`: band width (<0 to disable)
+/// - `zdrop`: off-diagonal drop-off to stop extension (positive; <0 to disable)
+/// - `flag`: flag (see KSW_EZ_* macros)
+/// - `ez`: (out) scores and cigar
+///
 /// Original C global function `ksw_extz2_sse` from `minibwa/ksw2_extz2_sse.c:16`.
 pub fn ksw_extz2_sse(
     km: (),

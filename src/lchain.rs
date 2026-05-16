@@ -105,6 +105,20 @@ pub fn mb_log2(x: f32) -> f32 {
     log_2
 }
 
+/// Anchor format in minibwa (`mb_anchor_t`):
+///   - `tid2`: target (reference) sequence ID
+///   - `len`:  length of the seed (q_span)
+///   - `qpos`: query coordinate of the last base
+///   - `tpos`: target coordinate of the last base
+///   - `qocc`: query occurrence
+///   - `tocc`: target occurrence
+///   - `flt`:  filtered flag
+///
+/// For chaining, we need:
+///   - Target position (`tid2`, `tpos`) for gap calculation on reference
+///   - Query position (`qpos`) for gap calculation on query
+///   - Seed length (`len`) as q_span for scoring
+///
 /// Original C static function `mb_chain_bk_end` from `minibwa/lchain.c:25`.
 pub fn mb_chain_bk_end(
     max_drop: i32,
@@ -283,6 +297,8 @@ pub fn compact_a(
     b
 }
 
+/// Compute chaining score between two anchors.
+///
 /// Original C static function `comput_sc` from `minibwa/lchain.c:131`.
 pub fn comput_sc(
     ai: &mb_anchor_t,

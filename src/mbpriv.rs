@@ -13,6 +13,10 @@ pub const MB_DBG_AN_POS: i32 = 0x20;
 /// Original C global variable `kom_dbg_flag` from `minibwa/kommon.c:7`.
 pub static KOM_DBG_FLAG: AtomicI32 = AtomicI32::new(0);
 
+/// Fast log2 approximation (from minimap2).
+///
+/// NB: this doesn't work when x<2.
+///
 /// Original C static function `mb_log2` from `minibwa/mbpriv.h:100`.
 pub fn mb_log2(x: f32) -> f32 {
     let mut i = x.to_bits();

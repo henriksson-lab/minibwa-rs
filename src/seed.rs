@@ -275,6 +275,12 @@ fn radix_sort_mb_sai_by_key(a: &mut [mb_sai_t], key: fn(&mb_sai_t) -> u64) {
     }
 }
 
+/// Remove duplicated anchors. The two-round seeding algorithm may lead an
+/// anchor precisely contained in a longer anchor. This routine filters out the
+/// shorter anchor. This wouldn't happen to minimap2.
+///
+/// NB: assuming sorted by `tpos`.
+///
 /// Original C static function `mb_anchor_dedup` from `minibwa/seed.c:142`.
 pub fn mb_anchor_dedup(v: &mut mb_anchor_v) {
     const MAX_BACK: usize = 100;
@@ -472,6 +478,10 @@ pub fn process_batch(
     v.m = v.a.capacity() as i64;
 }
 
+/// Converting seed intervals to anchors. This function batches small SA
+/// intervals and calls `mb_bwt_sa_batch()` in `process_batch()`. With prefetch,
+/// the strategy noticeably improves the performance.
+///
 /// Original C global function `mb_anchor` from `minibwa/seed.c:206`.
 pub fn mb_anchor(
     km: (),

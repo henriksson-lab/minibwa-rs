@@ -1652,6 +1652,21 @@ pub fn mb_map_sai(
     hit
 }
 
+/// Align one sequence.
+///
+/// # Arguments
+/// - `opt`: options, typically initialized by `mb_opt_init()`
+/// - `idx`: index
+/// - `qlen`: query length
+/// - `seq`: query sequence, ASCII or 0/1/2/3 encoded
+/// - `mt`: methylation type: 0 for unmethylated, 1 for read1 (C-to-T) and 2 for read2 (G-to-A)
+/// - `n_hit`: (out) number of hits
+/// - `b`: thread buffer; can be `NULL`
+/// - `qname`: query name
+///
+/// # Returns
+/// hit array
+///
 /// Original C global function `mb_map` from `minibwa/map-algo.c:615`.
 pub fn mb_map(
     opt: &mb_opt_t,
@@ -1708,6 +1723,21 @@ pub fn mb_map(
     )
 }
 
+/// Align a set of sequences in batch.
+///
+/// # Arguments
+/// - `opt`: options, typically initialized by `mb_opt_init()`
+/// - `idx`: index
+/// - `n_seq`: number of sequences
+/// - `qlen`: query lengths, of size `n_seq`
+/// - `seq`: query sequences, ASCII or 0/1/2/3 encoded, of size `n_seq`
+/// - `n_hit`: (out) number of hits, of size `n_seq`
+/// - `b`: thread buffer; can be `NULL`
+/// - `qname`: query name, of size `n_seq`
+///
+/// # Returns
+/// hits, of size `n_seq`
+///
 /// Original C global function `mb_map_batch` from `minibwa/map-algo.c:656`.
 pub fn mb_map_batch(
     opt: &mb_opt_t,
