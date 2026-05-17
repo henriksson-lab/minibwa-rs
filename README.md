@@ -26,6 +26,22 @@ But:
 This blurb might be out of date. Go to [this page](https://github.com/henriksson-lab/rustification) for the latest information and further information about how we approach translation
 
 
+## Possible upstream bugs
+
+C bugs the Rust port silently fixes (i.e. the Rust translation deviates from
+upstream C behavior here because the upstream behavior is undefined):
+
+5. `mb_escape` buffer-read overrun on a trailing backslash
+   (`minibwa/format.c:52-66`). With input ending in `\`, the inner `++p` walks
+   onto the NUL, the `if/else if` chain doesn't match, and the outer `for`'s
+   post-increment then walks one byte past the buffer end, which the next loop
+   test reads. Reachable via `-R "...\\"` style read-group lines.
+6. `krealloc` NULL-deref plus use-after-free under OOM
+   (`minibwa/kalloc.c:168-185`). On `kmalloc` failure the code calls `memcpy`
+   on the NULL return and then `kfree`s the old buffer, violating C `realloc`'s
+   contract that failure must leave the original intact.
+
+
 ## Cargo Features
 
 `minibwa-rs` is a library crate by default. The command-line binary is optional
