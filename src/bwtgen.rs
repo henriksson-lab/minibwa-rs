@@ -1631,11 +1631,7 @@ pub fn BWTIncConstructFromPacked(
         Err(err) => {
             let reason = err
                 .raw_os_error()
-                .map(|code| unsafe {
-                    std::ffi::CStr::from_ptr(libc::strerror(code))
-                        .to_string_lossy()
-                        .into_owned()
-                })
+                .map(|code| std::io::Error::from_raw_os_error(code).to_string())
                 .unwrap_or_else(|| err.to_string());
             eprintln!(
                 "BWTIncConstructFromPacked() : Cannot open {} : {}",
@@ -1646,11 +1642,7 @@ pub fn BWTIncConstructFromPacked(
         }
     };
     if packed.is_empty() {
-        let reason = unsafe {
-            std::ffi::CStr::from_ptr(libc::strerror(libc::EINVAL))
-                .to_string_lossy()
-                .into_owned()
-        };
+        let reason = std::io::Error::from(std::io::ErrorKind::InvalidInput).to_string();
         eprintln!(
             "BWTIncConstructFromPacked() : Can't seek on {} : {}",
             inputFileName.display(),
@@ -1761,11 +1753,7 @@ pub fn BWTSaveBwtCodeAndOcc(
         Err(err) => {
             let reason = err
                 .raw_os_error()
-                .map(|code| unsafe {
-                    std::ffi::CStr::from_ptr(libc::strerror(code))
-                        .to_string_lossy()
-                        .into_owned()
-                })
+                .map(|code| std::io::Error::from_raw_os_error(code).to_string())
                 .unwrap_or_else(|| err.to_string());
             eprintln!(
                 "BWTSaveBwtCodeAndOcc(): Cannot open {} for writing: {}",

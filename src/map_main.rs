@@ -28,7 +28,6 @@ use crate::seed::mb_seed_intv_batch;
 use rayon::prelude::*;
 use rayon::ThreadPool;
 use std::cell::RefCell;
-use std::ffi::CStr;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::{fs, io::BufWriter, io::Write};
@@ -747,11 +746,7 @@ pub fn mb_open_bseqs(n: i32, fn_: &[&str]) -> Option<Vec<mb_bseq_file_t>> {
             let reason = std::fs::File::open(fn_[i])
                 .err()
                 .and_then(|e| e.raw_os_error())
-                .map(|code| unsafe {
-                    CStr::from_ptr(libc::strerror(code))
-                        .to_string_lossy()
-                        .into_owned()
-                })
+                .map(|code| std::io::Error::from_raw_os_error(code).to_string())
                 .unwrap_or_else(|| "Unknown error".to_string());
             eprintln!("ERROR: failed to open file '{}': {}", fn_[i], reason);
             return None;

@@ -32,7 +32,7 @@ pub struct kmem_t {
 /// Original C static function `panic` from `minibwa/kalloc.c:32`.
 pub fn panic(s: &str) -> ! {
     eprintln!("{s}");
-    unsafe { libc::abort() }
+    std::process::abort()
 }
 
 /// Original C global function `km_init2` from `minibwa/kalloc.c:38`.

@@ -3,9 +3,17 @@
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub type c_long = libc::c_long;
+pub type c_long = std::ffi::c_long;
+#[cfg(unix)]
 pub type rusage = libc::rusage;
+#[cfg(unix)]
 pub type timeval = libc::timeval;
+#[cfg(not(unix))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct timeval {
+    pub tv_sec: i64,
+    pub tv_usec: i64,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct timezone {
@@ -57,16 +65,7 @@ pub fn kom_strdup(src: &str) -> String {
 pub fn kom_parse_num(str_: &str) -> (i64, usize) {
     let bytes = str_.as_bytes();
     let nul = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
-    let mut cstr = Vec::with_capacity(nul + 1);
-    cstr.extend_from_slice(&bytes[..nul]);
-    cstr.push(0);
-    let mut end: *mut libc::c_char = std::ptr::null_mut();
-    let mut x = unsafe { libc::strtod(cstr.as_ptr() as *const libc::c_char, &mut end) };
-    let mut p = if end.is_null() {
-        0
-    } else {
-        unsafe { end.offset_from(cstr.as_ptr() as *const libc::c_char) as usize }
-    };
+    let (mut x, mut p) = parse_c_float_prefix(&str_[..nul]);
     if p < bytes.len() {
         if bytes[p] == b'G' || bytes[p] == b'g' {
             x *= 1e9;
@@ -82,10 +81,58 @@ pub fn kom_parse_num(str_: &str) -> (i64, usize) {
     ((x + 0.499) as i64, p)
 }
 
+fn parse_c_float_prefix(s: &str) -> (f64, usize) {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let start = i;
+    if i < bytes.len() && matches!(bytes[i], b'+' | b'-') {
+        i += 1;
+    }
+
+    let digits_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    let mut saw_digit = i > digits_start;
+
+    if i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        let frac_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        saw_digit |= i > frac_start;
+    }
+
+    if !saw_digit {
+        return (0.0, 0);
+    }
+
+    if i < bytes.len() && matches!(bytes[i], b'e' | b'E') {
+        let exp_mark = i;
+        i += 1;
+        if i < bytes.len() && matches!(bytes[i], b'+' | b'-') {
+            i += 1;
+        }
+        let exp_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == exp_start {
+            i = exp_mark;
+        }
+    }
+
+    (s[start..i].parse::<f64>().unwrap_or(0.0), i)
+}
+
 /// Original C global function `kom_panic` from `minibwa/kommon.c:31`.
 pub fn kom_panic(func: &str, msg: &str) -> ! {
     eprintln!("[E::{func}] {msg} ABORT!");
-    unsafe { libc::abort() }
+    std::process::abort()
 }
 
 /// Original C static function `str_enlarge` from `minibwa/kommon.c:45`.
@@ -264,9 +311,19 @@ pub fn gettimeofday() -> timeval {
     let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    timeval {
-        tv_sec: dur.as_secs() as libc::time_t,
-        tv_usec: dur.subsec_micros() as libc::suseconds_t,
+    #[cfg(unix)]
+    {
+        timeval {
+            tv_sec: dur.as_secs() as libc::time_t,
+            tv_usec: dur.subsec_micros() as _,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        timeval {
+            tv_sec: dur.as_secs() as i64,
+            tv_usec: dur.subsec_micros() as i64,
+        }
     }
 }
 
@@ -274,25 +331,39 @@ pub fn gettimeofday() -> timeval {
 ///
 /// Original C global function `kom_cputime` from `minibwa/kommon.c:279`.
 pub fn kom_cputime() -> f64 {
-    let mut r: rusage = unsafe { std::mem::zeroed() };
-    unsafe {
-        libc::getrusage(libc::RUSAGE_SELF, &mut r);
+    #[cfg(unix)]
+    {
+        let mut r: rusage = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::getrusage(libc::RUSAGE_SELF, &mut r);
+        }
+        r.ru_utime.tv_sec as f64
+            + r.ru_stime.tv_sec as f64
+            + 1e-6 * (r.ru_utime.tv_usec + r.ru_stime.tv_usec) as f64
     }
-    r.ru_utime.tv_sec as f64
-        + r.ru_stime.tv_sec as f64
-        + 1e-6 * (r.ru_utime.tv_usec + r.ru_stime.tv_usec) as f64
+    #[cfg(not(unix))]
+    {
+        0.0
+    }
 }
 
 /// Original C global function `kom_peakrss` from `minibwa/kommon.c:296`.
 pub fn kom_peakrss() -> c_long {
-    let mut r: rusage = unsafe { std::mem::zeroed() };
-    unsafe {
-        libc::getrusage(libc::RUSAGE_SELF, &mut r);
+    #[cfg(unix)]
+    {
+        let mut r: rusage = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::getrusage(libc::RUSAGE_SELF, &mut r);
+        }
+        if cfg!(target_os = "linux") {
+            r.ru_maxrss * 1024
+        } else {
+            r.ru_maxrss
+        }
     }
-    if cfg!(target_os = "linux") {
-        r.ru_maxrss * 1024
-    } else {
-        r.ru_maxrss
+    #[cfg(not(unix))]
+    {
+        0
     }
 }
 

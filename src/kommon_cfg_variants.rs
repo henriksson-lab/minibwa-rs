@@ -1,6 +1,6 @@
 #![allow(unused_variables, dead_code, non_snake_case)]
 
-use libc::c_long;
+use std::ffi::c_long;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FILETIME {
