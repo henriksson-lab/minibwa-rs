@@ -13,6 +13,11 @@ pub const MB_DBG_AN_POS: i32 = 0x20;
 /// Original C global variable `kom_dbg_flag` from `minibwa/kommon.c:7`.
 pub static KOM_DBG_FLAG: AtomicI32 = AtomicI32::new(0);
 
+pub fn mb_cstr_prefix(s: &str) -> &str {
+    let end = s.as_bytes().iter().position(|&c| c == 0).unwrap_or(s.len());
+    &s[..end]
+}
+
 /// Fast log2 approximation (from minimap2).
 ///
 /// NB: this doesn't work when x<2.
@@ -42,6 +47,9 @@ pub fn mb_hash64(mut x: u64) -> u64 {
 pub fn mb_hash_str(s: &str) -> u32 {
     let mut h = 2166136261u32;
     for &c in s.as_bytes() {
+        if c == 0 {
+            break;
+        }
         h ^= c as u32;
         h = h.wrapping_mul(16777619);
     }
@@ -72,6 +80,13 @@ mod tests {
         assert_eq!(mb_hash64(0), 0);
         assert_eq!(mb_hash64(1), 0x5692161d100b05e5);
         assert_eq!(mb_hash_str("chrM"), 0xc96c8abb);
+        assert_eq!(mb_hash_str("read\0hidden"), mb_hash_str("read"));
+    }
+
+    #[test]
+    fn cstr_prefix_stops_at_embedded_nul_for_diagnostics() {
+        assert_eq!(mb_cstr_prefix("read\0hidden"), "read");
+        assert_eq!(mb_cstr_prefix("read"), "read");
     }
 
     #[test]

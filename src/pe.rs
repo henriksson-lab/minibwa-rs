@@ -3,11 +3,12 @@
 use crate::align::{mb_append_cigar, mb_update_extra};
 use crate::kommon::KOM_NT4_TABLE;
 use crate::ksw2::{
-    ksw_extz_t, ksw_gen_nt4_mat, KSW_EZ_EXTZ_ONLY, KSW_EZ_REV_CIGAR, KSW_EZ_RIGHT, KSW_LL_SUBO,
+    ksw_extz_t, ksw_gen_nt4_mat, KSW_EZ_EXTZ_ONLY, KSW_EZ_GENERIC_SC, KSW_EZ_REV_CIGAR,
+    KSW_EZ_RIGHT, KSW_LL_SUBO,
 };
 use crate::ksw2_extz2_sse::ksw_extz2_sse;
 use crate::ksw2_ll_sse::{ksw_ll_i16_core, ksw_ll_qinit, ksw_ll_u8_core};
-use crate::l2bit::{l2b_getseq_meth, l2b_meth_rev, l2b_meth_t, l2b_t};
+use crate::l2bit::{l2b_getseq, l2b_meth_rev, l2b_meth_t, l2b_t};
 use crate::map_algo::{
     mb_hit_sort, mb_set_mapq, mb_set_parent, mb_set_sam_pri, mb_sync_high_cov, MB_PARENT_UNSET,
 };
@@ -360,6 +361,8 @@ impl mb_hit_t {
     const RESCUED: u32 = 1 << 8;
     const FRAC_HIGH_SHIFT: u32 = 9;
     const FRAC_HIGH_MASK: u32 = 0xff << Self::FRAC_HIGH_SHIFT;
+    const SEED_RATIO_SHIFT: u32 = 17;
+    const SEED_RATIO_MASK: u32 = 0xff << Self::SEED_RATIO_SHIFT;
 
     #[inline(always)]
     fn bit(&self, mask: u32) -> u8 {
@@ -465,6 +468,17 @@ impl mb_hit_t {
     pub fn set_frac_high(&mut self, value: u8) {
         self.flags =
             (self.flags & !Self::FRAC_HIGH_MASK) | ((value as u32) << Self::FRAC_HIGH_SHIFT);
+    }
+
+    #[inline(always)]
+    pub fn seed_ratio(&self) -> u8 {
+        ((self.flags & Self::SEED_RATIO_MASK) >> Self::SEED_RATIO_SHIFT) as u8
+    }
+
+    #[inline(always)]
+    pub fn set_seed_ratio(&mut self, value: u8) {
+        self.flags =
+            (self.flags & !Self::SEED_RATIO_MASK) | ((value as u32) << Self::SEED_RATIO_SHIFT);
     }
 
     pub const fn flags_with(
@@ -631,11 +645,11 @@ pub fn mb_pair_score(h0: &mb_hit_t, h1: &mb_hit_t, pes: &[mb_pestat_t; 4], match
     let mut dist = 0i64;
     let dir = mb_insert_dir(h0, h1, &mut dist) as usize;
     if pes[dir].failed == 0 && dist >= pes[dir].lo as i64 && dist <= pes[dir].hi as i64 {
+        let p0 = h0.p.as_ref().expect("mb_pair_score requires h0->p");
+        let p1 = h1.p.as_ref().expect("mb_pair_score requires h1->p");
         let ns = (dist as f64 - pes[dir].avg) / pes[dir].std;
-        let dp0 = h0.p.as_ref().map(|p| p.dp_max).unwrap_or(0);
-        let dp1 = h1.p.as_ref().map(|p| p.dp_max).unwrap_or(0);
-        return dp0 as f64
-            + dp1 as f64
+        return p0.dp_max as f64
+            + p1.dp_max as f64
             + 0.721 * libm::erfc(ns.abs() * MB_SQRT1_2).mul_add(2.0, 0.0).ln() * match_sc as f64;
     }
     -1.0
@@ -822,7 +836,7 @@ pub fn mb_pair_hits(
             pa.push((p, ((i as u64) << 2) | ((h.rev() as u64) << 1) | r as u64));
         }
     }
-    pa.sort_unstable_by_key(|&(x, y)| (x, y));
+    pa.sort_by_key(|&(x, _)| x);
     let mut y = [-1i32; 4];
     let mut pp = Vec::<(u64, u64)>::new();
     for i in 0..pa.len() {
@@ -920,10 +934,13 @@ pub fn mb_ungap(
     tlen: i32,
     tseq: &[u8],
     kmer: i32,
+    mt: l2b_meth_t,
     max_i: &mut i32,
     n_good: &mut i32,
     n_kmer: &mut i32,
 ) -> i32 {
+    const C2T: [u8; 4] = [0, 3, 2, 3];
+    const G2A: [u8; 4] = [0, 1, 0, 3];
     *max_i = -1;
     *n_good = 0;
     *n_kmer = 0;
@@ -938,7 +955,14 @@ pub fn mb_ungap(
     let mut x = 0usize;
     for i in 0..qlen as usize {
         if qseq[i] < 4 {
-            x = ((x << 2) | qseq[i] as usize) & mask;
+            let c = if mt == l2b_meth_t::L2B_METH_C2T {
+                C2T[qseq[i] as usize]
+            } else if mt == l2b_meth_t::L2B_METH_G2A {
+                G2A[qseq[i] as usize]
+            } else {
+                qseq[i]
+            };
+            x = ((x << 2) | c as usize) & mask;
             l += 1;
             if l >= kmer {
                 if h[x] == 0 {
@@ -955,7 +979,14 @@ pub fn mb_ungap(
     x = 0;
     for i in 0..tlen as usize {
         if tseq[i] < 4 {
-            x = ((x << 2) | tseq[i] as usize) & mask;
+            let c = if mt == l2b_meth_t::L2B_METH_C2T {
+                C2T[tseq[i] as usize]
+            } else if mt == l2b_meth_t::L2B_METH_G2A {
+                G2A[tseq[i] as usize]
+            } else {
+                tseq[i]
+            };
+            x = ((x << 2) | c as usize) & mask;
             l += 1;
             if l >= kmer && h[x] > 0 && i >= h[x] as usize {
                 a[i - h[x] as usize] += 1;
@@ -990,6 +1021,7 @@ pub fn mb_matesw_align(
     tseq: &mut [u8],
     h: &mut mb_hit_t,
     min_sc: i32,
+    mt: l2b_meth_t,
     ez: &mut ksw_extz_t,
 ) {
     *h = mb_hit_t::default();
@@ -1003,7 +1035,7 @@ pub fn mb_matesw_align(
         return;
     }
     let mut mat = [0i8; 25];
-    ksw_gen_nt4_mat(&mut mat, 1, b_mm as i8, b_ts as i8, b_ambi as i8);
+    ksw_gen_nt4_mat(&mut mat, 1, b_mm as i8, b_ts as i8, b_ambi as i8, mt as i32);
     let sz = if max_sc < 255 - b_mm { 1 } else { 2 };
     let xtra = KSW_LL_SUBO | opt.min_len;
     let qp = ksw_ll_qinit(km, sz, qlen, qseq, 5, &mat);
@@ -1051,7 +1083,12 @@ pub fn mb_matesw_align(
             opt.b as i8,
             opt.b_ts as i8,
             opt.b_ambi as i8,
+            mt as i32,
         );
+        let mut ksw_flag = KSW_EZ_EXTZ_ONLY | KSW_EZ_RIGHT | KSW_EZ_REV_CIGAR;
+        if mt != l2b_meth_t::L2B_METH_NONE {
+            ksw_flag |= KSW_EZ_GENERIC_SC;
+        }
         ksw_extz2_sse(
             km,
             qe,
@@ -1065,7 +1102,7 @@ pub fn mb_matesw_align(
             opt.bw,
             opt.zdrop,
             opt.end_bonus,
-            KSW_EZ_EXTZ_ONLY | KSW_EZ_RIGHT | KSW_EZ_REV_CIGAR,
+            ksw_flag,
             ez,
         );
         mb_seq_rev(qe as u32, qseq);
@@ -1189,7 +1226,7 @@ pub fn mb_matesw_core(
         let mut te2 = te;
         let mut refseq = vec![0u8; (te - ts) as usize];
         let mt = if is_rev { l2b_meth_rev(mt0) } else { mt0 };
-        l2b_getseq_meth(l2b, h0.tid, ts, te, mt, &mut refseq);
+        l2b_getseq(l2b, h0.tid, ts, te, &mut refseq);
         let seq_idx = is_rev as usize;
         let mut max_i = 0;
         let mut n_good = 0;
@@ -1201,6 +1238,7 @@ pub fn mb_matesw_core(
             (te - ts) as i32,
             &refseq,
             7,
+            mt,
             &mut max_i,
             &mut n_good,
             &mut n_kmer,
@@ -1230,6 +1268,7 @@ pub fn mb_matesw_core(
                 &mut refseq[offset..offset + (te2 - ts2) as usize],
                 &mut ht,
                 min_sc,
+                mt,
                 ez,
             );
             if ht.p.is_some() {
@@ -1272,12 +1311,23 @@ pub fn mb_matesw(
     let mut n_res = 0i32;
     for r in 0..2usize {
         let mut m = 0;
+        if n_hit[r] == 0 {
+            continue;
+        }
+        let best = hit[r][0]
+            .p
+            .as_ref()
+            .expect("mb_matesw requires h0[0]->p")
+            .dp_max;
         for i in 0..n_hit[r] as usize {
             if m >= opt.max_rescue {
                 break;
             }
-            let dp = hit[r][i].p.as_ref().map(|p| p.dp_max).unwrap_or(0);
-            let best = hit[r][0].p.as_ref().map(|p| p.dp_max).unwrap_or(0);
+            let dp = hit[r][i]
+                .p
+                .as_ref()
+                .expect("mb_matesw requires h0[i]->p")
+                .dp_max;
             if hit[r][i].proper_pair() == 0 && dp >= best - opt.pen_unpair * opt.a {
                 m += 1;
                 n_res += 1;
@@ -1290,12 +1340,23 @@ pub fn mb_matesw(
     let mut a = Vec::<(u64, u64)>::with_capacity(n_res as usize);
     for r in 0..2usize {
         let mut m = 0;
+        if n_hit[r] == 0 {
+            continue;
+        }
+        let best = hit[r][0]
+            .p
+            .as_ref()
+            .expect("mb_matesw requires h0[0]->p")
+            .dp_max;
         for i in 0..n_hit[r] as usize {
             if m >= opt.max_rescue {
                 break;
             }
-            let dp = hit[r][i].p.as_ref().map(|p| p.dp_max).unwrap_or(0);
-            let best = hit[r][0].p.as_ref().map(|p| p.dp_max).unwrap_or(0);
+            let dp = hit[r][i]
+                .p
+                .as_ref()
+                .expect("mb_matesw requires h0[i]->p")
+                .dp_max;
             if hit[r][i].proper_pair() == 0 && dp >= best - opt.pen_unpair * opt.a {
                 a.push((
                     ((dp as u64) << 32) | hit[r][i].hash as u64,
@@ -1305,7 +1366,7 @@ pub fn mb_matesw(
             }
         }
     }
-    a.sort_unstable_by_key(|&(x, y)| (x, y));
+    a.sort_by_key(|&(x, _)| x);
     let mut qs = [
         [
             Vec::<u8>::with_capacity(qlen[0] as usize),
@@ -1330,12 +1391,6 @@ pub fn mb_matesw(
                 *rev.add(len - 1 - i) = if c < 4 { 3 - c } else { 4 };
             }
         }
-    }
-    if (opt.flag & MB_F_METH) != 0 {
-        crate::l2bit::l2b_meth_convert(l2b_meth_t::L2B_METH_C2T, qlen[0] as i64, &mut qs[0][0]);
-        crate::l2bit::l2b_meth_convert(l2b_meth_t::L2B_METH_G2A, qlen[0] as i64, &mut qs[0][1]);
-        crate::l2bit::l2b_meth_convert(l2b_meth_t::L2B_METH_G2A, qlen[1] as i64, &mut qs[1][0]);
-        crate::l2bit::l2b_meth_convert(l2b_meth_t::L2B_METH_C2T, qlen[1] as i64, &mut qs[1][1]);
     }
     let min_sc = [
         mb_hit_sum_score(km, n_hit[0], &hit[0]) / opt.a - opt.pen_unpair,
@@ -1422,6 +1477,22 @@ pub fn mb_pair(
 ) {
     let is_meth = ((opt.flag & MB_F_METH) != 0) as i32;
     let mut paux = mb_pairaux_t::default();
+    if n_hit[0] == 0 && n_hit[1] == 0 {
+        return;
+    }
+    let seed_ratio = [
+        if n_hit[0] > 0 {
+            hit[0][0].seed_ratio()
+        } else {
+            255
+        },
+        if n_hit[1] > 0 {
+            hit[1][0].seed_ratio()
+        } else {
+            255
+        },
+    ];
+    let min_seed_ratio = seed_ratio[0].min(seed_ratio[1]);
     mb_pair_hits(km, opt, l2b, *n_hit, hit, pes, &mut paux);
     let do_matesw = !(paux.n_pp > 0 && paux.score == paux.sub_sc);
     if do_matesw && opt.max_rescue > 0 {
@@ -1464,14 +1535,22 @@ pub fn mb_pair(
     if paux.n_pp != 0 {
         let i0 = paux.i[0] as usize;
         let i1 = paux.i[1] as usize;
-        let score_se = hit[0][i0].p.as_ref().map(|p| p.dp_max).unwrap_or(0)
-            + hit[1][i1].p.as_ref().map(|p| p.dp_max).unwrap_or(0);
+        let mut dp_max_se = [0i32; 2];
+        for r in 0..2usize {
+            for h in hit[r].iter().take(n_hit[r] as usize) {
+                let dp = h.p.as_ref().expect("mb_pair requires hit[r][i]->p").dp_max;
+                if dp_max_se[r] < dp {
+                    dp_max_se[r] = dp;
+                }
+            }
+        }
+        let score_se = dp_max_se[0] + dp_max_se[1];
         if paux.score >= score_se - opt.pen_unpair * opt.a {
             let mut score2 = paux.sub_sc;
             mb_sync_high_cov(n_hit[0], &mut hit[0]);
             mb_sync_high_cov(n_hit[1], &mut hit[1]);
             let identity = (hit[0][i0].mlen + hit[1][i1].mlen) as f64
-                / (hit[0][i0].blen + hit[1][i1].blen).max(1) as f64;
+                / (hit[0][i0].blen + hit[1][i1].blen) as f64;
             if (hit[0][i0].id != hit[0][i0].parent || hit[1][i1].id != hit[1][i1].parent)
                 && score2 < score_se - opt.pen_unpair * opt.a
             {
@@ -1484,6 +1563,10 @@ pub fn mb_pair(
                 - 4.343 * ((paux.n_sub + 1) as f64).ln()
                 + 0.499) as i32;
             mapq_pe = (mapq_pe as f64 * (1.0 - 0.5 * frac_high) + 0.499) as i32;
+            if min_seed_ratio < 50 {
+                let sr = min_seed_ratio as f64;
+                mapq_pe = (mapq_pe as f64 * sr * sr / 2500.0) as i32;
+            }
             if mapq_pe > 60 {
                 mapq_pe = 60;
             }
@@ -1498,14 +1581,13 @@ pub fn mb_pair(
                 if hit[r][idx].id != hit[r][idx].parent {
                     let old_parent = hit[r][idx].parent;
                     let new_parent = hit[r][idx].id;
-                    for p in hit[r].iter_mut().take(n_hit[r] as usize) {
-                        if p.parent == old_parent {
-                            p.parent = new_parent;
+                    let parent_id = hit[r][old_parent as usize].id;
+                    for child in hit[r].iter_mut().take(n_hit[r] as usize) {
+                        if child.parent == parent_id {
+                            child.parent = new_parent;
                         }
                     }
-                    if old_parent >= 0 && (old_parent as usize) < hit[r].len() {
-                        hit[r][old_parent as usize].mapq = 0;
-                    }
+                    hit[r][old_parent as usize].mapq = 0;
                 }
                 let q = hit[r][idx].clone();
                 for i in 0..n_hit[r] as usize {
@@ -1634,6 +1716,41 @@ mod tests {
         assert!(s > 140.0 && s < 151.0);
         pes[1].failed = 1;
         assert_eq!(mb_pair_score(&h0, &h1, &pes, 2), -1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "mb_pair_score requires h0->p")]
+    fn pair_score_requires_alignment_extra_like_c_deref() {
+        let h0 = mb_hit_t {
+            ts: 100,
+            te: 150,
+            ..Default::default()
+        };
+        let h1 = mb_hit_t {
+            ts: 300,
+            te: 350,
+            flags: mb_hit_t::flags_with(1, 0, 0, 0, 0, 0, 0, 0, 0),
+            p: Some(
+                mb_extra_t {
+                    dp_max: 70,
+                    ..Default::default()
+                }
+                .boxed(),
+            ),
+            ..Default::default()
+        };
+        let mut pes = [mb_pestat_t {
+            failed: 1,
+            ..Default::default()
+        }; 4];
+        pes[1] = mb_pestat_t {
+            lo: 200,
+            hi: 300,
+            failed: 0,
+            avg: 250.0,
+            std: 25.0,
+        };
+        let _ = mb_pair_score(&h0, &h1, &pes, 2);
     }
 
     #[test]
@@ -1796,6 +1913,211 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "mb_pair requires hit[r][i]->p")]
+    fn pair_final_single_end_score_requires_alignment_extra_like_c_deref() {
+        let l2b = l2b_t {
+            n_ctg: 1,
+            ctg: vec![crate::l2bit::l2b_ctg_t {
+                name: "ctg".into(),
+                len: 2000,
+                off: 0,
+                comm: None,
+            }],
+            ..Default::default()
+        };
+        let mut opt = mb_opt_t::default();
+        crate::options::mb_opt_init(&mut opt);
+        opt.max_rescue = 0;
+        let mut n_hit = [2, 1];
+        let mut hit = [
+            vec![
+                mb_hit_t {
+                    tid: 0,
+                    ts: 100,
+                    te: 150,
+                    id: 0,
+                    parent: 0,
+                    hash: 1,
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 80,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    ),
+                    ..Default::default()
+                },
+                mb_hit_t {
+                    tid: 0,
+                    ts: 1000,
+                    te: 1050,
+                    id: 1,
+                    parent: 1,
+                    hash: 3,
+                    p: None,
+                    ..Default::default()
+                },
+            ],
+            vec![mb_hit_t {
+                tid: 0,
+                ts: 300,
+                te: 350,
+                flags: mb_hit_t::flags_with(1, 0, 0, 0, 0, 0, 0, 0, 0),
+                id: 0,
+                parent: 0,
+                hash: 2,
+                p: Some(
+                    mb_extra_t {
+                        dp_max: 70,
+                        ..Default::default()
+                    }
+                    .boxed(),
+                ),
+                ..Default::default()
+            }],
+        ];
+        let mut pes = [mb_pestat_t {
+            failed: 1,
+            ..Default::default()
+        }; 4];
+        pes[1] = mb_pestat_t {
+            lo: 200,
+            hi: 300,
+            failed: 0,
+            avg: 250.0,
+            std: 25.0,
+        };
+
+        mb_pair(
+            (),
+            &opt,
+            &l2b,
+            &mut n_hit,
+            &mut hit,
+            &pes,
+            [12, 12],
+            ["ACGTACGTACGT", "TGCATGCATGCA"],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "n_pri > 0")]
+    fn pair_lift_uses_parent_hit_id_even_when_that_leaves_no_primary_like_c_assert() {
+        let l2b = l2b_t {
+            n_ctg: 1,
+            ctg: vec![crate::l2bit::l2b_ctg_t {
+                name: "ctg".into(),
+                len: 2000,
+                off: 0,
+                comm: None,
+            }],
+            ..Default::default()
+        };
+        let mut opt = mb_opt_t::default();
+        crate::options::mb_opt_init(&mut opt);
+        opt.max_rescue = 0;
+        let mut n_hit = [3, 1];
+        let mut hit = [
+            vec![
+                mb_hit_t {
+                    tid: 0,
+                    ts: 800,
+                    te: 850,
+                    id: 7,
+                    parent: 7,
+                    mapq: 50,
+                    hash: 7,
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 40,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    ),
+                    ..Default::default()
+                },
+                mb_hit_t {
+                    tid: 0,
+                    ts: 100,
+                    te: 150,
+                    id: 42,
+                    parent: 0,
+                    mlen: 10,
+                    blen: 10,
+                    hash: 11,
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 100,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    ),
+                    ..Default::default()
+                },
+                mb_hit_t {
+                    tid: 0,
+                    ts: 900,
+                    te: 950,
+                    id: 8,
+                    parent: 7,
+                    hash: 8,
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 30,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    ),
+                    ..Default::default()
+                },
+            ],
+            vec![mb_hit_t {
+                tid: 0,
+                ts: 300,
+                te: 350,
+                flags: mb_hit_t::flags_with(1, 0, 0, 0, 0, 0, 0, 0, 0),
+                id: 0,
+                parent: 0,
+                mlen: 10,
+                blen: 10,
+                hash: 12,
+                p: Some(
+                    mb_extra_t {
+                        dp_max: 100,
+                        ..Default::default()
+                    }
+                    .boxed(),
+                ),
+                ..Default::default()
+            }],
+        ];
+        let mut pes = [mb_pestat_t {
+            failed: 1,
+            ..Default::default()
+        }; 4];
+        pes[1] = mb_pestat_t {
+            lo: 200,
+            hi: 300,
+            failed: 0,
+            avg: 250.0,
+            std: 25.0,
+        };
+
+        mb_pair(
+            (),
+            &opt,
+            &l2b,
+            &mut n_hit,
+            &mut hit,
+            &pes,
+            [12, 12],
+            ["ACGTACGTACGT", "TGCATGCATGCA"],
+        );
+
+        let _ = hit;
+    }
+
+    #[test]
     fn ungap_detects_single_diagonal_kmer_support() {
         let qseq = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
         let tseq = [4, 4, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 4];
@@ -1809,6 +2131,7 @@ mod tests {
             tseq.len() as i32,
             &tseq,
             3,
+            l2b_meth_t::L2B_METH_NONE,
             &mut max_i,
             &mut n_good,
             &mut n_kmer,
@@ -1817,5 +2140,73 @@ mod tests {
         assert_eq!(max_i, 2);
         assert!(n_good >= 1);
         assert!(n_kmer > 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "mb_matesw requires h0[0]->p")]
+    fn matesw_candidate_selection_requires_alignment_extra_like_c_deref() {
+        let l2b = l2b_t {
+            n_ctg: 1,
+            ctg: vec![crate::l2bit::l2b_ctg_t {
+                name: "ctg".into(),
+                len: 1000,
+                off: 0,
+                comm: None,
+            }],
+            ..Default::default()
+        };
+        let mut opt = mb_opt_t::default();
+        crate::options::mb_opt_init(&mut opt);
+        opt.max_rescue = 10;
+        opt.pen_unpair = 5;
+        let mut n_hit = [1, 1];
+        let mut hit = [
+            vec![mb_hit_t {
+                tid: 0,
+                ts: 100,
+                te: 150,
+                id: 0,
+                parent: 0,
+                p: None,
+                ..Default::default()
+            }],
+            vec![mb_hit_t {
+                tid: 0,
+                ts: 300,
+                te: 350,
+                id: 0,
+                parent: 0,
+                p: Some(
+                    mb_extra_t {
+                        dp_max: 80,
+                        ..Default::default()
+                    }
+                    .boxed(),
+                ),
+                ..Default::default()
+            }],
+        ];
+        let pes = [mb_pestat_t {
+            failed: 1,
+            ..Default::default()
+        }; 4];
+        let paux = mb_pairaux_t {
+            score: -1,
+            sub_sc: -1,
+            ..Default::default()
+        };
+
+        let n_add = mb_matesw(
+            (),
+            &opt,
+            &l2b,
+            &mut n_hit,
+            &mut hit,
+            &pes,
+            &paux,
+            [12, 12],
+            ["ACGTACGTACGT", "TGCATGCATGCA"],
+            0,
+        );
     }
 }

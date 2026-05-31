@@ -21,6 +21,45 @@ pub const OCC_INTERVAL_MAJOR: u64 = 65536;
 pub const MIN_AVAILABLE_WORD: u64 = 0x10000;
 pub const BWTINC_INSERT_SORT_NUM_ITEM: i64 = 7;
 
+fn c_path(path: &std::path::Path) -> std::path::PathBuf {
+    let lossy = path.to_string_lossy();
+    let end = lossy
+        .as_bytes()
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(lossy.len());
+    std::path::PathBuf::from(lossy[..end].to_string())
+}
+
+fn c_strerror(errno: i32) -> String {
+    std::io::Error::from_raw_os_error(errno)
+        .to_string()
+        .trim_end_matches(&format!(" (os error {errno})"))
+        .to_string()
+}
+
+fn bwt_save_error_and_exit(path: &std::path::Path, err: std::io::Error) -> ! {
+    let reason = err
+        .raw_os_error()
+        .map(c_strerror)
+        .unwrap_or_else(|| err.to_string());
+    eprintln!(
+        "BWTSaveBwtCodeAndOcc(): Error writing to {} : {}",
+        path.display(),
+        reason
+    );
+    std::process::exit(1);
+}
+
+fn bwt_packed_seek_error_and_exit(path: &std::path::Path) -> ! {
+    eprintln!(
+        "BWTIncConstructFromPacked() : Can't seek on {} : {}",
+        path.display(),
+        c_strerror(libc::EINVAL)
+    );
+    std::process::exit(1);
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BWT {
     pub textLength: bgint_t,
@@ -641,6 +680,42 @@ mod tests {
             std::mem::size_of::<bgint_t>() * (1 + ALPHABET_SIZE)
                 + BWTFileSizeInWord(bases.len() as u64) as usize * BYTES_IN_WORD
         );
+    }
+
+    #[test]
+    fn public_file_helpers_stop_paths_at_embedded_nul_like_c() {
+        let bases: Vec<u8> = (0..32).map(|i| ((i * 5 + 1) & 3) as u8).collect();
+        let mut packed =
+            vec![0u8; (bases.len() + CHAR_PER_BYTE as usize - 1) / CHAR_PER_BYTE as usize];
+        for (i, &base) in bases.iter().enumerate() {
+            packed[i / CHAR_PER_BYTE as usize] |=
+                base << (BITS_IN_BYTE - ((i % CHAR_PER_BYTE as usize) as u32 + 1) * BIT_PER_CHAR);
+        }
+        let last_len = (bases.len() % CHAR_PER_BYTE as usize) as u8;
+        if last_len == 0 {
+            packed.push(0);
+        }
+        packed.push(last_len);
+
+        let dir =
+            std::env::temp_dir().join(format!("minibwa-rs-bwtgen-api-nul-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let pac = dir.join("in.pac");
+        let raw = dir.join("out.raw");
+        std::fs::write(&pac, &packed).expect("write pac");
+        let pac_arg = std::path::PathBuf::from(format!("{}\0hidden", pac.to_string_lossy()));
+        let raw_arg = std::path::PathBuf::from(format!("{}\0hidden", raw.to_string_lossy()));
+
+        let bwt_inc = BWTIncConstructFromPacked(&pac_arg, 64, 64).expect("construct BWT");
+        assert_eq!(bwt_inc.bwt.textLength, bases.len() as u64);
+        BWTSaveBwtCodeAndOcc(&bwt_inc.bwt, &raw_arg, None).expect("save BWT");
+        assert!(raw.exists());
+
+        let raw2 = dir.join("out2.raw");
+        let raw2_arg = std::path::PathBuf::from(format!("{}\0hidden", raw2.to_string_lossy()));
+        mb_bwtgen(&pac_arg, &raw2_arg, 64).expect("generate BWT");
+        assert!(raw2.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -1626,12 +1701,13 @@ pub fn BWTIncConstructFromPacked(
     initialMaxBuildSize: bgint_t,
     incMaxBuildSize: bgint_t,
 ) -> std::io::Result<BWTInc> {
-    let packed = match std::fs::read(inputFileName) {
+    let inputFileName = c_path(inputFileName);
+    let packed = match std::fs::read(&inputFileName) {
         Ok(packed) => packed,
         Err(err) => {
             let reason = err
                 .raw_os_error()
-                .map(|code| std::io::Error::from_raw_os_error(code).to_string())
+                .map(c_strerror)
                 .unwrap_or_else(|| err.to_string());
             eprintln!(
                 "BWTIncConstructFromPacked() : Cannot open {} : {}",
@@ -1642,11 +1718,10 @@ pub fn BWTIncConstructFromPacked(
         }
     };
     if packed.is_empty() {
-        let reason = std::io::Error::from(std::io::ErrorKind::InvalidInput).to_string();
         eprintln!(
             "BWTIncConstructFromPacked() : Can't seek on {} : {}",
             inputFileName.display(),
-            reason
+            c_strerror(libc::EINVAL)
         );
         std::process::exit(1);
     }
@@ -1670,15 +1745,9 @@ pub fn BWTIncConstructFromPacked(
                 * CHAR_PER_WORD)
     };
     let mut textSizeInByte = textToLoad / CHAR_PER_BYTE as u64;
-    let mut chunkStart = packedData
-        .len()
-        .checked_sub(textSizeInByte as usize + 1)
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "packed input is too short",
-            )
-        })?;
+    let Some(mut chunkStart) = packedData.len().checked_sub(textSizeInByte as usize + 1) else {
+        bwt_packed_seek_error_and_exit(&inputFileName);
+    };
     bwtInc.textBuffer = packedData[chunkStart..chunkStart + textSizeInByte as usize + 1].to_vec();
     bwtInc.packedText =
         vec![0; (textToLoad as usize + CHAR_PER_WORD as usize - 1) / CHAR_PER_WORD as usize + 1];
@@ -1697,14 +1766,10 @@ pub fn BWTIncConstructFromPacked(
             textToLoad = totalTextLength - processedTextLength;
         }
         textSizeInByte = textToLoad / CHAR_PER_BYTE as u64;
-        chunkStart = chunkStart
-            .checked_sub(textSizeInByte as usize)
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "packed input is too short",
-                )
-            })?;
+        chunkStart = match chunkStart.checked_sub(textSizeInByte as usize) {
+            Some(chunkStart) => chunkStart,
+            None => bwt_packed_seek_error_and_exit(&inputFileName),
+        };
         bwtInc.textBuffer = packedData[chunkStart..chunkStart + textSizeInByte as usize].to_vec();
         bwtInc.packedText =
             vec![
@@ -1748,12 +1813,13 @@ pub fn BWTSaveBwtCodeAndOcc(
     bwtFileName: &std::path::Path,
     occValueFileName: Option<&std::path::Path>,
 ) -> std::io::Result<()> {
-    let mut bwtFile = match std::fs::File::create(bwtFileName) {
+    let bwtFileName = c_path(bwtFileName);
+    let mut bwtFile = match std::fs::File::create(&bwtFileName) {
         Ok(file) => file,
         Err(err) => {
             let reason = err
                 .raw_os_error()
-                .map(|code| std::io::Error::from_raw_os_error(code).to_string())
+                .map(c_strerror)
                 .unwrap_or_else(|| err.to_string());
             eprintln!(
                 "BWTSaveBwtCodeAndOcc(): Cannot open {} for writing: {}",
@@ -1765,12 +1831,21 @@ pub fn BWTSaveBwtCodeAndOcc(
     };
     let bwtLength = BWTFileSizeInWord(bwt.textLength);
     use std::io::Write;
-    bwtFile.write_all(&bwt.inverseSa0.to_le_bytes())?;
+    if let Err(err) = bwtFile.write_all(&bwt.inverseSa0.to_le_bytes()) {
+        bwt_save_error_and_exit(&bwtFileName, err);
+    }
     for i in 1..=ALPHABET_SIZE {
-        bwtFile.write_all(&bwt.cumulativeFreq[i].to_le_bytes())?;
+        if let Err(err) = bwtFile.write_all(&bwt.cumulativeFreq[i].to_le_bytes()) {
+            bwt_save_error_and_exit(&bwtFileName, err);
+        }
     }
     for &word in bwt.bwtCode.iter().take(bwtLength as usize) {
-        bwtFile.write_all(&word.to_le_bytes())?;
+        if let Err(err) = bwtFile.write_all(&word.to_le_bytes()) {
+            bwt_save_error_and_exit(&bwtFileName, err);
+        }
+    }
+    if let Err(err) = bwtFile.flush() {
+        bwt_save_error_and_exit(&bwtFileName, err);
     }
     let _ = occValueFileName;
     Ok(())
@@ -1782,12 +1857,14 @@ pub fn mb_bwtgen(
     fn_bwt: &std::path::Path,
     block_size: i32,
 ) -> std::io::Result<()> {
-    let bwtInc = BWTIncConstructFromPacked(fn_pac, block_size as u64, block_size as u64)?;
+    let fn_pac = c_path(fn_pac);
+    let fn_bwt = c_path(fn_bwt);
+    let bwtInc = BWTIncConstructFromPacked(&fn_pac, block_size as u64, block_size as u64)?;
     eprintln!(
         "[bwt_gen] Finished constructing BWT in {} iterations.",
         bwtInc.numberOfIterationDone
     );
-    BWTSaveBwtCodeAndOcc(&bwtInc.bwt, fn_bwt, None)?;
+    BWTSaveBwtCodeAndOcc(&bwtInc.bwt, &fn_bwt, None)?;
     BWTIncFree(Some(bwtInc));
     Ok(())
 }

@@ -252,6 +252,7 @@ mod tests {
             assert_eq!(st.n_blocks, 2);
             assert!(st.capacity >= st.available);
             assert!(km_stat_print(Some(&km)).starts_with("[km_stat] cap="));
+            assert!(km_stat_print(Some(&km)).ends_with("n_core=2, n_block=1\n"));
             kfree(Some(&mut km), r);
             kfree(Some(&mut km), z);
             km_stat(Some(&km), &mut st);

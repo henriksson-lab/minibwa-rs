@@ -5,11 +5,16 @@ use crate::fastmap::main_fastmap;
 use crate::index::{main_fa2bit, main_genbwt, main_genraw, main_gensa, main_index, main_raw2bwt};
 use crate::ketopt::{ketopt, ko_longopt_t, KETOPT_INIT};
 use crate::kommon::{
-    kom_cputime, kom_panic, kom_parse_num, kom_peakrss, kom_realtime, kom_splitmix64,
+    kom_atoi, kom_cputime, kom_panic, kom_parse_num, kom_peakrss, kom_realtime, kom_splitmix64,
 };
 use crate::map_main::main_map;
 
-pub const MB_VERSION: &str = "0.0-r318-dirty";
+pub const MB_VERSION: &str = "0.0-r352-dirty";
+
+fn c_str_eq(s: &str, expected: &str) -> bool {
+    let len = s.as_bytes().iter().position(|&c| c == 0).unwrap_or(s.len());
+    s.as_bytes()[..len] == *expected.as_bytes()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
@@ -55,27 +60,27 @@ pub fn main(argv: &[String]) -> i32 {
     if argc == 1 {
         return usage(true, 0).0;
     }
-    let ret = if argv[1] == "index" {
+    let ret = if c_str_eq(&argv[1], "index") {
         main_index(&argv[1..]).0
-    } else if argv[1] == "map" || argv[1] == "mem" {
+    } else if c_str_eq(&argv[1], "map") || c_str_eq(&argv[1], "mem") {
         main_map(&argv[1..]).0
-    } else if argv[1] == "fa2bit" {
+    } else if c_str_eq(&argv[1], "fa2bit") {
         main_fa2bit(&argv[1..]).0
-    } else if argv[1] == "genraw" {
+    } else if c_str_eq(&argv[1], "genraw") {
         main_genraw(&argv[1..]).0
-    } else if argv[1] == "raw2bwt" {
+    } else if c_str_eq(&argv[1], "raw2bwt") {
         main_raw2bwt(&argv[1..]).0
-    } else if argv[1] == "genbwt" {
+    } else if c_str_eq(&argv[1], "genbwt") {
         main_genbwt(&argv[1..]).0
-    } else if argv[1] == "gensa" {
+    } else if c_str_eq(&argv[1], "gensa") {
         main_gensa(&argv[1..]).0
-    } else if argv[1] == "bench" {
+    } else if c_str_eq(&argv[1], "bench") {
         main_bench(&argv[1..]).0
-    } else if argv[1] == "fastmap" {
+    } else if c_str_eq(&argv[1], "fastmap") {
         main_fastmap(&argv[1..]).0
-    } else if argv[1] == "--help" {
+    } else if c_str_eq(&argv[1], "--help") {
         return usage(true, 1).0;
-    } else if argv[1] == "version" {
+    } else if c_str_eq(&argv[1], "version") {
         return 0;
     } else {
         return 1;
@@ -130,13 +135,17 @@ pub fn main_bench(argv: &[String]) -> (i32, String, String) {
         } else if c == '1' as i32 {
             use_single = 1;
         } else if c == 'v' as i32 {
-            intv = o.arg.as_deref().unwrap_or("0").parse().unwrap_or(0);
+            intv = kom_atoi(o.arg.as_deref().unwrap_or("0"));
         } else if c == 'b' as i32 {
-            type_ = match o.arg.as_deref().unwrap_or("2a") {
-                "2a" => mb_bench_type_t::MB_BENCH_2A,
-                "sa" => mb_bench_type_t::MB_BENCH_SA,
-                "msa" => mb_bench_type_t::MB_BENCH_MSA,
-                _ => kom_panic("main_bench", "unknown type"),
+            let arg = o.arg.as_deref().unwrap_or("2a");
+            type_ = if c_str_eq(arg, "2a") {
+                mb_bench_type_t::MB_BENCH_2A
+            } else if c_str_eq(arg, "sa") {
+                mb_bench_type_t::MB_BENCH_SA
+            } else if c_str_eq(arg, "msa") {
+                mb_bench_type_t::MB_BENCH_MSA
+            } else {
+                kom_panic("main_bench", "unknown type")
             };
         } else if c == 901 {
             let (ret, out) = usage_bench(true, intv);
@@ -148,7 +157,12 @@ pub fn main_bench(argv: &[String]) -> (i32, String, String) {
         return (ret, String::new(), err);
     }
     let Some(bwt) = mb_bwt_load(&args[o.ind as usize]) else {
-        return (1, String::new(), String::new());
+        #[cfg(unix)]
+        unsafe {
+            libc::signal(libc::SIGSEGV, libc::SIG_DFL);
+            libc::raise(libc::SIGSEGV);
+        }
+        std::process::abort();
     };
     let t = kom_cputime();
     let mut out = String::new();
@@ -238,5 +252,19 @@ mod tests {
         assert!(out.contains("Usage: minibwa bench [options] <in.mbw>\n"));
         assert!(out.contains("  -v INT         interval size for msa [20]\n"));
         assert!(out.contains("  --help         print this help message\n"));
+    }
+
+    #[test]
+    fn bench_type_option_stops_at_embedded_nul_like_strcmp() {
+        let accepted = [
+            "bench".to_string(),
+            "-b".to_string(),
+            "sa\0hidden".to_string(),
+            "--help".to_string(),
+        ];
+        let (ret, out, err) = main_bench(&accepted);
+        assert_eq!(ret, 0);
+        assert!(out.starts_with("Usage: minibwa bench [options] <in.mbw>\n"));
+        assert!(err.is_empty());
     }
 }

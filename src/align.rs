@@ -8,14 +8,14 @@ use crate::ksw2::{
 use crate::ksw2_extd2_sse::ksw_extd2_sse;
 use crate::ksw2_extz2_sse::ksw_extz2_sse;
 use crate::ksw2_ll_sse::{ksw_ll_i16, ksw_ll_qinit};
-use crate::l2bit::{l2b_getseq_meth, l2b_meth_rev, l2b_meth_t};
+use crate::l2bit::{l2b_getseq, l2b_meth_rev, l2b_meth_t};
 use crate::lchain::mb_anchor_t;
 use crate::map_algo::{
     mb_cal_mblen, mb_filter_hits, mb_hit_sort, mb_idx_t, mb_split_hit, mb_squeeze_a,
     MB_PARENT_TMP_PRI, MB_PARENT_UNSET,
 };
 use crate::mbpriv::{
-    mb_is_sr_mode, mb_log2, mb_seq_rev, KOM_DBG_FLAG, MB_DBG_ALN_SEQ, MB_DBG_AN_POS,
+    mb_cstr_prefix, mb_is_sr_mode, mb_log2, mb_seq_rev, KOM_DBG_FLAG, MB_DBG_ALN_SEQ, MB_DBG_AN_POS,
 };
 use crate::options::mb_opt_t;
 use crate::pe::mb_hit_t;
@@ -433,7 +433,7 @@ pub fn mb_update_extra(
                     let ct = unsafe { *tptr.add(l) } as usize;
                     if ct > 3 || cq > 3 {
                         n_ambi += 1;
-                    } else if ct != cq {
+                    } else if unsafe { *mat_ptr.add(ct * 5 + cq) } < 0 {
                         n_diff += 1;
                     }
                     s += unsafe { *mat_ptr.add(ct * 5 + cq) } as f64;
@@ -488,7 +488,7 @@ pub fn mb_update_extra(
                 toff += len;
             }
         }
-        p.set_n_ambi(total_n_ambi);
+        p.add_n_ambi(total_n_ambi);
         p.dp_max0 = (max + 0.499) as i32;
         p.dp_max = p.dp_max0;
     }
@@ -634,20 +634,17 @@ pub fn mb_align_pair(
 ) {
     const MAX_BW_ADJ_LEN: i32 = 100;
     let mut n_mm = -1;
-    if opt.b_ts != 0 && opt.b != opt.b_ts {
+    if (opt.b_ts != 0 && opt.b != opt.b_ts) || (opt.flag & crate::options::MB_F_METH) != 0 {
         ksw_flag |= KSW_EZ_GENERIC_SC;
-    } else if (ksw_flag & KSW_EZ_EXTZ_ONLY) != 0 && tlen >= qlen {
+    }
+    if (ksw_flag & KSW_EZ_EXTZ_ONLY) != 0 && tlen >= qlen {
         ksw_reset_extz(ez);
         ez.score = 0;
         ez.max = 0;
         for j in 0..qlen as usize {
-            if qseq[j] >= 4 || tseq[j] >= 4 {
-                ez.score -= opt.b_ambi;
-                n_mm += 1;
-            } else {
-                ez.score += if qseq[j] == tseq[j] { opt.a } else { -opt.b };
-                n_mm += (qseq[j] != tseq[j]) as i32;
-            }
+            let sc = mat[tseq[j] as usize * 5 + qseq[j] as usize] as i32;
+            ez.score += sc;
+            n_mm += (tseq[j] > 3 || qseq[j] > 3 || sc < 0) as i32;
             if (ez.max as i32) < ez.score {
                 ez.max = ez.score as u32;
                 ez.max_q = j as i32;
@@ -675,13 +672,9 @@ pub fn mb_align_pair(
         ksw_reset_extz(ez);
         ez.score = 0;
         for j in 0..qlen as usize {
-            if qseq[j] >= 4 || tseq[j] >= 4 {
-                ez.score -= opt.b_ambi;
-                n_mm += 1;
-            } else {
-                ez.score += if qseq[j] == tseq[j] { opt.a } else { -opt.b };
-                n_mm += (qseq[j] != tseq[j]) as i32;
-            }
+            let sc = mat[tseq[j] as usize * 5 + qseq[j] as usize] as i32;
+            ez.score += sc;
+            n_mm += (tseq[j] > 3 || qseq[j] > 3 || sc < 0) as i32;
         }
         if n_mm <= 3 || ez.score > max_gapped_score {
             ksw_push_cigar(
@@ -1082,6 +1075,16 @@ pub fn mb_align1(
     if r.rev() != 0 {
         mt = l2b_meth_rev(mt);
     }
+    let mut mat_local = [0i8; 25];
+    crate::ksw2::ksw_gen_nt4_mat(
+        &mut mat_local,
+        opt.a as i8,
+        opt.b as i8,
+        opt.b_ts as i8,
+        opt.b_ambi as i8,
+        mt as i32,
+    );
+    let mat = &mat_local;
     let mut as1 = r.as_;
     let mut cnt1 = r.cnt;
     if is_sr != 0 {
@@ -1114,7 +1117,12 @@ pub fn mb_align1(
             };
             eprintln!(
                 "AF\t{}\t{}\t{}\t{}\t{}\t{}",
-                r.as_, mi.l2b.ctg[tid as usize].name, cur.tpos, cur.qpos, gap, cur.len
+                r.as_,
+                mb_cstr_prefix(&mi.l2b.ctg[tid as usize].name),
+                cur.tpos,
+                cur.qpos,
+                gap,
+                cur.len
             );
         }
     }
@@ -1182,10 +1190,8 @@ pub fn mb_align1(
     }
     tseq.clear();
     tseq.resize((te0 - ts0) as usize, 0);
-    r.p = None;
-
     let (ts1, qs1) = if qs > 0 && ts > 0 {
-        l2b_getseq_meth(&mi.l2b, tid, ts0, ts, mt, &mut tseq[..(ts - ts0) as usize]);
+        l2b_getseq(&mi.l2b, tid, ts0, ts, &mut tseq[..(ts - ts0) as usize]);
         {
             let qseq = &mut qseq0[rev as usize][qs0 as usize..qs as usize];
             mb_seq_rev((qs - qs0) as u32, qseq);
@@ -1285,7 +1291,7 @@ pub fn mb_align1(
             if (ai.flag & MB_SEED_LONG_JOIN) != 0 {
                 bw1 = (qe - qs).max((te - ts) as i32);
             }
-            l2b_getseq_meth(&mi.l2b, tid, ts, te, mt, &mut tseq[..(te - ts) as usize]);
+            l2b_getseq(&mi.l2b, tid, ts, te, &mut tseq[..(te - ts) as usize]);
             let qseq = &qseq0[rev as usize][qs as usize..qe as usize];
             mb_align_pair(
                 km,
@@ -1341,6 +1347,15 @@ pub fn mb_align1(
                 mb_append_cigar(r, ez.n_cigar as u32, &ez.cigar);
             }
             if ez.zdropped != 0 {
+                if r.p.is_none() {
+                    r.p = Some(
+                        crate::pe::mb_extra_t {
+                            cap: 1,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    );
+                }
                 let mut j = i - 1;
                 loop {
                     if a[(as1 + j) as usize].tpos <= ts + ez.max_t as i64 {
@@ -1352,9 +1367,7 @@ pub fn mb_align1(
                     j -= 1;
                 }
                 dropped = 1;
-                if let Some(p) = r.p.as_mut() {
-                    p.dp_score += ez.max as i32;
-                }
+                r.p.as_mut().unwrap().dp_score += ez.max as i32;
                 te1 = ts + ez.max_t as i64 + 1;
                 qe1 = qs + ez.max_q + 1;
                 let mut blen = 0;
@@ -1385,14 +1398,7 @@ pub fn mb_align1(
     }
 
     if dropped == 0 && qe1 < qe0 && te1 < te0 {
-        l2b_getseq_meth(
-            &mi.l2b,
-            tid,
-            te1,
-            te0,
-            mt,
-            &mut tseq[..(te0 - te1) as usize],
-        );
+        l2b_getseq(&mi.l2b, tid, te1, te0, &mut tseq[..(te0 - te1) as usize]);
         let qseq = &qseq0[rev as usize][qe1 as usize..qe0 as usize];
         mb_align_pair(
             km,
@@ -1444,14 +1450,7 @@ pub fn mb_align1(
     }
 
     if r.p.is_some() {
-        l2b_getseq_meth(
-            &mi.l2b,
-            tid,
-            ts1,
-            te1,
-            mt,
-            &mut tseq[..(te1 - ts1) as usize],
-        );
+        l2b_getseq(&mi.l2b, tid, ts1, te1, &mut tseq[..(te1 - ts1) as usize]);
         let qslice = &qseq0[r.rev() as usize][qs1 as usize..qe1 as usize];
         mb_update_extra(
             km,
@@ -1511,7 +1510,17 @@ pub fn mb_align1_inv(
     if r1.rev() == 0 {
         mt = l2b_meth_rev(mt);
     }
-    l2b_getseq_meth(&mi.l2b, r1.tid, r1.te, r2.ts, mt, tseq);
+    let mut mat_local = [0i8; 25];
+    crate::ksw2::ksw_gen_nt4_mat(
+        &mut mat_local,
+        opt.a as i8,
+        opt.b as i8,
+        opt.b_ts as i8,
+        opt.b_ambi as i8,
+        mt as i32,
+    );
+    let mat = &mat_local;
+    l2b_getseq(&mi.l2b, r1.tid, r1.te, r2.ts, tseq);
     let qstart = if r1.rev() != 0 {
         r2.qe as usize
     } else {
@@ -1753,6 +1762,7 @@ pub fn mb_align_skeleton_with_scratch(
         opt.b as i8,
         opt.b_ts as i8,
         opt.b_ambi as i8,
+        mt as i32,
     );
     tseq.clear();
     let mut i = 0usize;
@@ -2223,6 +2233,7 @@ mod tests {
             opt.b as i8,
             opt.b_ts as i8,
             opt.b_ambi as i8,
+            0,
         );
         let q = vec![0, 1, 2, 3];
         let t = vec![0, 1, 2, 3];
@@ -2294,6 +2305,7 @@ mod tests {
             opt.b as i8,
             opt.b_ts as i8,
             opt.b_ambi as i8,
+            0,
         );
         let target = "TCCCCATACCCAACCCCCTGGTCAACCTCAACCTAGGCCTCCTATTTATTCTAGCCACCTCTAGCCTAGCCGTTTACTCAATCCTCTGATCAGGGTGAGCATCAAACTC"
                 .bytes()
@@ -2381,6 +2393,43 @@ mod tests {
         );
         assert_eq!((ez.score, ez.max, ez.n_cigar), (i32::MIN / 2, 26, 1));
         assert_eq!(ez.cigar[0], 45 << 4 | MB_CIGAR_MATCH);
+
+        let target = "AAAAATAGCTGGGCATG"
+            .bytes()
+            .map(|c| match c {
+                b'A' => 0,
+                b'C' => 1,
+                b'G' => 2,
+                b'T' => 3,
+                _ => 4,
+            })
+            .collect::<Vec<_>>();
+        let query = "GCTGGGCAT"
+            .bytes()
+            .map(|c| match c {
+                b'A' => 0,
+                b'C' => 1,
+                b'G' => 2,
+                b'T' => 3,
+                _ => 4,
+            })
+            .collect::<Vec<_>>();
+        mb_align_pair(
+            (),
+            &opt,
+            query.len() as i32,
+            &query,
+            target.len() as i32,
+            &target,
+            &mat,
+            61,
+            opt.end_bonus,
+            opt.zdrop,
+            KSW_EZ_EXTZ_ONLY,
+            &mut ez,
+        );
+        assert_eq!(ez.n_cigar, 0);
+        assert_eq!(ez.max, 0);
     }
 
     #[test]

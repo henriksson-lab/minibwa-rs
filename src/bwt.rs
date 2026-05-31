@@ -2,11 +2,21 @@
 
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MB_MAGIC: &[u8; 4] = b"MBW\x02";
 const BWT_CNT_SHIFT: u32 = 56;
 const BWT_CNT_MASK: u64 = (1u64 << BWT_CNT_SHIFT) - 1;
+
+fn c_path<P: AsRef<Path>>(path: P) -> PathBuf {
+    let lossy = path.as_ref().to_string_lossy();
+    let end = lossy
+        .as_bytes()
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(lossy.len());
+    PathBuf::from(lossy[..end].to_string())
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -178,13 +188,22 @@ pub fn mb_bwt_init_from_raw(is_byte: i32, raw: &[u8], len: u64, primary: u64) ->
     }
     bwt.data.extend_from_slice(&x);
     bwt.data.extend_from_slice(&c);
-    assert_eq!(bwt.data.len(), bwt.data_len as usize);
+    if bwt.data.len() != bwt.data_len as usize {
+        c_assert_fail_bwt_init_from_raw(101, "k == bwt->data_len");
+    }
     bwt.L2[0] = 0;
     for i in 0..4usize {
         bwt.L2[i + 1] = bwt.L2[i] + c[i];
     }
-    assert_eq!(bwt.L2[4], len);
+    if bwt.L2[4] != len {
+        c_assert_fail_bwt_init_from_raw(104, "bwt->L2[4] == len");
+    }
     bwt
+}
+
+fn c_assert_fail_bwt_init_from_raw(line: u32, assertion: &str) -> ! {
+    eprintln!("minibwa: bwt.c:{line}: mb_bwt_init_from_raw: Assertion `{assertion}' failed.");
+    std::process::abort();
 }
 
 /// Original C static function `mb_bwt_set_intv` from `minibwa/bwt.h:71`.
@@ -1156,15 +1175,11 @@ pub fn read_huge<R: Read>(fp: &mut R, size: u64, a: &mut [u8]) -> u64 {
 }
 
 fn read_huge_u64_vec<R: Read>(fp: &mut R, n: u64) -> Option<Vec<u64>> {
-    let mut a = Vec::<u64>::with_capacity(n as usize);
-    let bytes =
-        unsafe { std::slice::from_raw_parts_mut(a.as_mut_ptr() as *mut u8, n as usize * 8) };
-    if read_huge(fp, n.checked_mul(8)?, bytes) != n * 8 {
-        return None;
-    }
-    unsafe {
-        a.set_len(n as usize);
-    }
+    let mut a = vec![0u64; n as usize];
+    let bytes = unsafe {
+        std::slice::from_raw_parts_mut(a.as_mut_ptr() as *mut u8, n.checked_mul(8)? as usize)
+    };
+    read_huge(fp, n.checked_mul(8)?, bytes);
     #[cfg(target_endian = "big")]
     {
         for x in &mut a {
@@ -1176,11 +1191,14 @@ fn read_huge_u64_vec<R: Read>(fp: &mut R, n: u64) -> Option<Vec<u64>> {
 
 /// Original C global function `mb_bwt_load_raw` from `minibwa/bwt.c:600`.
 pub fn mb_bwt_load_raw<P: AsRef<Path>>(fn_: P) -> Option<mb_bwt_t> {
-    let mut fp = File::open(fn_).ok()?;
+    let mut fp = File::open(c_path(fn_)).ok()?;
     let file_len = fp.metadata().ok()?.len();
-    let raw_size = (file_len.checked_sub(std::mem::size_of::<u64>() as u64 * 5)?) >> 2;
+    let raw_size = file_len
+        .checked_sub(std::mem::size_of::<u64>() as u64 * 5)
+        .map(|n| n >> 2)
+        .unwrap_or(0);
     let mut hdr = [0u8; 40];
-    fp.read_exact(&mut hdr).ok()?;
+    let _ = fp.read(&mut hdr);
     let primary = u64::from_le_bytes(hdr[0..8].try_into().unwrap());
     let mut L2 = [0u64; 5];
     for i in 1..5usize {
@@ -1194,41 +1212,24 @@ pub fn mb_bwt_load_raw<P: AsRef<Path>>(fn_: P) -> Option<mb_bwt_t> {
 
 /// Original C global function `mb_bwt_save` from `minibwa/bwt.c:622`.
 pub fn mb_bwt_save<P: AsRef<Path>>(fn_: P, bwt: &mb_bwt_t) -> i32 {
-    let fp = match File::create(fn_) {
+    let fp = match File::create(c_path(fn_)) {
         Ok(fp) => fp,
         Err(_) => return -1,
     };
     let mut fp = BufWriter::with_capacity(1 << 20, fp);
-    if fp.write_all(MB_MAGIC).is_err() {
-        return -1;
-    }
-    if fp.write_all(&bwt.sa_bit.to_le_bytes()).is_err() {
-        return -1;
-    }
-    if fp.write_all(&bwt.primary.to_le_bytes()).is_err() {
-        return -1;
-    }
+    let _ = fp.write_all(MB_MAGIC);
+    let _ = fp.write_all(&bwt.sa_bit.to_le_bytes());
+    let _ = fp.write_all(&bwt.primary.to_le_bytes());
     for i in 1..5usize {
-        if fp.write_all(&bwt.L2[i].to_le_bytes()).is_err() {
-            return -1;
-        }
+        let _ = fp.write_all(&bwt.L2[i].to_le_bytes());
     }
-    if write_u64_slice_le(&mut fp, &bwt.data[..bwt.data_len as usize]).is_err() {
-        return -1;
-    }
-    if fp.write_all(&bwt.n_sa.to_le_bytes()).is_err() {
-        return -1;
-    }
+    let _ = write_u64_slice_le(&mut fp, &bwt.data[..bwt.data_len as usize]);
+    let _ = fp.write_all(&bwt.n_sa.to_le_bytes());
     if bwt.sa_bit != u32::MAX && bwt.n_sa > 0 && !bwt.sa.is_empty() {
-        if write_u64_slice_le(&mut fp, &bwt.sa[..bwt.n_sa as usize]).is_err() {
-            return -1;
-        }
+        let _ = write_u64_slice_le(&mut fp, &bwt.sa[..bwt.n_sa as usize]);
     }
-    if fp.flush().is_err() {
-        -1
-    } else {
-        0
-    }
+    let _ = fp.flush();
+    0
 }
 
 fn write_u64_slice_le<W: Write>(writer: &mut W, words: &[u64]) -> std::io::Result<()> {
@@ -1250,7 +1251,7 @@ fn write_u64_slice_le<W: Write>(writer: &mut W, words: &[u64]) -> std::io::Resul
 
 /// Original C global function `mb_bwt_load` from `minibwa/bwt.c:639`.
 pub fn mb_bwt_load<P: AsRef<Path>>(fn_: P) -> Option<mb_bwt_t> {
-    let mut fp = File::open(fn_).ok()?;
+    let mut fp = File::open(c_path(fn_)).ok()?;
     let mut magic = [0u8; 4];
     fp.read_exact(&mut magic).ok()?;
     if &magic != MB_MAGIC {
@@ -1271,7 +1272,7 @@ pub fn mb_bwt_load<P: AsRef<Path>>(fn_: P) -> Option<mb_bwt_t> {
     bwt.data_len = mb_bwt_data_len(bwt.seq_len);
     bwt.data = read_huge_u64_vec(&mut fp, bwt.data_len)?;
     let mut n_sa = [0u8; 8];
-    fp.read_exact(&mut n_sa).ok()?;
+    let _ = fp.read(&mut n_sa);
     bwt.n_sa = u64::from_le_bytes(n_sa);
     if bwt.sa_bit != u32::MAX && bwt.n_sa > 0 {
         bwt.sa = read_huge_u64_vec(&mut fp, bwt.n_sa)?;
@@ -1461,6 +1462,70 @@ mod tests {
         assert_eq!(loaded.sa_bit, bwt.sa_bit);
         assert_eq!(loaded.n_sa, bwt.n_sa);
         assert_eq!(loaded.sa, bwt.sa);
+    }
+
+    #[test]
+    fn public_file_helpers_stop_paths_at_embedded_nul_like_c() {
+        let bwt = mb_bwt_load("minibwa/chrM-human.mbw").expect("load chrM-human.mbw");
+        let dir =
+            std::env::temp_dir().join(format!("minibwa-rs-bwt-api-nul-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let mbw = dir.join("out.mbw");
+        let mbw_arg = format!("{}\0hidden", mbw.to_string_lossy());
+        assert_eq!(mb_bwt_save(mbw_arg.clone(), &bwt), 0);
+        let loaded = mb_bwt_load(mbw_arg).expect("load NUL-suffixed BWT path");
+        assert_eq!(loaded.primary, bwt.primary);
+        assert_eq!(loaded.L2, bwt.L2);
+        assert!(mbw.exists());
+
+        let raw = dir.join("raw.bwt");
+        {
+            let mut fp = File::create(&raw).expect("create raw bwt");
+            fp.write_all(&bwt.primary.to_le_bytes()).unwrap();
+            for i in 1..5usize {
+                fp.write_all(&bwt.L2[i].to_le_bytes()).unwrap();
+            }
+            for &word in &bwt.data[..bwt.data_len as usize] {
+                fp.write_all(&word.to_le_bytes()).unwrap();
+            }
+        }
+        let raw_arg = format!("{}\0hidden", raw.to_string_lossy());
+        assert!(mb_bwt_load_raw(raw_arg).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_ignores_post_open_write_errors_like_original() {
+        if !std::path::Path::new("/dev/full").exists() {
+            return;
+        }
+        let mut bwt = mb_bwt_init_from_raw(1, &[0, 1, 2, 3], 4, 2);
+        bwt.sa_bit = u32::MAX;
+        assert_eq!(mb_bwt_save("/dev/full", &bwt), 0);
+    }
+
+    #[test]
+    fn load_short_valid_mbw_zero_fills_like_original() {
+        let path =
+            std::env::temp_dir().join(format!("minibwa-rs-short-mbw-{}.mbw", std::process::id()));
+        {
+            let mut fp = File::create(&path).expect("create short BWT");
+            fp.write_all(MB_MAGIC).unwrap();
+            fp.write_all(&u32::MAX.to_le_bytes()).unwrap();
+            fp.write_all(&0u64.to_le_bytes()).unwrap();
+            fp.write_all(&1u64.to_le_bytes()).unwrap();
+            fp.write_all(&1u64.to_le_bytes()).unwrap();
+            fp.write_all(&1u64.to_le_bytes()).unwrap();
+            fp.write_all(&1u64.to_le_bytes()).unwrap();
+        }
+        let loaded = mb_bwt_load(&path).expect("short valid-header BWT still loads");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(loaded.seq_len, 1);
+        assert_eq!(loaded.data_len, mb_bwt_data_len(1));
+        assert_eq!(loaded.data, vec![0; loaded.data_len as usize]);
+        assert_eq!(loaded.n_sa, 0);
+        assert!(loaded.sa.is_empty());
     }
 
     #[test]

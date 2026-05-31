@@ -8,6 +8,15 @@ fn write_to<W: Write>(writer: &mut W, text: &str) -> io::Result<()> {
     }
 }
 
+fn c_str(s: &str) -> &str {
+    let len = s.as_bytes().iter().position(|&c| c == 0).unwrap_or(s.len());
+    &s[..len]
+}
+
+fn c_str_eq(s: &str, expected: &str) -> bool {
+    c_str(s).as_bytes() == expected.as_bytes()
+}
+
 fn write_command_result<W: Write, E: Write>(
     ret: i32,
     out: &str,
@@ -36,11 +45,12 @@ pub fn run_with_writers<W: Write, E: Write>(
     crate::stage_time::init_from_env();
 
     let mut command_ret = None;
+    let mut skip_main_footer = false;
     let status = if argc == 1 {
         let (ret, out) = crate::main::usage(true, 0);
         write_to(stdout, &out)?;
         ret
-    } else if argv[1] == "map" || argv[1] == "mem" {
+    } else if c_str_eq(&argv[1], "map") || c_str_eq(&argv[1], "mem") {
         let mut buffered_stdout = BufWriter::with_capacity(1 << 20, stdout);
         let (ret, out) = crate::map_main::main_map_write(&argv[1..], &mut buffered_stdout);
         buffered_stdout.flush()?;
@@ -49,9 +59,10 @@ pub fn run_with_writers<W: Write, E: Write>(
         } else if !out.is_empty() {
             write_to(stderr, &out)?;
         }
+        skip_main_footer = ret == 0 && out == format!("{}\n", crate::main::MB_VERSION);
         command_ret = Some(ret);
         0
-    } else if argv[1] == "fastmap" {
+    } else if c_str_eq(&argv[1], "fastmap") {
         let mut buffered_stdout = BufWriter::with_capacity(1 << 20, stdout);
         let (ret, out) = crate::fastmap::main_fastmap_write(&argv[1..], &mut buffered_stdout);
         buffered_stdout.flush()?;
@@ -62,62 +73,59 @@ pub fn run_with_writers<W: Write, E: Write>(
         }
         command_ret = Some(ret);
         0
-    } else if argv[1] == "--help" {
+    } else if c_str_eq(&argv[1], "--help") {
         let (ret, out) = crate::main::usage(true, 1);
         write_to(stdout, &out)?;
         ret
-    } else if argv[1] == "version" {
+    } else if c_str_eq(&argv[1], "version") {
         writeln!(stdout, "{}", crate::main::MB_VERSION)?;
         0
-    } else if argv[1] == "index" {
+    } else if c_str_eq(&argv[1], "index") {
         let (ret, out) = crate::index::main_index(&argv[1..]);
         write_command_result(ret, &out, stdout, stderr)?;
         command_ret = Some(ret);
         0
-    } else if argv[1] == "fa2bit" {
+    } else if c_str_eq(&argv[1], "fa2bit") {
         let (ret, out) = crate::index::main_fa2bit(&argv[1..]);
         write_command_result(ret, &out, stdout, stderr)?;
         command_ret = Some(ret);
         0
-    } else if argv[1] == "genraw" {
+    } else if c_str_eq(&argv[1], "genraw") {
         let (ret, out) = crate::index::main_genraw(&argv[1..]);
         write_command_result(ret, &out, stdout, stderr)?;
         command_ret = Some(ret);
         0
-    } else if argv[1] == "raw2bwt" {
+    } else if c_str_eq(&argv[1], "raw2bwt") {
         let (ret, out) = crate::index::main_raw2bwt(&argv[1..]);
         write_command_result(ret, &out, stdout, stderr)?;
         command_ret = Some(ret);
         0
-    } else if argv[1] == "genbwt" {
+    } else if c_str_eq(&argv[1], "genbwt") {
         let (ret, out) = crate::index::main_genbwt(&argv[1..]);
         write_command_result(ret, &out, stdout, stderr)?;
         command_ret = Some(ret);
         0
-    } else if argv[1] == "gensa" {
+    } else if c_str_eq(&argv[1], "gensa") {
         let (ret, out) = crate::index::main_gensa(&argv[1..]);
         write_command_result(ret, &out, stdout, stderr)?;
         command_ret = Some(ret);
         0
-    } else if argv[1] == "bench" {
+    } else if c_str_eq(&argv[1], "bench") {
         let (_ret, out, err) = crate::main::main_bench(&argv[1..]);
         write_to(stdout, &out)?;
         write_to(stderr, &err)?;
         command_ret = Some(_ret);
         0
     } else {
-        writeln!(stderr, "ERROR: unknown command '{}'", argv[1])?;
+        writeln!(stderr, "ERROR: unknown command '{}'", c_str(&argv[1]))?;
         1
     };
 
-    let is_help_or_version = argv[1..]
-        .iter()
-        .any(|arg| arg == "--help" || arg == "--version" || arg == "version");
-    if argc > 2 && command_ret == Some(0) && !is_help_or_version {
+    if argc > 2 && command_ret == Some(0) && !skip_main_footer {
         writeln!(stderr, "[M::main] Version: {}", crate::main::MB_VERSION)?;
         write!(stderr, "[M::main] CMD:")?;
         for arg in argv {
-            write!(stderr, " {arg}")?;
+            write!(stderr, " {}", c_str(arg))?;
         }
         writeln!(
             stderr,

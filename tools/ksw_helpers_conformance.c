@@ -11,12 +11,12 @@ static void print_cigar(const uint32_t *cigar, int n_cigar)
     for (i = 0; i < n_cigar; ++i) printf(" %u", cigar[i]);
 }
 
-static void run_mat_case(int id, int a, int b, int b_ts, int b_ambi)
+static void run_mat_case(int id, int a, int b, int b_ts, int b_ambi, int mt)
 {
     int i;
     int8_t mat[25];
-    ksw_gen_nt4_mat(mat, (int8_t)a, (int8_t)b, (int8_t)b_ts, (int8_t)b_ambi);
-    printf("mat %d %d %d %d %d", id, a, b, b_ts, b_ambi);
+    ksw_gen_nt4_mat(mat, (int8_t)a, (int8_t)b, (int8_t)b_ts, (int8_t)b_ambi, mt);
+    printf("mat %d %d %d %d %d %d", id, a, b, b_ts, b_ambi, mt);
     for (i = 0; i < 25; ++i) printf(" %d", (int)mat[i]);
     putchar('\n');
 }
@@ -72,10 +72,14 @@ int main(void)
     int id = 0;
     run_reset_case(id++);
 
-    run_mat_case(id++, 2, 4, 0, 1);
-    run_mat_case(id++, -3, -5, 2, -1);
-    run_mat_case(id++, 5, 1, 1, 0);
-    run_mat_case(id++, 7, 3, -2, 4);
+    run_mat_case(id++, 2, 4, 0, 1, 0);
+    run_mat_case(id++, -3, -5, 2, -1, 0);
+    run_mat_case(id++, 5, 1, 1, 0, 0);
+    run_mat_case(id++, 7, 3, -2, 4, 0);
+    run_mat_case(id++, 2, 4, 1, 3, 1);
+    run_mat_case(id++, 2, 4, 1, 3, 2);
+    run_mat_case(id++, -3, 5, -2, -1, 1);
+    run_mat_case(id++, -128, 4, 1, 3, 0);
 
     run_zdrop_case(id++, 0, -1, -1, 0, 12, 3, 4, 5, 2);
     run_zdrop_case(id++, 12, 3, 4, 0, 1, 8, 8, 5, 2);

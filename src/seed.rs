@@ -4,7 +4,7 @@ use crate::bwt::{
     mb_bwt_sa_batch_with_scratch, mb_bwt_smem, mb_bwt_smem_batch_ref_with_queue, mb_bwt_t,
     mb_sai_t, mb_sai_v, mb_smem_entry_ref, tiny_queue_t,
 };
-use crate::l2bit::{l2b_intv2cid, l2b_intv2cid_meth, l2b_meth_t, l2b_t};
+use crate::l2bit::{l2b_getseq, l2b_intv2cid, l2b_intv2cid_meth, l2b_meth_rev, l2b_meth_t, l2b_t};
 use crate::lchain::mb_anchor_t;
 use crate::map_algo::mb_idx_t;
 
@@ -478,6 +478,83 @@ pub fn process_batch(
     v.m = v.a.capacity() as i64;
 }
 
+pub fn mb_anchor_split_meth(
+    km: (),
+    l2b: &l2b_t,
+    min_len: i32,
+    qlen: i32,
+    qseq0: &[u8],
+    mt0: l2b_meth_t,
+    v: &mut mb_anchor_v,
+) {
+    if v.n == 0 {
+        return;
+    }
+    let max_len =
+        v.a.iter()
+            .take(v.n as usize)
+            .map(|a| a.len)
+            .max()
+            .unwrap_or(0);
+    let mut tseq = vec![0u8; max_len.max(0) as usize];
+    let mut qseq2 = [
+        vec![0u8; qlen.max(0) as usize],
+        vec![0u8; qlen.max(0) as usize],
+    ];
+    qseq2[0].copy_from_slice(&qseq0[..qlen.max(0) as usize]);
+    for i in 0..qlen.max(0) as usize {
+        let c = qseq0[i];
+        qseq2[1][qlen as usize - 1 - i] = if c > 3 { 4 } else { 3 - c };
+    }
+
+    let mut out = Vec::with_capacity((v.n * 2).max(1) as usize);
+    for q in v.a.iter().take(v.n as usize) {
+        let ctg = &l2b.ctg[(q.sid >> 1) as usize];
+        let rev = q.sid & 1;
+        let tpos = q.tpos - (ctg.off * 2 + ctg.len * rev as u64) as i64;
+        let ts = tpos + 1 - q.len as i64;
+        let qs = q.qpos + 1 - q.len;
+        if qs < 0 || qs + q.len > qlen || ts < 0 {
+            continue;
+        }
+        l2b_getseq(
+            l2b,
+            (q.sid >> 1) as i64,
+            ts,
+            ts + q.len as i64,
+            &mut tseq[..q.len as usize],
+        );
+        let mt = if rev != 0 { l2b_meth_rev(mt0) } else { mt0 };
+        let t_allow = if mt == l2b_meth_t::L2B_METH_C2T { 1 } else { 2 };
+        let q_allow = if mt == l2b_meth_t::L2B_METH_C2T { 3 } else { 0 };
+        let qseq = &qseq2[rev as usize][qs as usize..(qs + q.len) as usize];
+        let mut j0 = 0i32;
+        for j in 0..=q.len {
+            let split = if j == q.len {
+                true
+            } else {
+                let tb = tseq[j as usize];
+                let qb = qseq[j as usize];
+                tb == 4 || qb == 4 || (tb != qb && !(tb == t_allow && qb == q_allow))
+            };
+            if split {
+                if j - j0 >= min_len {
+                    let mut p = *q;
+                    p.len = j - j0;
+                    p.qpos = q.qpos - (q.len - j);
+                    p.tpos = q.tpos - (q.len - j) as i64;
+                    out.push(p);
+                }
+                j0 = j + 1;
+            }
+        }
+    }
+    v.a = out;
+    v.n = v.a.len() as i64;
+    v.m = v.a.capacity() as i64;
+    let _ = km;
+}
+
 /// Converting seed intervals to anchors. This function batches small SA
 /// intervals and calls `mb_bwt_sa_batch()` in `process_batch()`. With prefetch,
 /// the strategy noticeably improves the performance.
@@ -487,11 +564,13 @@ pub fn mb_anchor(
     km: (),
     idx: &mb_idx_t,
     u: &mut mb_sai_v,
+    min_len: i32,
     qlen: i32,
+    qseq: &[u8],
     mt: l2b_meth_t,
     max_occ: i32,
     v: &mut mb_anchor_v,
-) {
+) -> f64 {
     let mut aux = Vec::new();
     let mut a = Vec::new();
     let mut sa_batch = Vec::new();
@@ -500,7 +579,9 @@ pub fn mb_anchor(
         km,
         idx,
         u,
+        min_len,
         qlen,
+        qseq,
         mt,
         max_occ,
         v,
@@ -508,14 +589,16 @@ pub fn mb_anchor(
         &mut a,
         &mut sa_batch,
         &mut b,
-    );
+    )
 }
 
 pub fn mb_anchor_with_scratch(
     km: (),
     idx: &mb_idx_t,
     u: &mut mb_sai_v,
+    min_len: i32,
     qlen: i32,
+    qseq: &[u8],
     mt: l2b_meth_t,
     max_occ: i32,
     v: &mut mb_anchor_v,
@@ -523,12 +606,12 @@ pub fn mb_anchor_with_scratch(
     a: &mut Vec<u64>,
     sa_batch: &mut Vec<(u64, u64)>,
     b: &mut Vec<(i64, i64)>,
-) {
+) -> f64 {
     const BATCH_SIZE: i32 = 20;
     v.n = 0;
     v.a.clear();
     if u.n == 0 {
-        return;
+        return 1.0;
     }
     mb_seed_sort_dedup(u);
     aux.clear();
@@ -573,6 +656,24 @@ pub fn mb_anchor_with_scratch(
     }
     process_batch(km, idx, aux, b.len() as i32, b, a, sa_batch, qlen, mt, u, v);
 
+    let mut seed_ratio = 1.0f64;
+    if mt != l2b_meth_t::L2B_METH_NONE && v.n > 0 {
+        let t0 =
+            v.a.iter()
+                .take(v.n as usize)
+                .map(|a| a.len as i64)
+                .sum::<i64>();
+        mb_anchor_split_meth(km, &idx.l2b, min_len, qlen, qseq, mt, v);
+        let t1 =
+            v.a.iter()
+                .take(v.n as usize)
+                .map(|a| a.len as i64)
+                .sum::<i64>();
+        if t0 > 0 {
+            seed_ratio = t1 as f64 / t0 as f64;
+        }
+    }
+
     radix_sort_mb_anchor_by_tpos(&mut v.a);
     for q in &mut v.a {
         let ctg = &idx.l2b.ctg[(q.sid >> 1) as usize];
@@ -580,6 +681,7 @@ pub fn mb_anchor_with_scratch(
     }
     v.n = v.a.len() as i64;
     mb_anchor_dedup(v);
+    seed_ratio
 }
 
 /// Original C global function `mb_anchor_sort` from `minibwa/seed.c:269`.
@@ -721,7 +823,9 @@ mod tests {
             (),
             &idx,
             &mut u,
+            19,
             seq.len() as i32,
+            &seq,
             l2b_meth_t::L2B_METH_NONE,
             250,
             &mut v,

@@ -6,7 +6,7 @@ use crate::bwt::{
 };
 use crate::bwtgen::mb_bwtgen;
 use crate::ketopt::{ketopt, ko_longopt_t, KETOPT_INIT};
-use crate::kommon::{kom_panic, kom_parse_num};
+use crate::kommon::{kom_atoi, kom_atol, kom_panic, kom_parse_num};
 use crate::l2bit::{
     l2b_get0, l2b_import, l2b_load, l2b_save, l2b_save_pac, l2b_save_pac_meth, l2b_t,
 };
@@ -23,8 +23,31 @@ fn run_with_index_pool<R: Send>(n_thread: i32, f: impl FnOnce() -> R + Send) -> 
     pool.install(f)
 }
 
+#[cfg(unix)]
+fn raise_sigsegv_like_null_deref() -> ! {
+    unsafe {
+        libc::signal(libc::SIGSEGV, libc::SIG_DFL);
+        libc::raise(libc::SIGSEGV);
+    }
+    std::process::abort();
+}
+
+#[cfg(not(unix))]
+fn raise_sigsegv_like_null_deref() -> ! {
+    std::process::abort();
+}
+
+fn abort_bwt_init_from_raw_data_len_assert() -> ! {
+    eprintln!("minibwa: bwt.c:101: mb_bwt_init_from_raw: Assertion `k == bwt->data_len' failed.");
+    std::process::abort();
+}
+
 fn use_parallel_index_post(n_thread: i32, len: usize) -> bool {
     n_thread > 1 && len >= (1 << 20) && rayon::current_thread_index().is_some()
+}
+
+fn c_arg(s: &str) -> &str {
+    s.split_once('\0').map_or(s, |(prefix, _)| prefix)
 }
 
 /// Original C static function `l2b_c2t` from `minibwa/index.c:17`.
@@ -518,7 +541,7 @@ pub fn main_fa2bit(argv: &[String]) -> (i32, String) {
             break;
         }
         if c == 's' as i32 {
-            seed = o.arg.as_deref().unwrap_or("0").parse().unwrap_or(0);
+            seed = kom_atol(o.arg.as_deref().unwrap_or("0")) as u64;
         } else if c == 'p' as i32 {
             out_pac = 1;
         } else if c == '2' as i32 {
@@ -530,13 +553,13 @@ pub fn main_fa2bit(argv: &[String]) -> (i32, String) {
     if argc - o.ind < 2 {
         return usage_fa2bit(false, seed);
     }
-    let Some(l2b) = l2b_import(&args[o.ind as usize], seed) else {
-        return (1, String::new());
+    let Some(l2b) = l2b_import(c_arg(&args[o.ind as usize]), seed) else {
+        raise_sigsegv_like_null_deref();
     };
     if out_pac != 0 {
-        l2b_save_pac(&args[o.ind as usize + 1], &l2b, both_strand);
+        l2b_save_pac(c_arg(&args[o.ind as usize + 1]), &l2b, both_strand);
     } else {
-        l2b_save(&args[o.ind as usize + 1], &l2b);
+        l2b_save(c_arg(&args[o.ind as usize + 1]), &l2b);
     }
     (0, String::new())
 }
@@ -552,11 +575,18 @@ pub fn usage_genraw(to_stdout: bool) -> (i32, String) {
 
 /// Original C global function `main_genraw` from `minibwa/index.c:85`.
 pub fn main_genraw(argv: &[String]) -> (i32, String) {
-    let long_opts = [ko_longopt_t {
-        name: Some("help".into()),
-        has_arg: 0,
-        val: 901,
-    }];
+    let long_opts = [
+        ko_longopt_t {
+            name: Some("help".into()),
+            has_arg: 0,
+            val: 901,
+        },
+        ko_longopt_t {
+            name: Some("meth".into()),
+            has_arg: 0,
+            val: 902,
+        },
+    ];
     let argc = argv.len() as i32;
     let mut args = argv.to_vec();
     let mut o = KETOPT_INIT.clone();
@@ -576,8 +606,8 @@ pub fn main_genraw(argv: &[String]) -> (i32, String) {
         return usage_genraw(false);
     }
     if mb_bwtgen(
-        std::path::Path::new(&args[o.ind as usize]),
-        std::path::Path::new(&args[o.ind as usize + 1]),
+        std::path::Path::new(c_arg(&args[o.ind as usize])),
+        std::path::Path::new(c_arg(&args[o.ind as usize + 1])),
         block_size,
     )
     .is_err()
@@ -598,16 +628,16 @@ pub fn usage_raw2bwt(to_stdout: bool) -> (i32, String) {
 
 /// Original C global function `main_raw2bwt` from `minibwa/index.c:107`.
 pub fn main_raw2bwt(argv: &[String]) -> (i32, String) {
-    if argv.iter().skip(1).any(|s| s == "--help") {
+    if argv.iter().skip(1).any(|s| c_arg(s) == "--help") {
         return usage_raw2bwt(true);
     }
     if argv.len() < 3 {
         return usage_raw2bwt(false);
     }
-    let Some(bwt) = mb_bwt_load_raw(&argv[1]) else {
-        return (1, String::new());
+    let Some(bwt) = mb_bwt_load_raw(c_arg(&argv[1])) else {
+        raise_sigsegv_like_null_deref();
     };
-    mb_bwt_save(&argv[2], &bwt);
+    mb_bwt_save(c_arg(&argv[2]), &bwt);
     mb_bwt_destroy(Some(bwt));
     (0, String::new())
 }
@@ -624,11 +654,18 @@ pub fn usage_genbwt(to_stdout: bool, sa_bit: i32, n_thread: i32) -> (i32, String
 
 /// Original C global function `main_genbwt` from `minibwa/index.c:135`.
 pub fn main_genbwt(argv: &[String]) -> (i32, String) {
-    let long_opts = [ko_longopt_t {
-        name: Some("help".into()),
-        has_arg: 0,
-        val: 901,
-    }];
+    let long_opts = [
+        ko_longopt_t {
+            name: Some("help".into()),
+            has_arg: 0,
+            val: 901,
+        },
+        ko_longopt_t {
+            name: Some("meth".into()),
+            has_arg: 0,
+            val: 902,
+        },
+    ];
     let argc = argv.len() as i32;
     let mut args = argv.to_vec();
     let mut o = KETOPT_INIT.clone();
@@ -641,11 +678,11 @@ pub fn main_genbwt(argv: &[String]) -> (i32, String) {
             break;
         }
         if c == 't' as i32 {
-            n_thread = o.arg.as_deref().unwrap_or("0").parse().unwrap_or(0);
+            n_thread = kom_atoi(o.arg.as_deref().unwrap_or("0"));
         } else if c == '1' as i32 {
             both_strand = 0;
         } else if c == 'u' as i32 {
-            sa_bit = o.arg.as_deref().unwrap_or("0").parse().unwrap_or(0);
+            sa_bit = kom_atoi(o.arg.as_deref().unwrap_or("0"));
         } else if c == 901 {
             return usage_genbwt(true, sa_bit, n_thread);
         }
@@ -653,13 +690,16 @@ pub fn main_genbwt(argv: &[String]) -> (i32, String) {
     if argc - o.ind < 2 {
         return usage_genbwt(false, sa_bit, n_thread);
     }
-    let Some(l2b) = l2b_load(&args[o.ind as usize]) else {
+    let Some(l2b) = l2b_load(c_arg(&args[o.ind as usize])) else {
         kom_panic("main_genbwt", "failed to open the input file.");
     };
+    if l2b.tot_len == 0 {
+        abort_bwt_init_from_raw_data_len_assert();
+    }
     let bwt = run_with_index_pool(n_thread, || {
         mb_bwt_libsais(&l2b, sa_bit, both_strand, 0, n_thread)
     });
-    mb_bwt_save(&args[o.ind as usize + 1], &bwt);
+    mb_bwt_save(c_arg(&args[o.ind as usize + 1]), &bwt);
     (0, String::new())
 }
 
@@ -675,11 +715,18 @@ pub fn usage_gensa(to_stdout: bool, sa_bit: i32) -> (i32, String) {
 
 /// Original C global function `main_gensa` from `minibwa/index.c:158`.
 pub fn main_gensa(argv: &[String]) -> (i32, String) {
-    let long_opts = [ko_longopt_t {
-        name: Some("help".into()),
-        has_arg: 0,
-        val: 901,
-    }];
+    let long_opts = [
+        ko_longopt_t {
+            name: Some("help".into()),
+            has_arg: 0,
+            val: 901,
+        },
+        ko_longopt_t {
+            name: Some("meth".into()),
+            has_arg: 0,
+            val: 902,
+        },
+    ];
     let argc = argv.len() as i32;
     let mut args = argv.to_vec();
     let mut o = KETOPT_INIT.clone();
@@ -691,7 +738,7 @@ pub fn main_gensa(argv: &[String]) -> (i32, String) {
             break;
         }
         if c == 'u' as i32 {
-            sa_bit = o.arg.as_deref().unwrap_or("0").parse().unwrap_or(0);
+            sa_bit = kom_atoi(o.arg.as_deref().unwrap_or("0"));
         } else if c == 'r' as i32 {
             is_raw = 1;
         } else if c == 901 {
@@ -702,14 +749,14 @@ pub fn main_gensa(argv: &[String]) -> (i32, String) {
         return usage_gensa(false, sa_bit);
     }
     let Some(mut bwt) = (if is_raw != 0 {
-        mb_bwt_load_raw(&args[o.ind as usize])
+        mb_bwt_load_raw(c_arg(&args[o.ind as usize]))
     } else {
-        mb_bwt_load(&args[o.ind as usize])
+        mb_bwt_load(c_arg(&args[o.ind as usize]))
     }) else {
-        return (1, String::new());
+        raise_sigsegv_like_null_deref();
     };
     mb_bwt_gen_sa(&mut bwt, sa_bit as u32);
-    mb_bwt_save(&args[o.ind as usize + 1], &bwt);
+    mb_bwt_save(c_arg(&args[o.ind as usize + 1]), &bwt);
     (0, String::new())
 }
 
@@ -752,15 +799,15 @@ pub fn main_index(argv: &[String]) -> (i32, String) {
             break;
         }
         if c == 't' as i32 {
-            n_thread = o.arg.as_deref().unwrap_or("0").parse().unwrap_or(0);
+            n_thread = kom_atoi(o.arg.as_deref().unwrap_or("0"));
         } else if c == 'l' as i32 {
             low_mem = 1;
         } else if c == 'b' as i32 {
             block_size = kom_parse_num(o.arg.as_deref().unwrap_or("0")).0;
         } else if c == 'u' as i32 {
-            sa_bit = o.arg.as_deref().unwrap_or("0").parse().unwrap_or(0);
+            sa_bit = kom_atoi(o.arg.as_deref().unwrap_or("0"));
         } else if c == 's' as i32 {
-            seed = o.arg.as_deref().unwrap_or("0").parse().unwrap_or(0);
+            seed = kom_atol(o.arg.as_deref().unwrap_or("0")) as u64;
         } else if c == 901 {
             return usage_index(true, seed, sa_bit, n_thread);
         } else if c == 902 {
@@ -771,16 +818,16 @@ pub fn main_index(argv: &[String]) -> (i32, String) {
         return usage_index(false, seed, sa_bit, n_thread);
     }
     let prefix = if o.ind + 1 < argc {
-        args[o.ind as usize + 1].clone()
+        c_arg(&args[o.ind as usize + 1]).to_string()
     } else {
-        args[o.ind as usize].clone()
+        c_arg(&args[o.ind as usize]).to_string()
     };
     let fn_l2b = format!("{prefix}.l2b");
     let fn_bwt = format!("{prefix}.mbw");
     let fn_meth_bwt = format!("{prefix}.meth.mbw");
     let time_index = std::env::var_os("MINIBWA_RS_INDEX_TIMING").is_some();
     let mut stage_start = std::time::Instant::now();
-    let Some(mut l2b) = l2b_import(&args[o.ind as usize], seed) else {
+    let Some(mut l2b) = l2b_import(c_arg(&args[o.ind as usize]), seed) else {
         kom_panic("main_index", "failed to read the genome FASTA.");
     };
     if time_index {
@@ -951,5 +998,47 @@ mod tests {
         assert!(l2b_load(format!("{}.l2b", prefix.to_string_lossy())).is_some());
         assert!(mb_bwt_load(format!("{}.mbw", prefix.to_string_lossy())).is_some());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn index_command_paths_stop_at_embedded_nul_like_c() {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "minibwa_rs_index_nul_paths_{}_{}",
+            std::process::id(),
+            crate::kommon::kom_realtime().to_bits()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let fa = dir.join("in.fa");
+        let l2b = dir.join("out.l2b");
+        let prefix = dir.join("idx");
+        fs::write(&fa, b">ctg\nACGTACGT\n").unwrap();
+
+        let fa_arg = format!("{}\0hidden", fa.to_string_lossy());
+        let l2b_arg = format!("{}\0hidden", l2b.to_string_lossy());
+        let fa2bit_args = vec!["fa2bit".to_string(), fa_arg, l2b_arg];
+        assert_eq!(main_fa2bit(&fa2bit_args).0, 0);
+        assert!(l2b_load(&l2b).is_some());
+
+        let prefix_arg = format!("{}\0hidden", prefix.to_string_lossy());
+        let index_args = vec![
+            "index".to_string(),
+            "-u".to_string(),
+            "2".to_string(),
+            fa.to_string_lossy().into_owned(),
+            prefix_arg,
+        ];
+        assert_eq!(main_index(&index_args).0, 0);
+        assert!(l2b_load(format!("{}.l2b", prefix.to_string_lossy())).is_some());
+        assert!(mb_bwt_load(format!("{}.mbw", prefix.to_string_lossy())).is_some());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn raw2bwt_help_argument_stops_at_embedded_nul_like_strcmp() {
+        let args = vec!["raw2bwt".to_string(), "--help\0hidden".to_string()];
+        let (ret, out) = main_raw2bwt(&args);
+        assert_eq!(ret, 0);
+        assert!(out.starts_with("Usage: minibwa raw2bwt <raw.bwt> <recode.bwt>\n"));
     }
 }

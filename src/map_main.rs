@@ -7,15 +7,18 @@ use crate::bseq::{
 use crate::bwt::mb_sai_v;
 use crate::format::{mb_fmt_sam_hdr, mb_format};
 use crate::ketopt::{ketopt, ko_longopt_t, KETOPT_INIT};
-use crate::kommon::{kom_panic, kom_parse_num, kstring_t, KOM_NT4_TABLE};
+use crate::kommon::{
+    kom_atof, kom_panic, kom_parse_num, kom_percent_cpu, kom_realtime, kom_strtol, kstring_t,
+    KOM_NT4_TABLE,
+};
 use crate::l2bit::l2b_meth_t;
 use crate::main::MB_VERSION;
 use crate::map_algo::{
     mb_idx_load, mb_idx_t, mb_map_sai, mb_tbuf_destroy, mb_tbuf_init, mb_tbuf_reset, mb_tbuf_t,
 };
 use crate::mbpriv::{
-    KOM_DBG_FLAG, MB_DBG_ALN_PE, MB_DBG_ALN_SEQ, MB_DBG_ANCHOR, MB_DBG_AN_POS, MB_DBG_QNAME,
-    MB_DBG_SEED,
+    mb_cstr_prefix, KOM_DBG_FLAG, MB_DBG_ALN_PE, MB_DBG_ALN_SEQ, MB_DBG_ANCHOR, MB_DBG_AN_POS,
+    MB_DBG_QNAME, MB_DBG_SEED,
 };
 use crate::options::{
     mb_opt_adap, mb_opt_init, mb_opt_preset, mb_opt_t, MB_F_ADAP, MB_F_COPY_COMMENT, MB_F_EQX,
@@ -34,6 +37,22 @@ use std::{fs, io::BufWriter, io::Write};
 
 thread_local! {
     static MAIN_MAP_OUTPUT_WRITER: RefCell<Option<*mut dyn Write>> = RefCell::new(None);
+}
+
+fn c_strerror(errno: i32) -> String {
+    std::io::Error::from_raw_os_error(errno)
+        .to_string()
+        .trim_end_matches(&format!(" (os error {errno})"))
+        .to_string()
+}
+
+fn c_str(s: &str) -> &str {
+    let end = s.as_bytes().iter().position(|&c| c == 0).unwrap_or(s.len());
+    &s[..end]
+}
+
+fn c_str_eq(s: &str, expected: &str) -> bool {
+    c_str(s).as_bytes() == expected.as_bytes()
 }
 
 pub struct pipeline_t<'a, 'w, 'p> {
@@ -145,7 +164,7 @@ impl PePairOutputs {
         }
         let off = view.seg_off[frag] as usize;
         if (KOM_DBG_FLAG.load(Ordering::Relaxed) & MB_DBG_QNAME) != 0 {
-            eprintln!("QP\t{}\t{}", view.seq[off].name, tid);
+            eprintln!("QP\t{}\t{}", mb_cstr_prefix(&view.seq[off].name), tid);
         }
         let len = [view.seq[off].l_seq as i32, view.seq[off + 1].l_seq as i32];
         let seq = [&*view.seq[off].seq, &*view.seq[off + 1].seq];
@@ -368,7 +387,7 @@ fn worker_for_pe_collect(
     }
     let off = s.seg_off[frag] as usize;
     if (KOM_DBG_FLAG.load(Ordering::Relaxed) & MB_DBG_QNAME) != 0 {
-        eprintln!("QP\t{}\t{}", s.seq[off].name, tid);
+        eprintln!("QP\t{}\t{}", mb_cstr_prefix(&s.seq[off].name), tid);
     }
     let len = [s.seq[off].l_seq as i32, s.seq[off + 1].l_seq as i32];
     let seq = [&*s.seq[off].seq, &*s.seq[off + 1].seq];
@@ -398,7 +417,7 @@ pub fn worker_for_pe(s: &mut step_t<'_>, i: i64, tid: i32) {
     }
     let off = s.seg_off[frag] as usize;
     if (KOM_DBG_FLAG.load(Ordering::Relaxed) & MB_DBG_QNAME) != 0 {
-        eprintln!("QP\t{}\t{}", s.seq[off].name, tid);
+        eprintln!("QP\t{}\t{}", mb_cstr_prefix(&s.seq[off].name), tid);
     }
     let len = [s.seq[off].l_seq as i32, s.seq[off + 1].l_seq as i32];
     let seq = [&*s.seq[off].seq, &*s.seq[off + 1].seq];
@@ -714,8 +733,7 @@ pub fn worker_pipeline<'a, 'w, 'p>(
                     out.l = 0;
                 }
             } else {
-                p.output
-                    .push_str(std::str::from_utf8(&out.s[..out.l]).unwrap());
+                p.output.push_str(&String::from_utf8_lossy(&out.s[..out.l]));
             }
         }
         if out.l > 0 && p.output_writer.is_some() {
@@ -742,18 +760,39 @@ pub fn worker_pipeline<'a, 'w, 'p>(
 pub fn mb_open_bseqs(n: i32, fn_: &[&str]) -> Option<Vec<mb_bseq_file_t>> {
     let mut fp = Vec::with_capacity(n.max(0) as usize);
     for i in 0..n.max(0) as usize {
-        let Some(f) = mb_bseq_open(Some(fn_[i])) else {
-            let reason = std::fs::File::open(fn_[i])
+        let name = c_str(fn_[i]);
+        let Some(f) = mb_bseq_open(Some(name)) else {
+            let reason = std::fs::File::open(name)
                 .err()
                 .and_then(|e| e.raw_os_error())
-                .map(|code| std::io::Error::from_raw_os_error(code).to_string())
+                .map(c_strerror)
                 .unwrap_or_else(|| "Unknown error".to_string());
-            eprintln!("ERROR: failed to open file '{}': {}", fn_[i], reason);
+            eprintln!("ERROR: failed to open file '{}': {}", name, reason);
             return None;
         };
         fp.push(f);
     }
     Some(fp)
+}
+
+fn invalid_thread_count_fatal_like_c() -> ! {
+    #[cfg(unix)]
+    unsafe {
+        libc::strlen(std::ptr::null());
+        std::hint::unreachable_unchecked();
+    }
+    #[cfg(not(unix))]
+    panic!("invalid thread count reaches kt_pipeline like C");
+}
+
+fn missing_kalloc_arg_fatal_like_c() -> ! {
+    #[cfg(unix)]
+    unsafe {
+        libc::strcmp(std::ptr::null(), b"yes\0".as_ptr().cast());
+        std::hint::unreachable_unchecked();
+    }
+    #[cfg(not(unix))]
+    panic!("bare --kalloc passes NULL to strcmp like C");
 }
 
 /// Original C global function `mb_map_file` from `minibwa/map-main.c:248`.
@@ -789,6 +828,7 @@ pub fn mb_map_file_with_pool(
         return (-1, String::new());
     }
     let mut output_file = if let Some(name) = fn_out {
+        let name = c_str(name);
         if name != "-" {
             match fs::File::create(name) {
                 Ok(fp) => Some(BufWriter::with_capacity(1 << 20, fp)),
@@ -803,7 +843,11 @@ pub fn mb_map_file_with_pool(
     let Some(fp) = mb_open_bseqs(n, fn_) else {
         return (-1, String::new());
     };
-    let output_writer: Option<&mut dyn Write> = if fn_out.is_none() {
+    if opt.n_thread <= 0 {
+        invalid_thread_count_fatal_like_c();
+    }
+    let writes_to_stdout = fn_out.is_none() || fn_out.is_some_and(|name| c_str_eq(name, "-"));
+    let output_writer: Option<&mut dyn Write> = if writes_to_stdout {
         MAIN_MAP_OUTPUT_WRITER.with(|writer| {
             // SAFETY: main_map_write installs this pointer only for the
             // synchronous dynamic extent of its main_map call.
@@ -1063,10 +1107,10 @@ pub fn yes_or_no(
     yes_to_set: i32,
 ) -> Option<String> {
     if yes_to_set != 0 {
-        if arg == "yes" || arg == "y" {
+        if c_str_eq(arg, "yes") || c_str_eq(arg, "y") {
             opt.flag |= flag;
             None
-        } else if arg == "no" || arg == "n" {
+        } else if c_str_eq(arg, "no") || c_str_eq(arg, "n") {
             opt.flag &= !flag;
             None
         } else {
@@ -1075,10 +1119,10 @@ pub fn yes_or_no(
                 option_name
             ))
         }
-    } else if arg == "yes" || arg == "y" {
+    } else if c_str_eq(arg, "yes") || c_str_eq(arg, "y") {
         opt.flag &= !flag;
         None
-    } else if arg == "no" || arg == "n" {
+    } else if c_str_eq(arg, "no") || c_str_eq(arg, "n") {
         opt.flag |= flag;
         None
     } else {
@@ -1089,14 +1133,27 @@ pub fn yes_or_no(
     }
 }
 
+fn c_strtol_i32(s: &str) -> (i32, usize) {
+    let (value, used) = kom_strtol(s);
+    (value as i32, used)
+}
+
+fn c_atoi_i32(s: &str) -> i32 {
+    c_strtol_i32(s).0
+}
+
+fn c_atof_f32(s: &str) -> f32 {
+    kom_atof(s) as f32
+}
+
 /// Original C global function `main_map` from `minibwa/map-main.c:351`.
 pub fn main_map(argv: &[String]) -> (i32, String) {
     let has_output_writer = MAIN_MAP_OUTPUT_WRITER.with(|writer| writer.borrow().is_some());
-    let opt_str = "x:o:k:c:m:p:A:B:b:O:E:t:K:N:PyYR:aul:w:W:g:5s:";
+    let opt_str = "x:o:k:c:m:p:A:B:U:b:O:E:t:K:N:PyYR:aul:w:W:g:5s:";
     let long_options = [
         ko_longopt_t {
             name: Some("kalloc".into()),
-            has_arg: 1,
+            has_arg: 0,
             val: 301,
         },
         ko_longopt_t {
@@ -1206,7 +1263,7 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
                     1,
                     format!(
                         "[ERROR] unknown preset '{}'\n",
-                        o.arg.as_deref().unwrap_or("")
+                        c_str(o.arg.as_deref().unwrap_or(""))
                     ),
                 );
             }
@@ -1218,7 +1275,7 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
                 1,
                 format!(
                     "[ERROR] unknown option in \"{}\"\n",
-                    args.get(i).map(String::as_str).unwrap_or("")
+                    args.get(i).map(|s| c_str(s)).unwrap_or("")
                 ),
             );
         }
@@ -1233,19 +1290,21 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
         }
         let arg = o.arg.as_deref().unwrap_or("");
         if c == 'k' as i32 {
-            mo.min_len = arg.parse().unwrap_or(mo.min_len);
+            mo.min_len = c_atoi_i32(arg);
         } else if c == 'c' as i32 {
             mo.max_occ = kom_parse_num(arg).0 as i32;
         } else if c == 'p' as i32 {
-            mo.pri_ratio = arg.parse().unwrap_or(mo.pri_ratio);
+            mo.pri_ratio = c_atof_f32(arg);
         } else if c == 'm' as i32 {
-            mo.min_chain_score = arg.parse().unwrap_or(mo.min_chain_score);
+            mo.min_chain_score = c_atoi_i32(arg);
         } else if c == 'N' as i32 {
-            mo.best_n = arg.parse().unwrap_or(mo.best_n);
+            mo.best_n = c_atoi_i32(arg);
         } else if c == 'A' as i32 {
-            mo.a = arg.parse().unwrap_or(mo.a);
+            mo.a = c_atoi_i32(arg);
         } else if c == 'B' as i32 {
-            mo.b = arg.parse().unwrap_or(mo.b);
+            mo.b = c_atoi_i32(arg);
+        } else if c == 'U' as i32 {
+            mo.pen_unpair = c_atoi_i32(arg);
         } else if c == 'l' as i32 {
             mo.max_sr_len = kom_parse_num(arg).0 as i32;
         } else if c == 'g' as i32 {
@@ -1267,11 +1326,11 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
         } else if c == 'P' as i32 {
             mo.flag |= MB_F_NO_PAIRING;
         } else if c == 's' as i32 {
-            mo.min_dp_max = arg.parse().unwrap_or(mo.min_dp_max);
+            mo.min_dp_max = c_atoi_i32(arg);
         } else if c == 'o' as i32 {
             fn_out = Some(arg.to_string());
         } else if c == 't' as i32 {
-            mo.n_thread = arg.parse().unwrap_or(mo.n_thread);
+            mo.n_thread = c_atoi_i32(arg);
         } else if c == 'R' as i32 {
             rg_line = Some(arg.to_string());
         } else if c == 'K' as i32 {
@@ -1285,20 +1344,26 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
                 mo.max_mb_size = mo.mb_size;
             }
         } else if c == 'O' as i32 {
-            let mut it = arg.split(',');
-            mo.q = it.next().unwrap_or("").parse().unwrap_or(mo.q);
-            mo.q2 = it.next().unwrap_or("").parse().unwrap_or(mo.q);
+            let (q, used) = c_strtol_i32(arg);
+            mo.q = q;
+            mo.q2 = q;
+            if arg.as_bytes().get(used) == Some(&b',') {
+                mo.q2 = c_strtol_i32(&arg[used + 1..]).0;
+            }
         } else if c == 'E' as i32 {
-            let mut it = arg.split(',');
-            mo.e = it.next().unwrap_or("").parse().unwrap_or(mo.e);
-            mo.e2 = it.next().unwrap_or("").parse().unwrap_or(mo.e);
+            let (e, used) = c_strtol_i32(arg);
+            mo.e = e;
+            mo.e2 = e;
+            if arg.as_bytes().get(used) == Some(&b',') {
+                mo.e2 = c_strtol_i32(&arg[used + 1..]).0;
+            }
         } else if c == 'b' as i32 {
             mo.flag &= !(MB_F_WRITE_CS | MB_F_WRITE_DS | MB_F_WRITE_MD);
-            if arg == "cs" {
+            if c_str_eq(arg, "cs") {
                 mo.flag |= MB_F_WRITE_CS;
-            } else if arg == "ds" {
+            } else if c_str_eq(arg, "ds") {
                 mo.flag |= MB_F_WRITE_DS;
-            } else if arg == "MD" || arg == "md" {
+            } else if c_str_eq(arg, "MD") || c_str_eq(arg, "md") {
                 mo.flag |= MB_F_WRITE_MD;
             } else {
                 mo.flag |= MB_F_WRITE_CS;
@@ -1307,15 +1372,18 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
                     );
             }
         } else if c == 301 {
+            if o.arg.is_none() {
+                missing_kalloc_arg_fatal_like_c();
+            }
             if let Some(warning) = yes_or_no(&mut mo, MB_F_NO_KALLOC, "kalloc", arg, 0) {
                 eprint!("{warning}");
             }
         } else if c == 302 {
-            mo.out_n = arg.parse().unwrap_or(mo.out_n);
+            mo.out_n = c_atoi_i32(arg);
         } else if c == 303 {
             mo.flag |= MB_F_PE_PREDEF;
         } else if c == 304 {
-            mo.max_rescue = arg.parse().unwrap_or(mo.max_rescue);
+            mo.max_rescue = c_atoi_i32(arg);
         } else if c == 305 {
             mo.flag |= MB_F_EQX;
         } else if c == 306 {
@@ -1366,6 +1434,11 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
     let Some(idx) = mb_idx_load(&args[o.ind as usize], ((mo.flag & MB_F_METH) != 0) as i32) else {
         kom_panic("main_map", "failed to load the index.");
     };
+    eprintln!(
+        "[M::main_map::{:.3}*{:.2}] index loaded",
+        kom_realtime(),
+        kom_percent_cpu()
+    );
     let inputs = args[o.ind as usize + 1..]
         .iter()
         .map(String::as_str)
@@ -1397,14 +1470,15 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
                 return (-1, String::new());
             }
         } else {
-            out.push_str(std::str::from_utf8(&hdr.s[..hdr.l]).unwrap());
+            out.push_str(&String::from_utf8_lossy(&hdr.s[..hdr.l]));
         }
     }
-    let (ret, body) = mb_map_file(&mo, &idx, inputs.len() as i32, &inputs, fn_out.as_deref());
-    if fn_out.is_none() && !has_output_writer {
+    let writes_to_stdout = fn_out.as_deref().is_none_or(|name| c_str_eq(name, "-"));
+    let (_ret, body) = mb_map_file(&mo, &idx, inputs.len() as i32, &inputs, fn_out.as_deref());
+    if writes_to_stdout && !has_output_writer {
         out.push_str(&body);
     }
-    (ret, out)
+    (0, out)
 }
 
 pub fn main_map_write(argv: &[String], output_writer: &mut dyn Write) -> (i32, String) {
@@ -1443,6 +1517,36 @@ mod tests {
     }
 
     #[test]
+    fn mb_map_file_string_path_handles_raw_comment_bytes() {
+        let dir = std::env::temp_dir().join(format!(
+            "minibwa_rs_map_string_raw_comment_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reads = dir.join("reads.fa");
+        std::fs::write(
+            &reads,
+            b">raw cc:Z:\xff\nGATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT\n",
+        )
+        .unwrap();
+
+        let idx = mb_idx_load("minibwa/chrM-human", 0).expect("load index");
+        let mut opt = mb_opt_t::default();
+        mb_opt_init(&mut opt);
+        opt.flag |= MB_F_COPY_COMMENT;
+        let reads_s = reads.to_string_lossy().into_owned();
+
+        let result =
+            std::panic::catch_unwind(|| mb_map_file(&opt, &idx, 1, &[reads_s.as_str()], None));
+        assert!(result.is_ok());
+        let (ret, out) = result.unwrap();
+        assert_eq!(ret, 0);
+        assert!(out.contains("cc:Z:"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn yes_or_no_sets_clears_and_reports_bad_values() {
         let mut opt = mb_opt_t::default();
         assert_eq!(
@@ -1463,6 +1567,40 @@ mod tests {
         assert!(yes_or_no(&mut opt, MB_F_NO_ALN, "chain-only", "maybe", 1)
             .unwrap()
             .contains("only accepts 'yes' or 'no'"));
+    }
+
+    #[test]
+    fn option_string_values_stop_at_nul_like_strcmp() {
+        let mut opt = mb_opt_t::default();
+        assert_eq!(
+            yes_or_no(&mut opt, MB_F_NO_ALN, "chain-only", "yes\0hidden", 1),
+            None
+        );
+        assert_ne!(opt.flag & MB_F_NO_ALN, 0);
+        assert_eq!(
+            yes_or_no(&mut opt, MB_F_NO_ALN, "chain-only", "no\0hidden", 1),
+            None
+        );
+        assert_eq!(opt.flag & MB_F_NO_ALN, 0);
+
+        let (ret, out) = main_map(&["map".into(), "-x".into(), "bad\0hidden".into()]);
+        assert_eq!(ret, 1);
+        assert_eq!(out, "[ERROR] unknown preset 'bad'\n");
+
+        let (ret, out) = main_map(&["map".into(), "--definitely-not\0hidden".into()]);
+        assert_eq!(ret, 1);
+        assert_eq!(out, "[ERROR] unknown option in \"--definitely-not\"\n");
+    }
+
+    #[test]
+    fn numeric_helpers_follow_libc_boundaries() {
+        assert_eq!(c_strtol_i32("  -42xyz"), (-42, 5));
+        assert_eq!(c_strtol_i32("0x10"), (0, 1));
+        assert_eq!(c_strtol_i32("12\0hidden"), (12, 2));
+        assert_eq!(c_atof_f32("0x1.8p2tail"), 6.0);
+        assert!(c_atof_f32("inf").is_infinite());
+        assert!(c_atof_f32("nan").is_nan());
+        assert_eq!(c_atof_f32("0.25\0hidden"), 0.25);
     }
 
     #[test]
@@ -1489,6 +1627,136 @@ mod tests {
         assert_eq!(ret, 0);
         assert!(out.contains("r0\t"));
         assert!(out.contains("\tchrM\t"));
+        let _ = std::fs::remove_file(fq);
+    }
+
+    #[test]
+    fn map_file_input_path_stops_at_embedded_nul_like_c() {
+        let idx = mb_idx_load("minibwa/chrM-human", 0).expect("load index");
+        let mut opt = mb_opt_t::default();
+        mb_opt_init(&mut opt);
+        opt.flag |= MB_F_NO_ALN;
+        opt.mb_size = 1000;
+        opt.max_mb_size = 1000;
+        let mut fq = std::env::temp_dir();
+        fq.push(format!(
+            "minibwa_rs_map_file_nul_path_{}_{}.fq",
+            std::process::id(),
+            crate::kommon::kom_realtime().to_bits()
+        ));
+        std::fs::write(
+                &fq,
+                b"@r0\nGATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT\n+\nFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\n",
+            )
+            .unwrap();
+        let path = fq.to_string_lossy().into_owned() + "\0hidden";
+        let (ret, out) = mb_map_file(&opt, &idx, 1, &[path.as_str()], None);
+        assert_eq!(ret, 0);
+        assert!(out.contains("r0\t"));
+        assert!(out.contains("\tchrM\t"));
+        let _ = std::fs::remove_file(fq);
+    }
+
+    #[test]
+    fn main_map_dash_o_dash_returns_stdout_like_c() {
+        let mut fq = std::env::temp_dir();
+        fq.push(format!(
+            "minibwa_rs_main_map_dash_stdout_{}_{}.fq",
+            std::process::id(),
+            crate::kommon::kom_realtime().to_bits()
+        ));
+        std::fs::write(
+                &fq,
+                b"@r0\nGATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT\n+\nFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\n",
+            )
+            .unwrap();
+        let path = fq.to_string_lossy().into_owned();
+        let base_args = vec![
+            "map".to_string(),
+            "--chain-only".to_string(),
+            "minibwa/chrM-human".to_string(),
+            path.clone(),
+        ];
+        let dash_args = vec![
+            "map".to_string(),
+            "--chain-only".to_string(),
+            "-o".to_string(),
+            "-".to_string(),
+            "minibwa/chrM-human".to_string(),
+            path,
+        ];
+        let (base_ret, base_out) = main_map(&base_args);
+        let (dash_ret, dash_out) = main_map(&dash_args);
+        assert_eq!(base_ret, 0);
+        assert_eq!(dash_ret, 0);
+        assert_eq!(dash_out, base_out);
+        assert!(dash_out.contains("r0\t"));
+        let _ = std::fs::remove_file(fq);
+    }
+
+    #[test]
+    fn main_map_dash_o_nul_suffix_returns_stdout_like_c() {
+        let mut fq = std::env::temp_dir();
+        fq.push(format!(
+            "minibwa_rs_main_map_dash_nul_stdout_{}_{}.fq",
+            std::process::id(),
+            crate::kommon::kom_realtime().to_bits()
+        ));
+        std::fs::write(
+                &fq,
+                b"@r0\nGATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT\n+\nFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\n",
+            )
+            .unwrap();
+        let path = fq.to_string_lossy().into_owned();
+        let base_args = vec![
+            "map".to_string(),
+            "--chain-only".to_string(),
+            "minibwa/chrM-human".to_string(),
+            path.clone(),
+        ];
+        let dash_args = vec![
+            "map".to_string(),
+            "--chain-only".to_string(),
+            "-o".to_string(),
+            "-\0hidden".to_string(),
+            "minibwa/chrM-human".to_string(),
+            path,
+        ];
+        let (base_ret, base_out) = main_map(&base_args);
+        let (dash_ret, dash_out) = main_map(&dash_args);
+        assert_eq!(base_ret, 0);
+        assert_eq!(dash_ret, 0);
+        assert_eq!(dash_out, base_out);
+        assert!(dash_out.contains("r0\t"));
+        let _ = std::fs::remove_file(fq);
+    }
+
+    #[test]
+    fn main_map_write_dash_o_dash_uses_writer_like_stdout() {
+        let mut fq = std::env::temp_dir();
+        fq.push(format!(
+            "minibwa_rs_main_map_write_dash_stdout_{}_{}.fq",
+            std::process::id(),
+            crate::kommon::kom_realtime().to_bits()
+        ));
+        std::fs::write(
+                &fq,
+                b"@r0\nGATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT\n+\nFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\n",
+            )
+            .unwrap();
+        let args = vec![
+            "map".to_string(),
+            "--chain-only".to_string(),
+            "-o".to_string(),
+            "-".to_string(),
+            "minibwa/chrM-human".to_string(),
+            fq.to_string_lossy().into_owned(),
+        ];
+        let mut written = Vec::new();
+        let (ret, returned) = main_map_write(&args, &mut written);
+        assert_eq!(ret, 0);
+        assert!(returned.is_empty());
+        assert!(String::from_utf8_lossy(&written).contains("r0\t"));
         let _ = std::fs::remove_file(fq);
     }
 

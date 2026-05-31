@@ -115,6 +115,12 @@ pub fn mb_opt_init(opt: &mut mb_opt_t) {
 /// Original C global function `mb_opt_preset` from `minibwa/options.c:52`.
 pub fn mb_opt_preset(opt: &mut mb_opt_t, preset: &str) -> i32 {
     mb_opt_reset(opt);
+    let preset = preset
+        .as_bytes()
+        .iter()
+        .position(|&c| c == 0)
+        .map(|end| &preset[..end])
+        .unwrap_or(preset);
     if preset == "sr" || preset == "adap" {
         opt.flag |= MB_F_PE;
         if preset == "adap" {
@@ -226,6 +232,16 @@ mod tests {
         assert_eq!(opt.best_n, 5);
         assert_eq!(opt.end_bonus, -1);
         assert_eq!(opt.mb_size, 500000000);
+    }
+
+    #[test]
+    fn preset_names_stop_at_embedded_nul_like_strcmp() {
+        let mut opt = mb_opt_t::default();
+        assert_eq!(mb_opt_preset(&mut opt, "lr\0hidden"), 0);
+        assert_ne!(opt.flag & MB_F_LONG, 0);
+        assert_eq!(mb_opt_preset(&mut opt, "adap\0hidden"), 0);
+        assert_ne!(opt.flag & MB_F_ADAP, 0);
+        assert_eq!(mb_opt_preset(&mut opt, "bad\0lr"), -1);
     }
 
     #[test]

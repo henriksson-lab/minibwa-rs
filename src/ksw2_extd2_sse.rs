@@ -395,6 +395,7 @@ pub fn ksw_extd2_sse(
     };
     let mut h0 = 0i32;
     let mut last_h0_t = 0i32;
+    let mut last_max_h = 0i32;
     let mut last_st = -1i32;
     let mut last_en = -1i32;
     let wl = w;
@@ -466,7 +467,7 @@ pub fn ksw_extd2_sse(
             while score_t <= en0 {
                 let t_usize = score_t as usize;
                 let q_usize = (qr_off as i32 + qlen as i32 - 1 - r_i32 + score_t) as usize;
-                #[cfg(any())]
+                #[cfg(target_arch = "x86_64")]
                 unsafe {
                     let sq = loadu128_u8(&sf_qr, t_usize);
                     let stq = loadu128_u8(&sf_qr, q_usize);
@@ -478,7 +479,7 @@ pub fn ksw_extd2_sse(
                     score = blendv_epi8_native(score, sc_n_v_n, wild);
                     storeu128_u8(&mut s, t_usize, score);
                 }
-                #[cfg(not(any()))]
+                #[cfg(not(target_arch = "x86_64"))]
                 {
                     let sq = unsafe { load16_at(&sf_qr, t_usize) };
                     let stq = unsafe { load16_at(&sf_qr, q_usize) };
@@ -512,7 +513,7 @@ pub fn ksw_extd2_sse(
         let mut v1_lane = v1;
         for block in st_block..=en_block {
             let base = block as usize * 16;
-            #[cfg(any())]
+            #[cfg(target_arch = "x86_64")]
             unsafe {
                 let old_x = loadu128_u8(&x, base);
                 let old_y = loadu128_u8(&y, base);
@@ -988,6 +989,22 @@ pub fn ksw_extd2_sse(
             if r == qlen + tlen - 2 && en0 == tlen as i32 - 1 {
                 ez.score = unsafe { *h_ptr.add(tlen - 1) };
             }
+            if (flag & KSW_EZ_EXTZ_ONLY) != 0 {
+                let r_h = last_max_h.max(max_h_mut);
+                let rq = qlen as i32 - (r_i32 - st0);
+                let rt = tlen as i32 - en0;
+                let rm = if rq >= tlen as i32 - st0 {
+                    tlen as i32 - st0
+                } else if rt >= qlen as i32 - (r_i32 - en0) {
+                    qlen as i32 - (r_i32 - en0)
+                } else {
+                    tlen as i32 + qlen as i32 - 1 - r_i32
+                };
+                if r_h + rm * max_sc + end_bonus < ez.max as i32 {
+                    break;
+                }
+            }
+            last_max_h = max_h_mut;
         } else {
             if r > 0 {
                 if last_h0_t >= st0 && last_h0_t <= en0 && last_h0_t + 1 >= st0 && last_h0_t < en0 {

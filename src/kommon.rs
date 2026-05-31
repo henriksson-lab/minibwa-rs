@@ -47,6 +47,22 @@ const fn make_kom_nt4_table() -> [u8; 256] {
 
 pub const KOM_NT4_TABLE: [u8; 256] = make_kom_nt4_table();
 
+pub const KOM_COMP_TABLE: [u8; 256] = [
+    3, 2, 1, 0, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+    50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 84, 86, 71, 72, 69, 70, 67, 68, 73,
+    74, 77, 76, 75, 78, 79, 80, 81, 89, 83, 65, 65, 66, 87, 88, 82, 90, 91, 92, 93, 94, 95, 96,
+    116, 118, 103, 104, 101, 102, 99, 100, 105, 106, 109, 108, 107, 110, 111, 112, 113, 121, 115,
+    97, 97, 98, 119, 120, 114, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134,
+    135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153,
+    154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172,
+    173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191,
+    192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210,
+    211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229,
+    230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248,
+    249, 250, 251, 252, 253, 254, 255,
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum kom_sprintf_arg<'a> {
     d(i32),
@@ -58,7 +74,12 @@ pub enum kom_sprintf_arg<'a> {
 
 /// Original C global function `kom_strdup` from `minibwa/kommon.c:9`.
 pub fn kom_strdup(src: &str) -> String {
-    src.to_string()
+    let end = src
+        .as_bytes()
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(src.len());
+    src[..end].to_string()
 }
 
 /// Original C global function `kom_parse_num` from `minibwa/kommon.c:19`.
@@ -83,50 +104,46 @@ pub fn kom_parse_num(str_: &str) -> (i64, usize) {
 
 fn parse_c_float_prefix(s: &str) -> (f64, usize) {
     let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-        i += 1;
-    }
-    let start = i;
-    if i < bytes.len() && matches!(bytes[i], b'+' | b'-') {
-        i += 1;
-    }
+    let nul = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
+    let mut c_buf = Vec::with_capacity(nul + 1);
+    c_buf.extend_from_slice(&bytes[..nul]);
+    c_buf.push(0);
+    let mut end: *mut libc::c_char = std::ptr::null_mut();
+    let x = unsafe { libc::strtod(c_buf.as_ptr() as *const libc::c_char, &mut end) };
+    let consumed = if end.is_null() {
+        0
+    } else {
+        unsafe { end.offset_from(c_buf.as_ptr() as *const libc::c_char) as usize }
+    };
+    (x, consumed)
+}
 
-    let digits_start = i;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-    }
-    let mut saw_digit = i > digits_start;
+pub fn kom_strtol(str_: &str) -> (i64, usize) {
+    let bytes = str_.as_bytes();
+    let nul = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
+    let mut c_buf = Vec::with_capacity(nul + 1);
+    c_buf.extend_from_slice(&bytes[..nul]);
+    c_buf.push(0);
+    let mut end: *mut libc::c_char = std::ptr::null_mut();
+    let x = unsafe { libc::strtol(c_buf.as_ptr() as *const libc::c_char, &mut end, 10) };
+    let consumed = if end.is_null() {
+        0
+    } else {
+        unsafe { end.offset_from(c_buf.as_ptr() as *const libc::c_char) as usize }
+    };
+    (x as i64, consumed)
+}
 
-    if i < bytes.len() && bytes[i] == b'.' {
-        i += 1;
-        let frac_start = i;
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            i += 1;
-        }
-        saw_digit |= i > frac_start;
-    }
+pub fn kom_atoi(str_: &str) -> i32 {
+    kom_strtol(str_).0 as i32
+}
 
-    if !saw_digit {
-        return (0.0, 0);
-    }
+pub fn kom_atol(str_: &str) -> i64 {
+    kom_strtol(str_).0
+}
 
-    if i < bytes.len() && matches!(bytes[i], b'e' | b'E') {
-        let exp_mark = i;
-        i += 1;
-        if i < bytes.len() && matches!(bytes[i], b'+' | b'-') {
-            i += 1;
-        }
-        let exp_start = i;
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            i += 1;
-        }
-        if i == exp_start {
-            i = exp_mark;
-        }
-    }
-
-    (s[start..i].parse::<f64>().unwrap_or(0.0), i)
+pub fn kom_atof(str_: &str) -> f64 {
+    parse_c_float_prefix(str_).0
 }
 
 /// Original C global function `kom_panic` from `minibwa/kommon.c:31`.
@@ -177,7 +194,12 @@ pub fn kom_sprintf_lite_core(
     ap: &[kom_sprintf_arg<'_>],
 ) -> i64 {
     let mut len = 0i64;
-    let bytes = fmt.as_bytes();
+    let fmt_bytes = fmt.as_bytes();
+    let fmt_end = fmt_bytes
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(fmt_bytes.len());
+    let bytes = &fmt_bytes[..fmt_end];
     let mut p = 0usize;
     let mut q = 0usize;
     let mut ai = 0usize;
@@ -218,14 +240,27 @@ pub fn kom_sprintf_lite_core(
                     _ => panic!("kom_sprintf_lite_core: expected %s argument"),
                 };
                 ai += 1;
-                v.to_string()
+                let end = v.as_bytes().iter().position(|&c| c == 0).unwrap_or(v.len());
+                v[..end].to_string()
             } else if p < bytes.len() && bytes[p] == b'c' {
                 let v = match ap[ai] {
                     kom_sprintf_arg::c(v) => v as u8,
                     _ => panic!("kom_sprintf_lite_core: expected %c argument"),
                 };
                 ai += 1;
-                String::from_utf8(vec![v]).unwrap()
+                len += 1;
+                if let Some(ref mut out) = s {
+                    str_enlarge(km, out, 1);
+                    if out.s.len() <= out.l {
+                        out.s.resize(out.l + 1, 0);
+                        out.m = out.s.len();
+                    }
+                    out.s[out.l] = v;
+                    out.l += 1;
+                }
+                q = p + 1;
+                p += 1;
+                continue;
             } else {
                 let ch = if p < bytes.len() {
                     bytes[p] as char
@@ -275,21 +310,6 @@ pub fn km_sprintf_lite(km: (), s: &mut kstring_t, fmt: &str, ap: &[kom_sprintf_a
 
 /// Original C global function `kom_revcomp` from `minibwa/kommon.c:198`.
 pub fn kom_revcomp(len: u64, seq: &mut [u8]) {
-    const KOM_COMP_TABLE: [u8; 256] = [
-        3, 2, 1, 0, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-        25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
-        48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 84, 86, 71, 72, 69, 70,
-        67, 68, 73, 74, 77, 76, 75, 78, 79, 80, 81, 89, 83, 65, 65, 66, 87, 88, 82, 90, 91, 92, 93,
-        94, 95, 96, 116, 118, 103, 104, 101, 102, 99, 100, 105, 106, 109, 108, 107, 110, 111, 112,
-        113, 121, 115, 97, 97, 98, 119, 120, 114, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131,
-        132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149,
-        150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167,
-        168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185,
-        186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203,
-        204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221,
-        222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239,
-        240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255,
-    ];
     for i in 0..(len >> 1) as usize {
         let t = seq[len as usize - i - 1];
         seq[len as usize - i - 1] = KOM_COMP_TABLE[seq[i] as usize];
@@ -397,6 +417,47 @@ mod tests {
         assert_eq!(kom_parse_num("17"), (17, 2));
         assert_eq!(kom_parse_num("  .5k"), (500, 5));
         assert_eq!(kom_parse_num("abc"), (0, 0));
+    }
+
+    #[test]
+    fn numeric_helpers_use_c_strtod_prefixes() {
+        assert_eq!(kom_parse_num("0x1p4K rest"), (16000, 6));
+        assert_eq!(kom_parse_num("0x1.8p2M"), (6000000, 8));
+        assert_eq!(kom_atof("0x1.8p2tail"), 6.0);
+    }
+
+    #[test]
+    fn integer_helpers_use_c_strtol_boundaries_and_overflow() {
+        let neg = "-999999999999999999999999999999999999999tail";
+        assert_eq!(kom_strtol("  -42xyz"), (-42, 5));
+        assert_eq!(kom_atol("17\0hidden"), 17);
+        assert_eq!(kom_strtol("abc"), (0, 0));
+        assert_eq!(kom_atol(neg), libc::c_long::MIN as i64);
+        assert_eq!(kom_atoi("4294967297"), 1);
+    }
+
+    #[test]
+    fn c_string_helpers_stop_at_embedded_nul() {
+        assert_eq!(kom_strdup("abc\0def"), "abc");
+
+        let mut s = kstring_t::default();
+        let len = kom_sprintf_lite(&mut s, "%s", &[kom_sprintf_arg::s("read\0tail")]);
+        assert_eq!(len, 4);
+        assert_eq!(&s.s[..s.l], b"read");
+        assert_eq!(s.s[s.l], 0);
+    }
+
+    #[test]
+    fn sprintf_lite_format_string_stops_at_embedded_nul() {
+        let mut s = kstring_t::default();
+        let len = kom_sprintf_lite(
+            &mut s,
+            "pre:%d\0post:%d",
+            &[kom_sprintf_arg::d(7), kom_sprintf_arg::d(9)],
+        );
+        assert_eq!(len, 5);
+        assert_eq!(&s.s[..s.l], b"pre:7");
+        assert_eq!(s.s[s.l], 0);
     }
 
     #[test]

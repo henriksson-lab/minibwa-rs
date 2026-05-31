@@ -469,8 +469,8 @@ pub fn mb_lchain_dp(
         km, n, &f, &p, &mut v, &mut t, min_sc, max_drop, &mut n_u, &mut n_v,
     );
     *n_u_ = n_u;
-    *_u = u.clone();
     if n_u == 0 {
+        *_u = u;
         return Vec::new();
     }
     let b = compact_a(km, l2b, n_u, &mut u, n_v, v, a);

@@ -48,7 +48,7 @@ fn ksw_helpers_original_c_conformance_harness() {
         let parts = line.split_whitespace().collect::<Vec<_>>();
         match parts.first().copied() {
             Some("mat") => {
-                assert_eq!(parts.len(), 31, "bad mat line: {line}");
+                assert_eq!(parts.len(), 32, "bad mat line: {line}");
                 let mut mat = [0i8; 25];
                 ksw_gen_nt4_mat(
                     &mut mat,
@@ -56,8 +56,9 @@ fn ksw_helpers_original_c_conformance_harness() {
                     parts[3].parse::<i32>().expect("mismatch field") as i8,
                     parts[4].parse::<i32>().expect("ambiguous field") as i8,
                     parts[5].parse::<i32>().expect("wildcard field") as i8,
+                    parts[6].parse::<i32>().expect("methylation field"),
                 );
-                let expected = parts[6..]
+                let expected = parts[7..]
                     .iter()
                     .map(|s| s.parse::<i32>().expect("mat field") as i8)
                     .collect::<Vec<_>>();

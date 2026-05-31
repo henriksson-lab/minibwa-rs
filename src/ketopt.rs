@@ -38,6 +38,10 @@ pub static KETOPT_INIT: ketopt_t = ketopt_t {
     n_args: 0,
 };
 
+fn c_strlen_bytes(s: &str) -> usize {
+    s.as_bytes().iter().position(|&c| c == 0).unwrap_or(s.len())
+}
+
 /// Original C static function `ketopt_permute` from `minibwa/ketopt.h:27`.
 pub fn ketopt_permute(argv: &mut [String], j: i32, n: i32) {
     let mut k = 0;
@@ -100,7 +104,8 @@ pub fn ketopt(
         return -1;
     }
     let cur = argv[s.i as usize].clone();
-    let cur_b = cur.as_bytes();
+    let cur_len = c_strlen_bytes(&cur);
+    let cur_b = &cur.as_bytes()[..cur_len];
     if cur_b.first() != Some(&b'-') || cur_b.get(1).is_none() {
         s.ind = s.i - s.n_args;
         return -1;
@@ -129,8 +134,10 @@ pub fn ketopt(
                 let Some(name) = &o.name else {
                     break;
                 };
-                if name.starts_with(query) {
-                    if name.len() == query.len() {
+                let name_len = c_strlen_bytes(name);
+                let name_c = &name.as_bytes()[..name_len];
+                if name_c.starts_with(query.as_bytes()) {
+                    if name_len == query.len() {
                         n_exact += 1;
                         exact_idx = k;
                     } else {
@@ -156,12 +163,13 @@ pub fn ketopt(
                 opt = o.val;
                 s.longidx = o_idx as i32;
                 if j < cur_b.len() && cur_b[j] == b'=' {
-                    s.arg = Some(cur[j + 1..].to_string());
+                    s.arg = Some(cur[j + 1..cur_len].to_string());
                 }
                 if o.has_arg == ko_required_argument && j == cur_b.len() {
                     if s.i < argc - 1 {
                         s.i += 1;
-                        s.arg = Some(argv[s.i as usize].clone());
+                        let arg_len = c_strlen_bytes(&argv[s.i as usize]);
+                        s.arg = Some(argv[s.i as usize][..arg_len].to_string());
                     } else {
                         opt = ':' as i32;
                     }
@@ -176,17 +184,20 @@ pub fn ketopt(
         opt = cur_b[pos] as i32;
         s.opt = opt;
         s.pos += 1;
-        if let Some(p) = ostr.as_bytes().iter().position(|&c| c as i32 == opt) {
-            if ostr.as_bytes().get(p + 1) == Some(&b':') {
+        let ostr_len = c_strlen_bytes(ostr);
+        let ostr_b = &ostr.as_bytes()[..ostr_len];
+        if let Some(p) = ostr_b.iter().position(|&c| c as i32 == opt) {
+            if ostr_b.get(p + 1) == Some(&b':') {
                 if s.pos as usize >= cur_b.len() {
                     if s.i < argc - 1 {
                         s.i += 1;
-                        s.arg = Some(argv[s.i as usize].clone());
+                        let arg_len = c_strlen_bytes(&argv[s.i as usize]);
+                        s.arg = Some(argv[s.i as usize][..arg_len].to_string());
                     } else {
                         opt = ':' as i32;
                     }
                 } else {
-                    s.arg = Some(cur[s.pos as usize..].to_string());
+                    s.arg = Some(cur[s.pos as usize..cur_len].to_string());
                 }
                 s.pos = -1;
             }
@@ -194,7 +205,8 @@ pub fn ketopt(
             opt = '?' as i32;
         }
     }
-    if s.pos < 0 || s.pos as usize >= argv[s.i as usize].len() {
+    let active_len = c_strlen_bytes(&argv[s.i as usize]);
+    if s.pos < 0 || s.pos as usize >= active_len {
         s.i += 1;
         s.pos = 0;
         if s.n_args > 0 {
@@ -273,5 +285,43 @@ mod tests {
             ketopt(&mut st, 4, &mut argv, 0, "", Some(&longopts)),
             '?' as i32
         );
+    }
+
+    #[test]
+    fn ketopt_treats_argv_and_option_tables_as_c_strings() {
+        let longopts = vec![
+            ko_longopt_t {
+                name: Some("threads\0tail".to_string()),
+                has_arg: ko_required_argument,
+                val: 't' as i32,
+            },
+            ko_longopt_t {
+                name: None,
+                has_arg: 0,
+                val: 0,
+            },
+        ];
+        let mut argv = vec![
+            "prog".to_string(),
+            "-a\0b".to_string(),
+            "--threads=8\0tail".to_string(),
+            "--\0not-long".to_string(),
+            "tail".to_string(),
+        ];
+        let mut st = KETOPT_INIT.clone();
+        assert_eq!(
+            ketopt(&mut st, 5, &mut argv, 0, "a\0b:", Some(&longopts)),
+            'a' as i32
+        );
+        assert_eq!(
+            ketopt(&mut st, 5, &mut argv, 0, "a\0b:", Some(&longopts)),
+            't' as i32
+        );
+        assert_eq!(st.arg.as_deref(), Some("8"));
+        assert_eq!(
+            ketopt(&mut st, 5, &mut argv, 0, "a\0b:", Some(&longopts)),
+            -1
+        );
+        assert_eq!(st.ind, 4);
     }
 }

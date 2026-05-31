@@ -102,7 +102,7 @@ pub fn ksw_backtrack(
 ) {
     let mut n_cigar = 0;
     let mut m_cigar = *m_cigar_;
-    let mut cigar = cigar_.clone();
+    let cigar = cigar_;
     let mut i = i0;
     let mut j = j0;
     let mut state = 0i32;
@@ -150,31 +150,17 @@ pub fn ksw_backtrack(
             state = force_state;
         }
         if state == 0 {
-            ksw_push_cigar(
-                km,
-                &mut n_cigar,
-                &mut m_cigar,
-                &mut cigar,
-                KSW_CIGAR_MATCH,
-                1,
-            );
+            ksw_push_cigar(km, &mut n_cigar, &mut m_cigar, cigar, KSW_CIGAR_MATCH, 1);
             i -= 1;
             j -= 1;
         } else if state == 1 || (state == 3 && min_intron_len <= 0) {
-            ksw_push_cigar(km, &mut n_cigar, &mut m_cigar, &mut cigar, KSW_CIGAR_DEL, 1);
+            ksw_push_cigar(km, &mut n_cigar, &mut m_cigar, cigar, KSW_CIGAR_DEL, 1);
             i -= 1;
         } else if state == 3 && min_intron_len > 0 {
-            ksw_push_cigar(
-                km,
-                &mut n_cigar,
-                &mut m_cigar,
-                &mut cigar,
-                KSW_CIGAR_N_SKIP,
-                1,
-            );
+            ksw_push_cigar(km, &mut n_cigar, &mut m_cigar, cigar, KSW_CIGAR_N_SKIP, 1);
             i -= 1;
         } else {
-            ksw_push_cigar(km, &mut n_cigar, &mut m_cigar, &mut cigar, KSW_CIGAR_INS, 1);
+            ksw_push_cigar(km, &mut n_cigar, &mut m_cigar, cigar, KSW_CIGAR_INS, 1);
             j -= 1;
         }
     }
@@ -184,24 +170,17 @@ pub fn ksw_backtrack(
         } else {
             KSW_CIGAR_DEL
         };
-        ksw_push_cigar(km, &mut n_cigar, &mut m_cigar, &mut cigar, op, i + 1);
+        ksw_push_cigar(km, &mut n_cigar, &mut m_cigar, cigar, op, i + 1);
     }
     if j >= 0 {
-        ksw_push_cigar(
-            km,
-            &mut n_cigar,
-            &mut m_cigar,
-            &mut cigar,
-            KSW_CIGAR_INS,
-            j + 1,
-        );
+        ksw_push_cigar(km, &mut n_cigar, &mut m_cigar, cigar, KSW_CIGAR_INS, j + 1);
     }
     if is_rev == 0 {
         cigar[..n_cigar as usize].reverse();
     }
+    cigar.truncate(n_cigar as usize);
     *m_cigar_ = m_cigar;
     *n_cigar_ = n_cigar;
-    *cigar_ = cigar;
 }
 
 /// Original C static function `ksw_reset_extz` from `minibwa/ksw2.h:174`.
@@ -247,8 +226,8 @@ pub fn ksw_apply_zdrop(
 }
 
 /// Original C static function `ksw_gen_nt4_mat` from `minibwa/ksw2.h:199`.
-pub fn ksw_gen_nt4_mat(mat: &mut [i8; 25], a: i8, b: i8, b_ts: i8, b_ambi: i8) {
-    let a = a.abs();
+pub fn ksw_gen_nt4_mat(mat: &mut [i8; 25], a: i8, b: i8, b_ts: i8, b_ambi: i8, mt: i32) {
+    let a = if a < 0 { a.wrapping_neg() } else { a };
     let b = if b > 0 { -b } else { b };
     let b_ambi = if b_ambi > 0 { -b_ambi } else { b_ambi };
     for i in 0..4usize {
@@ -260,14 +239,18 @@ pub fn ksw_gen_nt4_mat(mat: &mut [i8; 25], a: i8, b: i8, b_ts: i8, b_ambi: i8) {
     for j in 0..5usize {
         mat[4 * 5 + j] = b_ambi;
     }
-    if b_ts == 0 || b_ts == b {
-        return;
+    if b_ts != 0 && b_ts != b {
+        let b_ts = if b_ts > 0 { -b_ts } else { b_ts };
+        mat[2] = b_ts;
+        mat[8] = b_ts;
+        mat[10] = b_ts;
+        mat[16] = b_ts;
     }
-    let b_ts = if b_ts > 0 { -b_ts } else { b_ts };
-    mat[2] = b_ts;
-    mat[8] = b_ts;
-    mat[10] = b_ts;
-    mat[16] = b_ts;
+    if mt == 1 {
+        mat[1 * 5 + 3] = a;
+    } else if mt == 2 {
+        mat[2 * 5] = a;
+    }
 }
 
 #[cfg(test)]
@@ -319,12 +302,20 @@ mod tests {
         assert_eq!(ksw_apply_zdrop(&mut ez, 0, 0, 8, 8, 5, 2), 1);
 
         let mut mat = [0i8; 25];
-        ksw_gen_nt4_mat(&mut mat, 2, 4, 1, 3);
+        ksw_gen_nt4_mat(&mut mat, 2, 4, 1, 3, 0);
         assert_eq!(mat[0], 2);
         assert_eq!(mat[1], -4);
         assert_eq!(mat[2], -1);
         assert_eq!(mat[4], -3);
         assert_eq!(mat[24], -3);
+
+        ksw_gen_nt4_mat(&mut mat, 2, 4, 1, 3, 1);
+        assert_eq!(mat[1 * 5 + 3], 2);
+        ksw_gen_nt4_mat(&mut mat, 2, 4, 1, 3, 2);
+        assert_eq!(mat[2 * 5], 2);
+
+        ksw_gen_nt4_mat(&mut mat, -128, 4, 1, 3, 0);
+        assert_eq!(mat[0], -128);
     }
 
     #[test]

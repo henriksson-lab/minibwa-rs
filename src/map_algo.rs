@@ -3,13 +3,15 @@
 use crate::align::mb_align_skeleton_with_scratch;
 use crate::bwt::mb_sai_v;
 use crate::bwt::{mb_bwt_cache, mb_bwt_load, mb_bwt_t, mb_sai_t};
+use crate::kommon::KOM_NT4_TABLE;
 use crate::l2bit::{l2b_load, l2b_meth_t, l2b_t};
 use crate::lchain::{mb_anchor_t, mb_lchain_dp};
 use crate::mbpriv::{
-    mb_hash64, mb_hash_str, mb_is_sr_mode, KOM_DBG_FLAG, MB_DBG_ANCHOR, MB_DBG_QNAME, MB_DBG_SEED,
+    mb_cstr_prefix, mb_hash64, mb_hash_str, mb_is_sr_mode, KOM_DBG_FLAG, MB_DBG_ANCHOR,
+    MB_DBG_QNAME, MB_DBG_SEED,
 };
 use crate::options::{mb_opt_adap, mb_opt_t, MB_F_METH, MB_F_NO_ALN, MB_F_PE, MB_F_PRIMARY5};
-use crate::pe::mb_hit_t;
+use crate::pe::{mb_hit_t, mb_pair, mb_pestat_t};
 use crate::seed::{
     mb_anchor_sort, mb_anchor_v, mb_anchor_with_scratch, mb_seed_intv, mb_seed_intv_batch,
 };
@@ -44,8 +46,14 @@ pub struct mb_tbuf_s {
 }
 pub type mb_tbuf_t = mb_tbuf_s;
 
+fn c_str(s: &str) -> &str {
+    let end = s.as_bytes().iter().position(|&c| c == 0).unwrap_or(s.len());
+    &s[..end]
+}
+
 /// Original C global function `mb_idx_load` from `minibwa/map-algo.c:19`.
 pub fn mb_idx_load(prefix: &str, is_meth: i32) -> Option<mb_idx_t> {
+    let prefix = c_str(prefix);
     let t0 = std::env::var_os("MINIBWA_RS_LOAD_TIMING").map(|_| std::time::Instant::now());
     let l2b = l2b_load(format!("{prefix}.l2b"))?;
     let t_l2b = t0.map(|t0| {
@@ -240,8 +248,16 @@ pub fn mb_sync_high_cov(n: i32, h: &mut [mb_hit_t]) {
 mod tests {
     use super::*;
     use crate::l2bit::{l2b_ctg_t, l2b_t};
-    use crate::options::{mb_opt_init, mb_opt_t, MB_F_NO_ALN};
+    use crate::options::{mb_opt_init, mb_opt_t, MB_F_NO_ALN, MB_F_PE};
     use crate::pe::mb_extra_t;
+
+    #[test]
+    fn debug_qname_helpers_use_c_string_boundaries() {
+        assert_eq!(dbg_qname_or_star(Some("read\0hidden")), "read");
+        assert_eq!(dbg_qname_or_star(None), "*");
+        assert_eq!(dbg_qname_printf(Some("read\0hidden")), "read");
+        assert_eq!(dbg_qname_printf(None), "(null)");
+    }
 
     #[test]
     fn idx_load_reads_real_chrm_index() {
@@ -252,6 +268,14 @@ mod tests {
         assert_eq!(mb_idx_ctg_name(&idx, 1), None);
         assert_eq!(mb_idx_ctg_len(&idx, -1), -1);
         assert_eq!(idx.bwt.pre_len, 10);
+    }
+
+    #[test]
+    fn idx_load_prefix_stops_at_embedded_nul_like_c() {
+        let idx = mb_idx_load("minibwa/chrM-human\0hidden", 0).expect("load index");
+        assert_eq!(idx.is_meth, 0);
+        assert_eq!(mb_idx_ctg_name(&idx, 0), Some("chrM"));
+        assert_eq!(mb_idx_ctg_len(&idx, 0), 16569);
     }
 
     #[test]
@@ -284,6 +308,7 @@ mod tests {
         let mut opt = mb_opt_t::default();
         mb_opt_init(&mut opt);
         opt.flag |= MB_F_NO_ALN;
+        opt.flag &= !MB_F_PE;
         opt.sb_seq = 2;
         opt.sb_len = 1000;
         let seqs = [
@@ -1398,6 +1423,10 @@ pub fn mb_set_mapq(
             }
             mapq -= (4.343f64 * ((r.n_sub + 1) as f64).ln() + 0.499) as i32;
             mapq = mapq.max(0);
+            if r.seed_ratio() < 50 {
+                let sr = r.seed_ratio() as f64;
+                mapq = (mapq as f64 * sr * sr / 2500.0) as i32;
+            }
             r.mapq = mapq.min(60);
             if let Some(p) = &r.p {
                 if p.dp_max > p.dp_max2 && r.mapq == 0 {
@@ -1412,8 +1441,16 @@ pub fn mb_set_mapq(
 }
 
 /// Original C static function `mb_dbg_seed` from `minibwa/map-algo.c:513`.
+fn dbg_qname_or_star(qname: Option<&str>) -> &str {
+    qname.map(mb_cstr_prefix).unwrap_or("*")
+}
+
+fn dbg_qname_printf(qname: Option<&str>) -> &str {
+    qname.map(mb_cstr_prefix).unwrap_or("(null)")
+}
+
 pub fn mb_dbg_seed(n: i64, u: &[mb_sai_t], qname: Option<&str>) {
-    let name = qname.unwrap_or("*");
+    let name = dbg_qname_or_star(qname);
     for p in u.iter().take(n as usize) {
         eprintln!(
             "SD\t{}\t{}\t{}\t{}",
@@ -1427,7 +1464,7 @@ pub fn mb_dbg_seed(n: i64, u: &[mb_sai_t], qname: Option<&str>) {
 
 /// Original C static function `mb_dbg_anchor` from `minibwa/map-algo.c:522`.
 pub fn mb_dbg_anchor(idx: &mb_idx_t, qlen: i32, n: i64, a: &[mb_anchor_t], qname: Option<&str>) {
-    let name = qname.unwrap_or("*");
+    let name = qname.map(mb_cstr_prefix).unwrap_or("*");
     for ai in a.iter().take(n as usize) {
         let rid = (ai.sid >> 1) as usize;
         let rev = ai.sid & 1;
@@ -1440,7 +1477,12 @@ pub fn mb_dbg_anchor(idx: &mb_idx_t, qlen: i32, n: i64, a: &[mb_anchor_t], qname
         let strand = if rev != 0 { '-' } else { '+' };
         eprintln!(
             "AC\t{}\t{}\t{}\t{}\t{}\t{}",
-            name, qs, strand, idx.l2b.ctg[rid].name, ts, ai.len
+            name,
+            qs,
+            strand,
+            mb_cstr_prefix(&idx.l2b.ctg[rid].name),
+            ts,
+            ai.len
         );
     }
 }
@@ -1467,7 +1509,7 @@ pub fn mb_map_sai(
     let mut hash = qname.map(mb_hash_str).unwrap_or(0);
     hash ^= (mb_hash64(qlen as u64).wrapping_add(mb_hash64(opt.seed as u64))) as u32;
     hash = mb_hash64(hash as u64) as u32;
-    let mut seq: Vec<u8> = seq0
+    let seq: Vec<u8> = seq0
         .bytes()
         .take(qlen as usize)
         .map(|c| crate::kommon::KOM_NT4_TABLE[c as usize])
@@ -1479,17 +1521,19 @@ pub fn mb_map_sai(
 
     let mut v = std::mem::take(&mut b.anchor_v);
     if (KOM_DBG_FLAG.load(Ordering::Relaxed) & MB_DBG_QNAME) != 0 {
-        eprintln!("QN\t{}", qname.unwrap_or(""));
+        eprintln!("QN\t{}", dbg_qname_printf(qname));
     }
     if (KOM_DBG_FLAG.load(Ordering::Relaxed) & MB_DBG_SEED) != 0 {
         mb_dbg_seed(u.n as i64, &u.a, qname);
     }
-    crate::stage_time::measure(crate::stage_time::Bucket::Anchor, || {
+    let seed_ratio = crate::stage_time::measure(crate::stage_time::Bucket::Anchor, || {
         mb_anchor_with_scratch(
             (),
             idx,
             u,
+            opt.min_len,
             qlen as i32,
+            &seq,
             mt,
             opt.max_occ,
             &mut v,
@@ -1497,7 +1541,7 @@ pub fn mb_map_sai(
             &mut b.anchor_sa,
             &mut b.anchor_sa_batch,
             &mut b.anchor_batch,
-        );
+        )
     });
     u.n = 0;
     u.a.clear();
@@ -1590,9 +1634,6 @@ pub fn mb_map_sai(
         &mut hit,
     );
 
-    if mt != l2b_meth_t::L2B_METH_NONE {
-        crate::l2bit::l2b_meth_convert(mt, qlen, &mut seq);
-    }
     if (opt.flag & MB_F_NO_ALN) == 0 {
         crate::stage_time::measure(crate::stage_time::Bucket::Align, || {
             mb_align_skeleton_with_scratch(
@@ -1631,6 +1672,8 @@ pub fn mb_map_sai(
     crate::stage_time::measure(crate::stage_time::Bucket::MapqPost, || {
         for h in hit.iter_mut().take(n_hit as usize) {
             h.set_frac_high((255.0 * hi_cov as f64 / qlen as f64) as u8);
+            let sr = (255.0 * seed_ratio + 0.499) as u8;
+            h.set_seed_ratio(sr.max(1));
         }
         mb_set_mapq(
             (),
@@ -1783,13 +1826,7 @@ pub fn mb_map_batch(
                     seq[idx_k]
                         .bytes()
                         .take(qlen[idx_k] as usize)
-                        .map(|c| match c {
-                            b'A' | b'a' => 0,
-                            b'C' | b'c' => 1,
-                            b'G' | b'g' => 2,
-                            b'T' | b't' => 3,
-                            _ => 4,
-                        }),
+                        .map(|c| KOM_NT4_TABLE[c as usize]),
                 );
                 sai[k] = mb_sai_v::default();
             }
@@ -1846,6 +1883,41 @@ pub fn mb_map_batch(
             sb_len += qlen[i as usize];
         }
         i += 1;
+    }
+    if is_pe != 0 && n_seq >= 2 {
+        let mut pes = [mb_pestat_t {
+            failed: 1,
+            ..Default::default()
+        }; 4];
+        pes[1].failed = 0;
+        pes[1].avg = opt.pe_avg as f64;
+        pes[1].std = opt.pe_std as f64;
+        pes[1].lo = opt.pe_lo;
+        pes[1].hi = opt.pe_hi;
+        let mut i = 0usize;
+        while i + 1 < n_seq as usize {
+            let len2 = [qlen[i], qlen[i + 1]];
+            let seq2 = [seq[i], seq[i + 1]];
+            let (left, right) = hit.split_at_mut(i + 1);
+            let mut pair_hit = [std::mem::take(&mut left[i]), std::mem::take(&mut right[0])];
+            let mut pair_n_hit = [n_hit[i], n_hit[i + 1]];
+            mb_pair(
+                (),
+                opt,
+                &idx.l2b,
+                &mut pair_n_hit,
+                &mut pair_hit,
+                &pes,
+                len2,
+                seq2,
+            );
+            n_hit[i] = pair_n_hit[0];
+            n_hit[i + 1] = pair_n_hit[1];
+            let (left, right) = hit.split_at_mut(i + 1);
+            left[i] = std::mem::take(&mut pair_hit[0]);
+            right[0] = std::mem::take(&mut pair_hit[1]);
+            i += 2;
+        }
     }
     hit
 }

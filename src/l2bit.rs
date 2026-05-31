@@ -1,9 +1,10 @@
 #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
+use crate::kommon::KOM_NT4_TABLE;
 use flate2::read::MultiGzDecoder;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const L2B_MAGIC: &[u8; 4] = b"L2B\x01";
 
@@ -320,13 +321,10 @@ pub fn l2b_getambi(l2b: &l2b_t, tid: i64, mut st: i64, mut en: i64, n_ambi: &mut
 pub fn l2b_format_seq(len: u64, seq: &mut [u8], rng: &mut u64) {
     for i in 0..len as usize {
         let b = seq[i];
-        let mut c = match b {
-            b'A' | b'a' => 0,
-            b'C' | b'c' => 1,
-            b'G' | b'g' => 2,
-            b'T' | b't' | b'U' | b'u' => 3,
-            _ => 4,
-        };
+        let mut c = KOM_NT4_TABLE[b as usize];
+        if c > 4 {
+            c = 4;
+        }
         if c == 4 {
             *rng = rng.wrapping_add(0x9e3779b97f4a7c15);
             let mut z = *rng;
@@ -351,9 +349,15 @@ pub fn l2b_add_seq(
     rng: &mut u64,
 ) {
     let off = l2b.tot_len;
+    let name_end = name
+        .as_bytes()
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(name.len());
+    let comm_end = comm.map(|s| s.as_bytes().iter().position(|&b| b == 0).unwrap_or(s.len()));
     l2b.ctg.push(l2b_ctg_t {
-        name: name.to_string(),
-        comm: comm.map(str::to_string),
+        name: name[..name_end].to_string(),
+        comm: comm.zip(comm_end).map(|(s, end)| s[..end].to_string()),
         len,
         off: l2b.tot_len,
     });
@@ -398,28 +402,189 @@ pub fn l2b_add_seq(
     l2b.m_ambi = l2b.ambi.capacity() as u64;
 }
 
+fn l2b_add_seq_bytes(
+    l2b: &mut l2b_t,
+    len: u64,
+    seq: &[u8],
+    name: &[u8],
+    comm: Option<&[u8]>,
+    rng: &mut u64,
+) {
+    let name_lossy = String::from_utf8_lossy(name);
+    let comm_lossy = comm.map(String::from_utf8_lossy);
+    l2b_add_seq(
+        l2b,
+        len,
+        seq,
+        name_lossy.as_ref(),
+        comm_lossy.as_deref(),
+        rng,
+    );
+}
+
 /// Original C static function `l2b_collate_str` from `minibwa/l2bit.c:145`.
 pub fn l2b_collate_str(l2b: &mut l2b_t) {
     if !l2b.cat_name.is_empty() || !l2b.cat_comm.is_empty() {
         return;
     }
     for ctg in &l2b.ctg {
-        l2b.cat_name.extend_from_slice(ctg.name.as_bytes());
+        l2b.cat_name
+            .extend_from_slice(c_string_prefix(ctg.name.as_bytes()));
         l2b.cat_name.push(0);
         if let Some(comm) = &ctg.comm {
-            l2b.cat_comm.extend_from_slice(comm.as_bytes());
+            l2b.cat_comm
+                .extend_from_slice(c_string_prefix(comm.as_bytes()));
         }
         l2b.cat_comm.push(0);
     }
 }
 
+fn l2b_collate_raw(l2b: &mut l2b_t, names: &[Vec<u8>], comments: &[Option<Vec<u8>>]) {
+    if !l2b.cat_name.is_empty() || !l2b.cat_comm.is_empty() {
+        return;
+    }
+    for name in names {
+        l2b.cat_name.extend_from_slice(name);
+        l2b.cat_name.push(0);
+    }
+    for comm in comments {
+        if let Some(comm) = comm {
+            l2b.cat_comm.extend_from_slice(comm);
+        }
+        l2b.cat_comm.push(0);
+    }
+}
+
+struct KseqRecord {
+    name: Vec<u8>,
+    comment: Option<Vec<u8>>,
+    seq: Vec<u8>,
+}
+
+fn is_c_isspace_byte(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+}
+
+fn c_string_prefix(bytes: &[u8]) -> &[u8] {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    &bytes[..end]
+}
+
+fn c_path<P: AsRef<Path>>(path: P) -> PathBuf {
+    PathBuf::from(
+        String::from_utf8_lossy(c_string_prefix(path.as_ref().to_string_lossy().as_bytes()))
+            .into_owned(),
+    )
+}
+
+fn c_str_len(s: &str) -> usize {
+    c_string_prefix(s.as_bytes()).len()
+}
+
+fn strip_line_ending(mut line: Vec<u8>) -> Vec<u8> {
+    if line.last() == Some(&b'\n') {
+        line.pop();
+    }
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    line
+}
+
+fn read_one<R: BufRead + ?Sized>(reader: &mut R) -> io::Result<Option<u8>> {
+    let buf = reader.fill_buf()?;
+    if buf.is_empty() {
+        return Ok(None);
+    }
+    let c = buf[0];
+    reader.consume(1);
+    Ok(Some(c))
+}
+
+fn read_kseq_record<R: BufRead + ?Sized>(
+    reader: &mut R,
+    last_char: &mut Option<u8>,
+) -> io::Result<Option<KseqRecord>> {
+    match last_char.take() {
+        Some(_) => {}
+        None => loop {
+            match read_one(reader)? {
+                Some(b'>' | b'@') => break,
+                Some(_) => continue,
+                None => return Ok(None),
+            }
+        },
+    }
+
+    let mut header = Vec::new();
+    reader.read_until(b'\n', &mut header)?;
+    let header = strip_line_ending(header);
+    let split = header
+        .iter()
+        .position(|&b| is_c_isspace_byte(b))
+        .unwrap_or(header.len());
+    let name = c_string_prefix(&header[..split]).to_vec();
+    let comment = if split < header.len() {
+        let comm = c_string_prefix(&header[split + 1..]).to_vec();
+        if comm.is_empty() {
+            None
+        } else {
+            Some(comm)
+        }
+    } else {
+        None
+    };
+
+    let mut seq = Vec::new();
+    let mut c = loop {
+        match read_one(reader)? {
+            Some(b'\n' | b'\r') => continue,
+            other => break other,
+        }
+    };
+    while let Some(ch) = c {
+        match ch {
+            b'>' | b'@' => {
+                *last_char = Some(ch);
+                return Ok(Some(KseqRecord { name, comment, seq }));
+            }
+            b'+' => {
+                let mut discard = Vec::new();
+                reader.read_until(b'\n', &mut discard)?;
+                let mut qual_len = 0usize;
+                while qual_len < seq.len() {
+                    let mut qline = Vec::new();
+                    if reader.read_until(b'\n', &mut qline)? == 0 {
+                        return Ok(None);
+                    }
+                    qual_len += strip_line_ending(qline).len();
+                }
+                if qual_len != seq.len() {
+                    return Ok(None);
+                }
+                return Ok(Some(KseqRecord { name, comment, seq }));
+            }
+            b'\n' | b'\r' => {}
+            _ => {
+                seq.push(ch);
+                let mut rest = Vec::new();
+                reader.read_until(b'\n', &mut rest)?;
+                seq.extend_from_slice(&strip_line_ending(rest));
+            }
+        }
+        c = read_one(reader)?;
+    }
+    Ok(Some(KseqRecord { name, comment, seq }))
+}
+
 /// Original C global function `l2b_import` from `minibwa/l2bit.c:175`.
 pub fn l2b_import<P: AsRef<Path>>(fn_: P, seed: u64) -> Option<l2b_t> {
-    let path = fn_.as_ref().to_string_lossy();
+    let fn_ = c_path(fn_);
+    let path = fn_.to_string_lossy();
     let raw: Box<dyn Read> = if path == "-" {
         Box::new(io::stdin())
     } else {
-        Box::new(File::open(fn_.as_ref()).ok()?)
+        Box::new(File::open(&fn_).ok()?)
     };
     let mut buffered = BufReader::with_capacity(1 << 20, raw);
     let is_gzip = buffered.fill_buf().ok()?.starts_with(&[0x1f, 0x8b]);
@@ -433,48 +598,23 @@ pub fn l2b_import<P: AsRef<Path>>(fn_: P, seed: u64) -> Option<l2b_t> {
     };
     let mut l2b = l2b_t::default();
     let mut rng = seed;
-    let mut name = String::new();
-    let mut comm: Option<String> = None;
-    let mut seq = Vec::new();
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if reader.read_line(&mut line).ok()? == 0 {
-            break;
-        }
-        let line = line.trim_end_matches(['\n', '\r']);
-        if let Some(header) = line.strip_prefix('>') {
-            if !name.is_empty() {
-                l2b_format_seq(seq.len() as u64, &mut seq, &mut rng);
-                l2b_add_seq(
-                    &mut l2b,
-                    seq.len() as u64,
-                    &seq,
-                    &name,
-                    comm.as_deref(),
-                    &mut rng,
-                );
-                seq.clear();
-            }
-            let mut parts = header.splitn(2, char::is_whitespace);
-            name = parts.next().unwrap_or("").to_string();
-            comm = parts.next().filter(|s| !s.is_empty()).map(str::to_string);
-        } else {
-            seq.extend_from_slice(line.trim().as_bytes());
-        }
-    }
-    if !name.is_empty() {
-        l2b_format_seq(seq.len() as u64, &mut seq, &mut rng);
-        l2b_add_seq(
+    let mut last_char = None;
+    let mut names = Vec::new();
+    let mut comments = Vec::new();
+    while let Some(mut rec) = read_kseq_record(&mut *reader, &mut last_char).ok()? {
+        l2b_format_seq(rec.seq.len() as u64, &mut rec.seq, &mut rng);
+        l2b_add_seq_bytes(
             &mut l2b,
-            seq.len() as u64,
-            &seq,
-            &name,
-            comm.as_deref(),
+            rec.seq.len() as u64,
+            &rec.seq,
+            &rec.name,
+            rec.comment.as_deref(),
             &mut rng,
         );
+        names.push(rec.name);
+        comments.push(rec.comment);
     }
-    l2b_collate_str(&mut l2b);
+    l2b_collate_raw(&mut l2b, &names, &comments);
     Some(l2b)
 }
 
@@ -485,24 +625,37 @@ pub fn l2b_destroy(l2b: Option<l2b_t>) {
 
 /// Original C global function `l2b_save` from `minibwa/l2bit.c:202`.
 pub fn l2b_save<P: AsRef<Path>>(fn_: P, l2b: &l2b_t) -> i32 {
-    let path = fn_.as_ref().to_string_lossy();
+    let fn_ = c_path(fn_);
+    let path = fn_.to_string_lossy();
     let mut fp: Box<dyn Write> = if path == "-" {
         Box::new(BufWriter::with_capacity(1 << 20, io::stdout()))
     } else {
-        match File::create(fn_.as_ref()) {
+        match File::create(&fn_) {
             Ok(fp) => Box::new(BufWriter::with_capacity(1 << 20, fp)),
             Err(_) => return -1,
         }
     };
-    let len_name: u64 = l2b.ctg.iter().map(|c| c.name.len() as u64 + 1).sum();
-    let len_comm: u64 = l2b
-        .ctg
-        .iter()
-        .map(|c| c.comm.as_ref().map(|s| s.len() as u64 + 1).unwrap_or(1))
-        .sum();
-    if fp.write_all(L2B_MAGIC).is_err() || fp.write_all(&0u32.to_le_bytes()).is_err() {
-        return -1;
-    }
+    let use_cat = l2b_cat_strs_valid(l2b);
+    let len_name: u64 = if use_cat {
+        l2b.cat_name.len() as u64
+    } else {
+        l2b.ctg.iter().map(|c| c_str_len(&c.name) as u64 + 1).sum()
+    };
+    let len_comm: u64 = if use_cat {
+        l2b.cat_comm.len() as u64
+    } else {
+        l2b.ctg
+            .iter()
+            .map(|c| {
+                c.comm
+                    .as_ref()
+                    .map(|s| c_str_len(s) as u64 + 1)
+                    .unwrap_or(1)
+            })
+            .sum()
+    };
+    let _ = fp.write_all(L2B_MAGIC);
+    let _ = fp.write_all(&0u32.to_le_bytes());
     for x in [
         l2b.n_ctg,
         l2b.tot_len,
@@ -512,52 +665,66 @@ pub fn l2b_save<P: AsRef<Path>>(fn_: P, l2b: &l2b_t) -> i32 {
         len_comm,
         l2b.n_pac,
     ] {
-        if fp.write_all(&x.to_le_bytes()).is_err() {
-            return -1;
-        }
+        let _ = fp.write_all(&x.to_le_bytes());
     }
     for ctg in &l2b.ctg {
-        if fp.write_all(&ctg.len.to_le_bytes()).is_err() {
-            return -1;
-        }
+        let _ = fp.write_all(&ctg.len.to_le_bytes());
     }
     for iv in &l2b.ambi {
-        if fp.write_all(&iv.st.to_le_bytes()).is_err()
-            || fp.write_all(&iv.en.to_le_bytes()).is_err()
-        {
-            return -1;
-        }
+        let _ = fp.write_all(&iv.st.to_le_bytes());
+        let _ = fp.write_all(&iv.en.to_le_bytes());
     }
     for iv in &l2b.mask {
-        if fp.write_all(&iv.st.to_le_bytes()).is_err()
-            || fp.write_all(&iv.en.to_le_bytes()).is_err()
-        {
-            return -1;
-        }
+        let _ = fp.write_all(&iv.st.to_le_bytes());
+        let _ = fp.write_all(&iv.en.to_le_bytes());
     }
-    if write_u64_slice_le(&mut fp, &l2b.pac).is_err() {
-        return -1;
-    }
-    for ctg in &l2b.ctg {
-        if fp.write_all(ctg.name.as_bytes()).is_err() || fp.write_all(&[0]).is_err() {
-            return -1;
-        }
-    }
-    for ctg in &l2b.ctg {
-        if let Some(comm) = &ctg.comm {
-            if fp.write_all(comm.as_bytes()).is_err() {
-                return -1;
-            }
-        }
-        if fp.write_all(&[0]).is_err() {
-            return -1;
-        }
-    }
-    if fp.flush().is_err() {
-        -1
+    let _ = write_u64_slice_le(&mut fp, &l2b.pac);
+    if use_cat {
+        let _ = fp.write_all(&l2b.cat_name);
+        let _ = fp.write_all(&l2b.cat_comm);
     } else {
-        0
+        for ctg in &l2b.ctg {
+            let _ = fp.write_all(c_string_prefix(ctg.name.as_bytes()));
+            let _ = fp.write_all(&[0]);
+        }
+        for ctg in &l2b.ctg {
+            if let Some(comm) = &ctg.comm {
+                let _ = fp.write_all(c_string_prefix(comm.as_bytes()));
+            }
+            let _ = fp.write_all(&[0]);
+        }
     }
+    let _ = fp.flush();
+    0
+}
+
+fn l2b_cat_strs_valid(l2b: &l2b_t) -> bool {
+    if l2b.cat_name.is_empty() || l2b.cat_comm.is_empty() {
+        return false;
+    }
+    let mut p_name = 0usize;
+    let mut p_comm = 0usize;
+    for _ in 0..l2b.n_ctg as usize {
+        if p_name >= l2b.cat_name.len() {
+            return false;
+        }
+        let Some(name_rel_end) = l2b.cat_name[p_name..].iter().position(|&b| b == 0) else {
+            return false;
+        };
+        p_name += name_rel_end + 1;
+        if p_comm >= l2b.cat_comm.len() {
+            return false;
+        }
+        if l2b.cat_comm[p_comm] == 0 {
+            p_comm += 1;
+        } else {
+            let Some(comm_rel_end) = l2b.cat_comm[p_comm..].iter().position(|&b| b == 0) else {
+                return false;
+            };
+            p_comm += comm_rel_end + 1;
+        }
+    }
+    p_name == l2b.cat_name.len() && p_comm == l2b.cat_comm.len()
 }
 
 fn write_u64_slice_le<W: Write + ?Sized>(writer: &mut W, words: &[u64]) -> std::io::Result<()> {
@@ -600,13 +767,18 @@ fn read_intv_vec_le<R: Read + ?Sized>(reader: &mut R, n: u64) -> Option<Vec<l2b_
     Some(v)
 }
 
+fn read_prefix_or_eof<R: Read + ?Sized>(reader: &mut R, buf: &mut [u8]) {
+    let _ = reader.read(buf);
+}
+
 /// Original C global function `l2b_load` from `minibwa/l2bit.c:234`.
 pub fn l2b_load<P: AsRef<Path>>(fn_: P) -> Option<l2b_t> {
-    let path = fn_.as_ref().to_string_lossy();
+    let fn_ = c_path(fn_);
+    let path = fn_.to_string_lossy();
     let mut fp: Box<dyn Read> = if path == "-" {
         Box::new(io::stdin())
     } else {
-        Box::new(File::open(fn_.as_ref()).ok()?)
+        Box::new(File::open(&fn_).ok()?)
     };
     let mut magic = [0u8; 4];
     fp.read_exact(&mut magic).ok()?;
@@ -614,9 +786,9 @@ pub fn l2b_load<P: AsRef<Path>>(fn_: P) -> Option<l2b_t> {
         return None;
     }
     let mut dummy = [0u8; 4];
-    fp.read_exact(&mut dummy).ok()?;
+    read_prefix_or_eof(&mut *fp, &mut dummy);
     let mut hdr = [0u8; 56];
-    fp.read_exact(&mut hdr).ok()?;
+    read_prefix_or_eof(&mut *fp, &mut hdr);
     let mut fields = [0u64; 7];
     for i in 0..7usize {
         fields[i] = u64::from_le_bytes(hdr[i * 8..i * 8 + 8].try_into().unwrap());
@@ -639,7 +811,7 @@ pub fn l2b_load<P: AsRef<Path>>(fn_: P) -> Option<l2b_t> {
     let mut off = 0u64;
     for _ in 0..n_ctg {
         let mut len_buf = [0u8; 8];
-        fp.read_exact(&mut len_buf).ok()?;
+        read_prefix_or_eof(&mut *fp, &mut len_buf);
         let len = u64::from_le_bytes(len_buf);
         l2b.ctg.push(l2b_ctg_t {
             name: String::new(),
@@ -695,11 +867,12 @@ pub fn l2b_load<P: AsRef<Path>>(fn_: P) -> Option<l2b_t> {
 
 /// Original C global function `l2b_save_pac` from `minibwa/l2bit.c:286`.
 pub fn l2b_save_pac<P: AsRef<Path>>(fn_: P, l2b: &l2b_t, both_strand: i32) -> i32 {
-    let path = fn_.as_ref().to_string_lossy();
+    let fn_ = c_path(fn_);
+    let path = fn_.to_string_lossy();
     let mut fp: Box<dyn Write> = if path == "-" {
         Box::new(io::stdout())
     } else {
-        match File::create(fn_.as_ref()) {
+        match File::create(&fn_) {
             Ok(fp) => Box::new(fp),
             Err(_) => return -1,
         }
@@ -723,15 +896,11 @@ pub fn l2b_save_pac<P: AsRef<Path>>(fn_: P, l2b: &l2b_t, both_strand: i32) -> i3
         }
     }
     let n_write = (x >> 2) + if (x & 3) == 0 { 0 } else { 1 };
-    if fp.write_all(&pac[..n_write as usize]).is_err() {
-        return -1;
+    let _ = fp.write_all(&pac[..n_write as usize]);
+    if x % 4 == 0 {
+        let _ = fp.write_all(&[0]);
     }
-    if x % 4 == 0 && fp.write_all(&[0]).is_err() {
-        return -1;
-    }
-    if fp.write_all(&[(x % 4) as u8]).is_err() {
-        return -1;
-    }
+    let _ = fp.write_all(&[(x % 4) as u8]);
     0
 }
 
@@ -755,11 +924,12 @@ pub fn l2b_g2a(b: u8) -> u8 {
 
 /// Original C global function `l2b_save_pac_meth` from `minibwa/l2bit.c:324`.
 pub fn l2b_save_pac_meth<P: AsRef<Path>>(fn_: P, l2b: &l2b_t, both_strand: i32) -> i32 {
-    let path = fn_.as_ref().to_string_lossy();
+    let fn_ = c_path(fn_);
+    let path = fn_.to_string_lossy();
     let mut fp: Box<dyn Write> = if path == "-" {
         Box::new(io::stdout())
     } else {
-        match File::create(fn_.as_ref()) {
+        match File::create(&fn_) {
             Ok(fp) => Box::new(fp),
             Err(_) => return -1,
         }
@@ -794,15 +964,11 @@ pub fn l2b_save_pac_meth<P: AsRef<Path>>(fn_: P, l2b: &l2b_t, both_strand: i32) 
         }
     }
     let n_write = (x >> 2) + if (x & 3) == 0 { 0 } else { 1 };
-    if fp.write_all(&pac[..n_write as usize]).is_err() {
-        return -1;
+    let _ = fp.write_all(&pac[..n_write as usize]);
+    if x % 4 == 0 {
+        let _ = fp.write_all(&[0]);
     }
-    if x % 4 == 0 && fp.write_all(&[0]).is_err() {
-        return -1;
-    }
-    if fp.write_all(&[(x % 4) as u8]).is_err() {
-        return -1;
-    }
+    let _ = fp.write_all(&[(x % 4) as u8]);
     0
 }
 
@@ -840,6 +1006,56 @@ mod tests {
         let loaded = l2b_load(&path).expect("reload l2b");
         let _ = std::fs::remove_file(&path);
         assert_eq!(loaded, l2b);
+    }
+
+    #[test]
+    fn public_file_helpers_stop_paths_at_embedded_nul_like_c() {
+        let dir =
+            std::env::temp_dir().join(format!("minibwa-rs-l2bit-api-nul-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let fasta = dir.join("in.fa");
+        let l2b_path = dir.join("out.l2b");
+        let pac_path = dir.join("out.pac");
+        let meth_pac_path = dir.join("out.meth.pac");
+        std::fs::write(&fasta, b">ctg\nACGTACGT\n").expect("write fasta");
+
+        let fasta_arg = format!("{}\0hidden", fasta.to_string_lossy());
+        let l2b_arg = format!("{}\0hidden", l2b_path.to_string_lossy());
+        let pac_arg = format!("{}\0hidden", pac_path.to_string_lossy());
+        let meth_pac_arg = format!("{}\0hidden", meth_pac_path.to_string_lossy());
+
+        let l2b = l2b_import(fasta_arg, 11).expect("import NUL-suffixed FASTA path");
+        assert_eq!(l2b_save(l2b_arg.clone(), &l2b), 0);
+        assert!(l2b_load(l2b_arg).is_some());
+        assert_eq!(l2b_save_pac(pac_arg, &l2b, 1), 0);
+        assert_eq!(l2b_save_pac_meth(meth_pac_arg, &l2b, 1), 0);
+        assert!(l2b_path.exists());
+        assert!(pac_path.exists());
+        assert!(meth_pac_path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_magic_only_l2b_zero_header_like_original() {
+        let path = std::env::temp_dir().join(format!(
+            "minibwa-rs-magic-only-l2b-{}.l2b",
+            std::process::id()
+        ));
+        std::fs::write(&path, L2B_MAGIC).expect("write short l2b");
+        let loaded = l2b_load(&path).expect("valid-magic short l2b");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(loaded.n_ctg, 0);
+        assert_eq!(loaded.tot_len, 0);
+        assert_eq!(loaded.n_ambi, 0);
+        assert_eq!(loaded.n_mask, 0);
+        assert_eq!(loaded.n_pac, 0);
+        assert!(loaded.ctg.is_empty());
+        assert!(loaded.ambi.is_empty());
+        assert!(loaded.mask.is_empty());
+        assert!(loaded.pac.is_empty());
+        assert!(loaded.cat_name.is_empty());
+        assert!(loaded.cat_comm.is_empty());
     }
 
     #[test]
@@ -882,6 +1098,24 @@ mod tests {
         assert_eq!(bytes, vec![0x1b, 0x10, 2]);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn saves_ignore_post_open_write_errors_like_original() {
+        if !std::path::Path::new("/dev/full").exists() {
+            return;
+        }
+        let mut l2b = l2b_t::default();
+        let mut seq = b"ACGTAC".to_vec();
+        let mut rng = 11;
+        l2b_format_seq(seq.len() as u64, &mut seq, &mut rng);
+        l2b_add_seq(&mut l2b, seq.len() as u64, &seq, "s", Some("c"), &mut rng);
+        l2b_collate_str(&mut l2b);
+
+        assert_eq!(l2b_save("/dev/full", &l2b), 0);
+        assert_eq!(l2b_save_pac("/dev/full", &l2b, 1), 0);
+        assert_eq!(l2b_save_pac_meth("/dev/full", &l2b, 1), 0);
+    }
+
     #[test]
     fn import_reads_real_gzipped_chrM_fasta() {
         let imported =
@@ -896,6 +1130,111 @@ mod tests {
         l2b_getseq(&imported, 0, 0, 64, &mut imported_seq);
         l2b_getseq(&loaded, 0, 0, 64, &mut loaded_seq);
         assert_eq!(imported_seq, loaded_seq);
+    }
+
+    #[test]
+    fn import_accepts_fastq_and_preserves_non_newline_sequence_bytes() {
+        let path =
+            std::env::temp_dir().join(format!("minibwa-rs-l2b-fastq-{}.fq", std::process::id()));
+        std::fs::write(&path, b"@ctg comment\nAC GT\n+\n!!!!!\n").expect("write FASTQ");
+        let l2b = l2b_import(&path, 11).expect("import FASTQ");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(l2b.n_ctg, 1);
+        assert_eq!(l2b.ctg[0].name, "ctg");
+        assert_eq!(l2b.ctg[0].comm.as_deref(), Some("comment"));
+        assert_eq!(l2b.ctg[0].len, 5);
+        assert_eq!(l2b.cat_name, b"ctg\0");
+        assert_eq!(l2b.cat_comm, b"comment\0");
+
+        let mut seq = vec![0; 5];
+        assert_eq!(l2b_getseq(&l2b, 0, 0, 5, &mut seq), 5);
+        assert_eq!(seq[0], 0);
+        assert_eq!(seq[1], 1);
+        assert_eq!(seq[3], 2);
+        assert_eq!(seq[4], 3);
+        assert_eq!(seq[2], 4);
+    }
+
+    #[test]
+    fn import_and_save_preserve_raw_non_utf8_metadata_bytes() {
+        let dir =
+            std::env::temp_dir().join(format!("minibwa-rs-l2b-raw-meta-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let input = dir.join("in.fa");
+        let saved = dir.join("saved.l2b");
+        let resaved = dir.join("resaved.l2b");
+        std::fs::write(&input, b">ctg\xff comm\xfe\nACGT\n").expect("write FASTA");
+
+        let l2b = l2b_import(&input, 3).expect("import raw metadata FASTA");
+        assert_eq!(l2b.cat_name, b"ctg\xff\0");
+        assert_eq!(l2b.cat_comm, b"comm\xfe\0");
+        assert_eq!(l2b_save(&saved, &l2b), 0);
+        let loaded = l2b_load(&saved).expect("reload raw metadata l2b");
+        assert_eq!(loaded.cat_name, b"ctg\xff\0");
+        assert_eq!(loaded.cat_comm, b"comm\xfe\0");
+        assert_eq!(l2b_save(&resaved, &loaded), 0);
+        assert_eq!(
+            std::fs::read(&saved).expect("read saved l2b"),
+            std::fs::read(&resaved).expect("read resaved l2b")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_metadata_uses_c_isspace_and_nul_truncation() {
+        let path =
+            std::env::temp_dir().join(format!("minibwa-rs-l2b-nul-meta-{}", std::process::id()));
+        std::fs::write(&path, b">ctg\x01raw\0hidden comment\0tail\nACGT\n").expect("write FASTA");
+
+        let l2b = l2b_import(&path, 3).expect("import raw metadata FASTA");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(l2b.n_ctg, 1);
+        assert_eq!(l2b.cat_name, b"ctg\x01raw\0");
+        assert_eq!(l2b.cat_comm, b"comment\0");
+        assert_eq!(l2b.ctg[0].name, "ctg\u{1}raw");
+        assert_eq!(l2b.ctg[0].comm.as_deref(), Some("comment"));
+    }
+
+    #[test]
+    fn add_collate_and_save_use_c_string_boundaries() {
+        let dir =
+            std::env::temp_dir().join(format!("minibwa-rs-l2b-cstr-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let saved = dir.join("saved.l2b");
+        let mut l2b = l2b_t::default();
+        let mut seq = b"ACGT".to_vec();
+        let mut rng = 3;
+        l2b_format_seq(seq.len() as u64, &mut seq, &mut rng);
+        l2b_add_seq(
+            &mut l2b,
+            seq.len() as u64,
+            &seq,
+            "ctg\0hidden",
+            Some("comment\0hidden"),
+            &mut rng,
+        );
+        assert_eq!(l2b.ctg[0].name, "ctg");
+        assert_eq!(l2b.ctg[0].comm.as_deref(), Some("comment"));
+        l2b_collate_str(&mut l2b);
+        assert_eq!(l2b.cat_name, b"ctg\0");
+        assert_eq!(l2b.cat_comm, b"comment\0");
+
+        let mut manual = l2b.clone();
+        manual.cat_name.clear();
+        manual.cat_comm.clear();
+        manual.ctg[0].name = "ctg\0hidden".to_string();
+        manual.ctg[0].comm = Some("comment\0hidden".to_string());
+        assert_eq!(l2b_save(&saved, &manual), 0);
+        let loaded = l2b_load(&saved).expect("reload manual l2b");
+        assert_eq!(loaded.cat_name, b"ctg\0");
+        assert_eq!(loaded.cat_comm, b"comment\0");
+        assert_eq!(loaded.ctg[0].name, "ctg");
+        assert_eq!(loaded.ctg[0].comm.as_deref(), Some("comment"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

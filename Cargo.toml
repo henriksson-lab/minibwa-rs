@@ -23,6 +23,7 @@ include = [
 [features]
 default = []
 cli = ["dep:mimalloc"]
+stage-time = []
 
 [lib]
 path = "src/lib.rs"

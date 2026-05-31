@@ -22,7 +22,7 @@ impl mb_opt_str_t {
         Self::from_bytes(&bytes)
     }
 
-    fn from_bytes(bytes: &[u8]) -> Self {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
         let header = std::mem::size_of::<usize>();
         let size = header + bytes.len();
         let layout = Layout::from_size_align(size.max(header), std::mem::align_of::<usize>())
@@ -54,11 +54,16 @@ impl mb_opt_str_t {
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(self.ptr.as_ptr(), self.len()))
         }
     }
+
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len()) }
+    }
 }
 
 impl Clone for mb_opt_str_t {
     fn clone(&self) -> Self {
-        Self::from_bytes(self.as_str().as_bytes())
+        Self::from_bytes(self.as_bytes())
     }
 }
 
@@ -77,13 +82,13 @@ impl Drop for mb_opt_str_t {
 
 impl std::fmt::Debug for mb_opt_str_t {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.as_str().fmt(f)
+        String::from_utf8_lossy(self.as_bytes()).fmt(f)
     }
 }
 
 impl PartialEq for mb_opt_str_t {
     fn eq(&self, other: &Self) -> bool {
-        self.as_str() == other.as_str()
+        self.as_bytes() == other.as_bytes()
     }
 }
 
@@ -129,9 +134,9 @@ pub struct kvec_t<T> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct kseq_t {
     pub name: String,
-    pub comment: String,
+    pub comment: Vec<u8>,
     pub seq: String,
-    pub qual: String,
+    pub qual: Vec<u8>,
 }
 
 pub struct mb_bseq_file_s {
@@ -139,7 +144,7 @@ pub struct mb_bseq_file_s {
     pub pos: usize,
     pub s: Option<mb_bseq1_t>,
     reader: Option<Box<dyn BufRead + Send>>,
-    pending_header: Option<(u8, String)>,
+    pending_header: Option<(u8, Vec<u8>)>,
     last_record_name: Option<String>,
     eof: bool,
     pub parse_error: bool,
@@ -161,7 +166,7 @@ pub fn kvec_t<T>() -> kvec_t<T> {
 /// Original C static function `mb_qname_len` from `minibwa/bseq.h:26`.
 pub fn mb_qname_len(s: &str) -> i32 {
     let b = s.as_bytes();
-    let l = b.len();
+    let l = b.iter().position(|&c| c == 0).unwrap_or(b.len());
     if l >= 3 && b[l - 1].is_ascii_digit() && b[l - 2] == b'/' {
         (l - 2) as i32
     } else {
@@ -179,7 +184,7 @@ pub fn mb_qname_same(s1: &str, s2: &str) -> i32 {
 /// Original C global function `mb_bseq_open` from `minibwa/bseq.c:43`.
 pub fn mb_bseq_open(fn_: Option<&str>) -> Option<mb_bseq_file_t> {
     let raw: Box<dyn Read + Send> = match fn_ {
-        Some(path) if path != "-" => Box::new(File::open(path).ok()?),
+        Some(path) if cstr_path(path) != "-" => Box::new(File::open(cstr_path(path)).ok()?),
         _ => Box::new(io::stdin()),
     };
     let mut buffered = BufReader::new(raw);
@@ -202,6 +207,12 @@ pub fn mb_bseq_open(fn_: Option<&str>) -> Option<mb_bseq_file_t> {
         parse_error_reported: false,
         suppress_parse_warnings: false,
     })
+}
+
+fn cstr_path(path: &str) -> &str {
+    let bytes = path.as_bytes();
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    &path[..end]
 }
 
 /// Original C global function `mb_bseq_close` from `minibwa/bseq.c:55`.
@@ -229,15 +240,24 @@ pub fn kseq2bseq(ks: kseq_t, s: &mut mb_bseq1_t, with_qual: i32, with_comment: i
     s.l_seq = seq.len() as u64;
     s.seq = String::from_utf8(seq).unwrap().into_boxed_str();
     s.qual = if with_qual != 0 && !ks.qual.is_empty() {
-        Some(mb_opt_str_t::from_string(ks.qual))
+        Some(mb_opt_str_t::from_bytes(&ks.qual))
     } else {
         None
     };
     s.comment = if with_comment != 0 && !ks.comment.is_empty() {
-        Some(mb_opt_str_t::from_string(ks.comment))
+        Some(mb_opt_str_t::from_bytes(&ks.comment))
     } else {
         None
     };
+}
+
+fn strip_kseq_line_ending(bytes: &mut Vec<u8>) {
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    if bytes.len() > 1 && bytes.last() == Some(&b'\r') {
+        bytes.pop();
+    }
 }
 
 macro_rules! kseq_read {
@@ -251,84 +271,75 @@ macro_rules! kseq_read {
                 header
             } else {
                 let reader = fp.reader.as_mut()?;
-                let mut line = String::new();
+                let mut line = Vec::new();
                 loop {
                     line.clear();
-                    let n = reader.read_line(&mut line).ok()?;
+                    let n = reader.read_until(b'\n', &mut line).ok()?;
                     if n == 0 {
                         fp.eof = true;
                         return None;
                     }
-                    let bytes = line.as_bytes();
-                    if let Some(pos) = bytes.iter().position(|&c| c == b'>' || c == b'@') {
-                        let start_ch = bytes[pos];
-                        let mut header = String::from_utf8_lossy(&bytes[pos + 1..]).into_owned();
-                        while header.ends_with('\n') || header.ends_with('\r') {
-                            header.pop();
-                        }
+                    if let Some(pos) = line.iter().position(|&c| c == b'>' || c == b'@') {
+                        let start_ch = line[pos];
+                        let mut header = line[pos + 1..].to_vec();
+                        strip_kseq_line_ending(&mut header);
                         break (start_ch, header);
                     }
                 }
             };
-            let mut it = header.splitn(2, |c: char| c.is_ascii_whitespace());
-            let name = it.next().unwrap_or("").to_string();
-            let comment = it.next().unwrap_or("").to_string();
+            let split = header
+                .iter()
+                .position(|&c| c.is_ascii_whitespace())
+                .unwrap_or(header.len());
+            let name = String::from_utf8_lossy(&header[..split]).into_owned();
+            let comment = if split < header.len() {
+                header[split + 1..].to_vec()
+            } else {
+                Vec::new()
+            };
             let mut seq = Vec::new();
             let mut saw_plus = false;
-            let mut line = String::new();
+            let mut line = Vec::new();
             loop {
                 line.clear();
-                let n = fp.reader.as_mut()?.read_line(&mut line).ok()?;
+                let n = fp.reader.as_mut()?.read_until(b'\n', &mut line).ok()?;
                 if n == 0 {
                     fp.eof = true;
                     break;
                 }
-                let bytes = line.as_bytes();
-                if bytes.iter().all(|&c| c == b'\n' || c == b'\r') {
+                if line.first() == Some(&b'\n') {
                     continue;
                 }
-                if bytes[0] == b'>' || bytes[0] == b'@' {
-                    let mut header = String::from_utf8_lossy(&bytes[1..]).into_owned();
-                    while header.ends_with('\n') || header.ends_with('\r') {
-                        header.pop();
-                    }
-                    fp.pending_header = Some((bytes[0], header));
+                if line[0] == b'>' || line[0] == b'@' {
+                    let mut header = line[1..].to_vec();
+                    strip_kseq_line_ending(&mut header);
+                    fp.pending_header = Some((line[0], header));
                     break;
                 }
-                if bytes[0] == b'+' {
+                if line[0] == b'+' {
                     saw_plus = true;
                     break;
                 }
-                let mut end = bytes.len();
-                while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
-                    end -= 1;
-                }
-                seq.extend_from_slice(&bytes[..end]);
+                strip_kseq_line_ending(&mut line);
+                seq.extend_from_slice(&line);
             }
             let mut qual = Vec::new();
-            if start_ch == b'@' && saw_plus {
+            if saw_plus {
                 while qual.len() < seq.len() {
                     line.clear();
-                    let n = fp.reader.as_mut()?.read_line(&mut line).ok()?;
+                    let n = fp.reader.as_mut()?.read_until(b'\n', &mut line).ok()?;
                     if n == 0 {
                         fp.eof = true;
                         break;
                     }
-                    let bytes = line.as_bytes();
-                    let mut end = bytes.len();
-                    while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
-                        end -= 1;
-                    }
-                    qual.extend_from_slice(&bytes[..end]);
+                    strip_kseq_line_ending(&mut line);
+                    qual.extend_from_slice(&line);
                     if qual.len() >= seq.len() {
                         break;
                     }
                 }
                 if qual.len() != seq.len() {
                     fp.parse_error = true;
-                    if fp.parse_error_after.is_none() {
-                        fp.parse_error_after = fp.last_record_name.clone();
-                    }
                     return None;
                 }
             }
@@ -337,7 +348,7 @@ macro_rules! kseq_read {
                 name,
                 comment,
                 seq: String::from_utf8(seq).unwrap(),
-                qual: String::from_utf8(qual).unwrap(),
+                qual,
             };
             fp.last_record_name = Some(rec.name.clone());
             Some(rec)
@@ -396,10 +407,10 @@ pub fn mb_bseq_read(
         }
     }
     if fp.parse_error && !fp.parse_error_reported && !fp.suppress_parse_warnings {
-        if let Some(name) = &fp.parse_error_after {
+        if let Some(last) = a.last() {
             eprintln!(
                     "[WARNING]\u{1b}[1;31m failed to parse the FASTA/FASTQ record next to '{}'. Continue anyway.\u{1b}[0m",
-                    name
+                    last.name
                 );
         } else {
             eprintln!(
@@ -455,21 +466,6 @@ pub fn mb_bseq_read_frag(
             break;
         }
     }
-    for f in fp.iter_mut().take(n_fp as usize) {
-        if f.parse_error && !f.parse_error_reported && !f.suppress_parse_warnings {
-            if let Some(name) = &f.parse_error_after {
-                eprintln!(
-                        "[WARNING]\u{1b}[1;31m failed to parse the FASTA/FASTQ record next to '{}'. Continue anyway.\u{1b}[0m",
-                        name
-                    );
-            } else {
-                eprintln!(
-                        "[WARNING]\u{1b}[1;31m failed to parse the first FASTA/FASTQ record. Continue anyway.\u{1b}[0m"
-                    );
-            }
-            f.parse_error_reported = true;
-        }
-    }
     *n_ = a.len() as i32;
     a
 }
@@ -489,6 +485,13 @@ mod tests {
         assert_eq!(mb_qname_len("read/x"), 6);
         assert_eq!(mb_qname_same("read/1", "read/2"), 1);
         assert_eq!(mb_qname_same("read/1", "readx/2"), 0);
+    }
+
+    #[test]
+    fn qname_helpers_stop_at_nul_like_strlen() {
+        assert_eq!(mb_qname_len("read\0hidden/1"), 4);
+        assert_eq!(mb_qname_same("read\0left/1", "read\0right/2"), 1);
+        assert_eq!(mb_qname_same("read1\0x", "read2\0x"), 0);
     }
 
     #[test]
@@ -531,6 +534,125 @@ mod tests {
         assert_eq!(&*reads[0].name, "r0");
         assert_eq!(&*reads[0].seq, "AC@GT+AC");
         assert_eq!(&*reads[1].name, "r1");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_sequence_strips_only_one_cr_before_lf_like_kseq() {
+        let path = std::env::temp_dir().join(format!(
+            "minibwa_rs_bseq_extra_cr_{}.fa",
+            std::process::id()
+        ));
+        std::fs::write(&path, b">r0\nAC\r\r\n").unwrap();
+        let mut fp = mb_bseq_open(Some(&path.to_string_lossy())).expect("open CR fasta");
+        let mut n = 0;
+        let reads = mb_bseq_read(&mut fp, 1_000_000, 0, 0, 0, 1, 1_000_000, &mut n);
+        assert_eq!(n, 1);
+        assert_eq!(&*reads[0].seq, "AC\r");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_fastq_preserves_raw_quality_and_comment_bytes() {
+        let path = std::env::temp_dir().join(format!(
+            "minibwa_rs_bseq_raw_qual_comment_{}.fq",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"@r0 comment\xff\nACGT\n+\n!\xff#$\n").unwrap();
+        let mut fp = mb_bseq_open(Some(&path.to_string_lossy())).expect("open raw fastq");
+        let mut n = 0;
+        let reads = mb_bseq_read(&mut fp, 1_000_000, 1, 1, 0, 1, 1_000_000, &mut n);
+        assert_eq!(n, 1);
+        assert_eq!(&*reads[0].name, "r0");
+        assert_eq!(
+            reads[0].comment.as_ref().unwrap().as_bytes(),
+            b"comment\xff"
+        );
+        assert_eq!(reads[0].qual.as_ref().unwrap().as_bytes(), b"!\xff#$");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn bseq_open_path_stops_at_nul_like_gzopen() {
+        let path = std::env::temp_dir().join(format!(
+            "minibwa_rs_bseq_nul_path_{}.fa",
+            std::process::id()
+        ));
+        std::fs::write(&path, b">r0\nACGT\n").unwrap();
+        let nul_path = format!("{}\0hidden", path.to_string_lossy());
+
+        let mut fp = mb_bseq_open(Some(&nul_path)).expect("open C-truncated path");
+        let mut n = 0;
+        let reads = mb_bseq_read(&mut fp, 1_000_000, 0, 0, 0, 1, 1_000_000, &mut n);
+        assert_eq!(n, 1);
+        assert_eq!(&*reads[0].name, "r0");
+        assert_eq!(&*reads[0].seq, "ACGT");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn fasta_header_plus_line_reads_quality_like_kseq() {
+        let path = std::env::temp_dir().join(format!(
+            "minibwa_rs_bseq_fasta_plus_quality_{}.fa",
+            std::process::id()
+        ));
+        std::fs::write(&path, b">r0\nACGT\n+\n!!!!\n").unwrap();
+        let mut fp = mb_bseq_open(Some(&path.to_string_lossy())).expect("open plus fasta");
+        let mut n = 0;
+        let reads = mb_bseq_read(&mut fp, 1_000_000, 1, 0, 0, 1, 1_000_000, &mut n);
+        assert_eq!(n, 1);
+        assert_eq!(&*reads[0].seq, "ACGT");
+        assert_eq!(reads[0].qual.as_ref().unwrap().as_bytes(), b"!!!!");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_frag_does_not_report_truncated_quality_warning_state() {
+        let good = std::env::temp_dir().join(format!(
+            "minibwa_rs_bseq_frag_good_{}.fq",
+            std::process::id()
+        ));
+        let bad = std::env::temp_dir().join(format!(
+            "minibwa_rs_bseq_frag_bad_{}.fq",
+            std::process::id()
+        ));
+        std::fs::write(&good, b"@r0\nACGT\n+\n!!!!\n").unwrap();
+        std::fs::write(&bad, b"@r0\nACGT\n+\n!!\n").unwrap();
+        let fp1 = mb_bseq_open(Some(&good.to_string_lossy())).expect("open good fastq");
+        let fp2 = mb_bseq_open(Some(&bad.to_string_lossy())).expect("open bad fastq");
+        let mut fps = vec![fp1, fp2];
+        let mut n = 0;
+        let reads = mb_bseq_read_frag(2, &mut fps, 1_000_000, 1, 0, &mut n);
+        assert_eq!(n, 0);
+        assert!(reads.is_empty());
+        assert!(fps[1].parse_error);
+        assert!(!fps[1].parse_error_reported);
+        let _ = std::fs::remove_file(good);
+        let _ = std::fs::remove_file(bad);
+    }
+
+    #[test]
+    fn read_parse_error_after_chunk_boundary_is_first_record_state() {
+        let path = std::env::temp_dir().join(format!(
+            "minibwa_rs_bseq_parse_boundary_{}.fq",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"@good\nACGT\n+\nFFFF\n@bad\nACGTACGT\n+\nFFFF\n").unwrap();
+        let mut fp = mb_bseq_open(Some(&path.to_string_lossy())).expect("open fastq");
+        let mut n = 0;
+
+        let first = mb_bseq_read(&mut fp, 4, 1, 0, 0, 1, 4, &mut n);
+        assert_eq!(n, 1);
+        assert_eq!(&*first[0].name, "good");
+        assert!(!fp.parse_error);
+
+        let second = mb_bseq_read(&mut fp, 4, 1, 0, 0, 1, 4, &mut n);
+        assert_eq!(n, 0);
+        assert!(second.is_empty());
+        assert!(fp.parse_error);
+        assert!(fp.parse_error_after.is_none());
+
         let _ = std::fs::remove_file(path);
     }
 }

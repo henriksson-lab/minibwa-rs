@@ -418,7 +418,7 @@ pub fn ksw_extz2_sse(
             while score_t <= en0 {
                 let t_usize = score_t as usize;
                 let q_usize = (qlen as i32 - 1 - r_i32 + score_t) as usize;
-                #[cfg(any())]
+                #[cfg(target_arch = "x86_64")]
                 unsafe {
                     let sq = loadu128_u8(&sf, t_usize);
                     let stq = loadu128_u8(&qr, q_usize);
@@ -430,7 +430,7 @@ pub fn ksw_extz2_sse(
                     score = blendv_epi8_native(score, sc_n_v_n, wild);
                     storeu128_u8(&mut s, t_usize, score);
                 }
-                #[cfg(not(any()))]
+                #[cfg(not(target_arch = "x86_64"))]
                 {
                     let sq = unsafe { load16_at(&sf, t_usize) };
                     let stq = unsafe { load16_at(&qr, q_usize) };
@@ -463,7 +463,7 @@ pub fn ksw_extz2_sse(
         let mut v1_lane = v1;
         for block in st_block..=en_block {
             let base = block as usize * 16;
-            #[cfg(any())]
+            #[cfg(target_arch = "x86_64")]
             unsafe {
                 let old_x = loadu128_u8(&x, base);
                 let old_v = loadu128_u8(&v, base);
@@ -547,7 +547,7 @@ pub fn ksw_extz2_sse(
                 v1_lane = old_v_tail;
                 continue;
             }
-            #[cfg(not(any()))]
+            #[cfg(not(target_arch = "x86_64"))]
             {
                 let old_x = unsafe { load16_at(&x, base) };
                 let old_v = unsafe { load16_at(&v, base) };
@@ -638,7 +638,7 @@ pub fn ksw_extz2_sse(
                 let mut max_h_v = s2n_lite::_mm_set1_epi32(max_h_mut);
                 let mut max_t_v = s2n_lite::_mm_set1_epi32(max_t_mut);
                 let qe_v = s2n_lite::_mm_set1_epi32(qe);
-                #[cfg(any())]
+                #[cfg(target_arch = "x86_64")]
                 let (mut max_h_v_n, mut max_t_v_n) = unsafe {
                     (
                         std::arch::x86_64::_mm_set1_epi32(max_h_mut),
@@ -648,7 +648,7 @@ pub fn ksw_extz2_sse(
                 let mut t = st0;
                 while t < en1 {
                     let base = t as usize;
-                    #[cfg(any())]
+                    #[cfg(target_arch = "x86_64")]
                     unsafe {
                         let mut h_v = loadu128_i32(&h, base);
                         let v_v = std::arch::x86_64::_mm_setr_epi32(
@@ -668,7 +668,7 @@ pub fn ksw_extz2_sse(
                         max_h_v_n = blendv_epi8_native(max_h_v_n, h_v, gt);
                         max_t_v_n = blendv_epi8_native(max_t_v_n, t_v, gt);
                     }
-                    #[cfg(not(any()))]
+                    #[cfg(not(target_arch = "x86_64"))]
                     {
                         let mut h_v = unsafe { load_i32x4_at(&h, base) };
                         let v_v = s2n_lite::_mm_setr_epi32(
@@ -687,14 +687,14 @@ pub fn ksw_extz2_sse(
                     }
                     t += 4;
                 }
-                #[cfg(any())]
+                #[cfg(target_arch = "x86_64")]
                 let (hh, tt) = unsafe {
                     (
                         i32x4_to_array_native(max_h_v_n),
                         i32x4_to_array_native(max_t_v_n),
                     )
                 };
-                #[cfg(not(any()))]
+                #[cfg(not(target_arch = "x86_64"))]
                 let (hh, tt) = unsafe { (i32x4_to_array(max_h_v), i32x4_to_array(max_t_v)) };
                 for lane in 0..4 {
                     if max_h_mut < hh[lane] {

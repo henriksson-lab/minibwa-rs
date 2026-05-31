@@ -1,6 +1,8 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use minibwa_rs::cli::run_with_writers;
+
 #[test]
 fn cli_prints_translated_top_level_usage_and_version() {
     let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
@@ -23,7 +25,7 @@ fn cli_prints_translated_top_level_usage_and_version() {
     assert_eq!(version.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(version.stdout).unwrap(),
-        "0.0-r318-dirty\n"
+        "0.0-r352-dirty\n"
     );
     assert!(version.stderr.is_empty());
 }
@@ -52,6 +54,42 @@ fn cli_top_level_usage_version_and_unknown_match_original() {
 }
 
 #[test]
+fn cli_in_process_dispatch_and_footer_use_c_string_boundaries() {
+    let argv = vec![
+        "minibwa-rs\0argv-tail".to_string(),
+        "map\0hidden-command".to_string(),
+        "--help".to_string(),
+    ];
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let status = run_with_writers(&argv, &mut stdout, &mut stderr).unwrap();
+    assert_eq!(status, 0);
+    assert!(stdout.starts_with(b"Usage: minibwa map [options] <in.idx> <in.fastq>\n"));
+
+    let stderr = String::from_utf8(stderr).unwrap();
+    assert!(stderr.contains("[M::main] CMD: minibwa-rs map --help\n"));
+    assert!(!stderr.contains("argv-tail"));
+    assert!(!stderr.contains("hidden-command"));
+}
+
+#[test]
+fn cli_in_process_unknown_command_diagnostic_uses_c_string_boundary() {
+    let argv = vec![
+        "minibwa-rs".to_string(),
+        "not-a-command\0hidden-command".to_string(),
+    ];
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let status = run_with_writers(&argv, &mut stdout, &mut stderr).unwrap();
+    assert_eq!(status, 1);
+    assert!(stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(stderr).unwrap(),
+        "ERROR: unknown command 'not-a-command'\n"
+    );
+}
+
+#[test]
 fn cli_prints_translated_subcommand_text() {
     let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
 
@@ -63,7 +101,9 @@ fn cli_prints_translated_subcommand_text() {
     let map_stdout = String::from_utf8(map_help.stdout).unwrap();
     assert!(map_stdout.starts_with("Usage: minibwa map [options] <in.idx> <in.fastq>\n"));
     assert!(map_stdout.contains("    --version        print version number\n"));
-    assert!(map_help.stderr.is_empty());
+    assert!(String::from_utf8(map_help.stderr)
+        .unwrap()
+        .starts_with("[M::main] Version: "));
 
     let fastmap_help = Command::new(rust_bin)
         .args(["fastmap", "--help"])
@@ -73,7 +113,9 @@ fn cli_prints_translated_subcommand_text() {
     let fastmap_stdout = String::from_utf8(fastmap_help.stdout).unwrap();
     assert!(fastmap_stdout.starts_with("Usage: minibwa fastmap [options] <idx-prefix> <in.fq>\n"));
     assert!(fastmap_stdout.contains("  --help     print this help message\n"));
-    assert!(fastmap_help.stderr.is_empty());
+    assert!(String::from_utf8(fastmap_help.stderr)
+        .unwrap()
+        .starts_with("[M::main] Version: "));
 }
 
 #[test]
@@ -159,7 +201,12 @@ fn cli_prints_translated_index_subcommand_usage() {
             String::from_utf8(help.stdout).unwrap().starts_with(usage),
             "help stdout for {command}"
         );
-        assert!(help.stderr.is_empty(), "help stderr for {command}");
+        assert!(
+            String::from_utf8(help.stderr)
+                .unwrap()
+                .starts_with("[M::main] Version: "),
+            "help stderr for {command}"
+        );
 
         let missing = Command::new(rust_bin).arg(command).output().unwrap();
         assert_eq!(
@@ -186,10 +233,13 @@ fn cli_index_stage_help_stdout_matches_original() {
         vec!["fa2bit", "--help"],
         vec!["fa2bit", "-s", "7", "--help"],
         vec!["genraw", "--help"],
+        vec!["genraw", "--meth", "--help"],
         vec!["raw2bwt", "--help"],
         vec!["genbwt", "--help"],
+        vec!["genbwt", "--meth", "--help"],
         vec!["genbwt", "-u", "3", "-t", "2", "--help"],
         vec!["gensa", "--help"],
+        vec!["gensa", "--meth", "--help"],
         vec!["gensa", "-u", "6", "--help"],
     ] {
         let rust = Command::new(rust_bin).args(&args).output().unwrap();
@@ -215,10 +265,13 @@ fn cli_index_stage_option_usage_errors_match_original() {
         vec!["fa2bit", "-s"],
         vec!["fa2bit", "--unknown"],
         vec!["genraw", "-b"],
+        vec!["genraw", "--meth"],
         vec!["genraw", "--unknown"],
         vec!["genbwt", "-u"],
+        vec!["genbwt", "--meth"],
         vec!["genbwt", "--unknown"],
         vec!["gensa", "-u"],
+        vec!["gensa", "--meth"],
         vec!["gensa", "--unknown"],
         vec!["raw2bwt", "--unknown"],
     ] {
@@ -229,6 +282,35 @@ fn cli_index_stage_option_usage_errors_match_original() {
             original.status.code(),
             "status for {args:?}"
         );
+        assert_eq!(rust.stdout, original.stdout, "stdout for {args:?}");
+        assert_eq!(rust.stderr, original.stderr, "stderr for {args:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_fa2bit_missing_input_segfaults_like_original() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let dir =
+        std::env::temp_dir().join(format!("minibwa_rs_missing_fa2bit_{}", std::process::id()));
+    let missing = dir.join("missing.fa").to_string_lossy().into_owned();
+    let out = dir.join("out").to_string_lossy().into_owned();
+
+    for args in [
+        vec!["fa2bit", &missing, &out],
+        vec!["fa2bit", "-p", &missing, &out],
+    ] {
+        let rust = Command::new(rust_bin).args(&args).output().unwrap();
+        let original = Command::new(original_bin).args(&args).output().unwrap();
+        assert_eq!(
+            rust.status.signal(),
+            original.status.signal(),
+            "signal for {args:?}"
+        );
+        assert_eq!(rust.status.signal(), Some(11), "rust signal for {args:?}");
         assert_eq!(rust.stdout, original.stdout, "stdout for {args:?}");
         assert_eq!(rust.stderr, original.stderr, "stderr for {args:?}");
     }
@@ -302,6 +384,16 @@ fn cli_genraw_single_strand_pac_failure_matches_original() {
     assert_eq!(rust.status.code(), original.status.code());
     assert_eq!(rust.stdout, original.stdout);
     assert_eq!(rust.stderr, original.stderr);
+
+    let full = std::path::Path::new("/dev/full");
+    if full.exists() {
+        let args = ["genraw", &pac.to_string_lossy(), "/dev/full"];
+        let rust = Command::new(rust_bin).args(args).output().unwrap();
+        let original = Command::new(original_bin).args(args).output().unwrap();
+        assert_eq!(rust.status.code(), original.status.code());
+        assert_eq!(rust.stdout, original.stdout);
+        assert_eq!(rust.stderr, original.stderr);
+    }
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -401,6 +493,147 @@ fn cli_bench_unknown_type_aborts_like_original() {
 
 #[cfg(unix)]
 #[test]
+fn cli_bench_missing_bwt_segfaults_like_original() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let missing = std::env::temp_dir().join(format!(
+        "minibwa_rs_missing_bench_bwt_{}",
+        std::process::id()
+    ));
+    let missing = missing.to_string_lossy().into_owned();
+    let args = ["bench", &missing];
+
+    let rust = Command::new(rust_bin).args(args).output().unwrap();
+    let original = Command::new(original_bin).args(args).output().unwrap();
+    assert_eq!(rust.status.signal(), Some(11));
+    assert_eq!(original.status.signal(), Some(11));
+    assert_eq!(rust.stdout, original.stdout);
+    assert_eq!(rust.stderr, original.stderr);
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_raw2bwt_missing_raw_segfaults_like_original() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let dir =
+        std::env::temp_dir().join(format!("minibwa_rs_missing_raw2bwt_{}", std::process::id()));
+    let missing = dir.join("missing.raw");
+    let out = dir.join("out.mbw");
+    let args = [
+        "raw2bwt",
+        &missing.to_string_lossy(),
+        &out.to_string_lossy(),
+    ];
+
+    let rust = Command::new(rust_bin).args(args).output().unwrap();
+    let original = Command::new(original_bin).args(args).output().unwrap();
+    assert_eq!(rust.status.signal(), original.status.signal());
+    assert_eq!(rust.status.signal(), Some(11));
+    assert_eq!(rust.stdout, original.stdout);
+    assert_eq!(rust.stderr, original.stderr);
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_gensa_missing_input_segfaults_like_original() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let dir = std::env::temp_dir().join(format!("minibwa_rs_missing_gensa_{}", std::process::id()));
+    let missing_mbw = dir.join("missing.mbw").to_string_lossy().into_owned();
+    let missing_raw = dir.join("missing.raw").to_string_lossy().into_owned();
+    let out = dir.join("out.mbw").to_string_lossy().into_owned();
+
+    for args in [
+        vec!["gensa", &missing_mbw, &out],
+        vec!["gensa", "-r", &missing_raw, &out],
+    ] {
+        let rust = Command::new(rust_bin).args(&args).output().unwrap();
+        let original = Command::new(original_bin).args(&args).output().unwrap();
+        assert_eq!(rust.status.signal(), original.status.signal());
+        assert_eq!(rust.status.signal(), Some(11));
+        assert_eq!(rust.stdout, original.stdout);
+        assert_eq!(rust.stderr, original.stderr);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_index_truncated_binary_assertions_match_original() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let dir = std::env::temp_dir().join(format!(
+        "minibwa_rs_truncated_index_bin_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let magic_l2b = dir.join("magic-only.l2b");
+    let short_raw = dir.join("short.raw");
+    std::fs::write(&magic_l2b, b"L2B\x01").unwrap();
+    std::fs::write(&short_raw, [0u8; 8]).unwrap();
+
+    for args in [
+        vec![
+            "genbwt".to_string(),
+            magic_l2b.to_string_lossy().into_owned(),
+            dir.join("out.mbw").to_string_lossy().into_owned(),
+        ],
+        vec![
+            "raw2bwt".to_string(),
+            short_raw.to_string_lossy().into_owned(),
+            dir.join("out2.mbw").to_string_lossy().into_owned(),
+        ],
+    ] {
+        let rust = Command::new(rust_bin).args(&args).output().unwrap();
+        let original = Command::new(original_bin).args(&args).output().unwrap();
+        assert_eq!(rust.status.signal(), Some(6), "rust signal for {args:?}");
+        assert_eq!(
+            original.status.signal(),
+            Some(6),
+            "original signal for {args:?}"
+        );
+        assert_eq!(rust.stdout, original.stdout, "stdout for {args:?}");
+        assert_eq!(rust.stderr, original.stderr, "stderr for {args:?}");
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn cli_genraw_truncated_pac_seek_failure_matches_original() {
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let dir = std::env::temp_dir().join(format!(
+        "minibwa_rs_truncated_genraw_pac_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pac = dir.join("short.pac");
+    let out = dir.join("out.raw");
+    std::fs::write(&pac, [0u8, 4]).unwrap();
+    let args = ["genraw", &pac.to_string_lossy(), &out.to_string_lossy()];
+
+    let rust = Command::new(rust_bin).args(args).output().unwrap();
+    let original = Command::new(original_bin).args(args).output().unwrap();
+    assert_eq!(rust.status.code(), Some(1));
+    assert_eq!(original.status.code(), Some(1));
+    assert_eq!(rust.stdout, original.stdout);
+    assert_eq!(rust.stderr, original.stderr);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
 fn cli_assertion_abort_paths_match_original() {
     use std::os::unix::process::ExitStatusExt;
 
@@ -464,7 +697,9 @@ fn cli_prints_translated_bench_usage_and_real_output() {
     let help_stdout = String::from_utf8(help.stdout).unwrap();
     assert!(help_stdout.starts_with("Usage: minibwa bench [options] <in.mbw>\n"));
     assert!(help_stdout.contains("  --help         print this help message\n"));
-    assert!(help.stderr.is_empty());
+    assert!(String::from_utf8(help.stderr)
+        .unwrap()
+        .starts_with("[M::main] Version: "));
 
     let output = Command::new(rust_bin)
         .args(["bench", "-n", "3", "-p", &mbw])
@@ -678,6 +913,65 @@ fn cli_fastmap_malformed_fastq_stops_like_original_without_bseq_warning() {
 }
 
 #[test]
+fn cli_fastmap_raw_non_utf8_read_name_stdout_matches_original() {
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let index = format!("{manifest_dir}/minibwa/chrM-human");
+    let dir = std::env::temp_dir().join(format!(
+        "minibwa_rs_fastmap_raw_name_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let reads = dir.join("raw.fa");
+    std::fs::write(
+        &reads,
+        b">r\xff comment\nGATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT\n",
+    )
+    .unwrap();
+    let reads_s = reads.to_string_lossy().into_owned();
+
+    let args = ["fastmap", "-l", "19", "-w", "2", &index, &reads_s];
+    let rust = Command::new(rust_bin).args(args).output().unwrap();
+    let original = Command::new(original_bin).args(args).output().unwrap();
+    assert_eq!(rust.status.code(), Some(0));
+    assert_eq!(original.status.code(), Some(0));
+    assert_eq!(rust.stdout, original.stdout);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn cli_fastmap_overlong_fastq_quality_stops_like_original() {
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let index = format!("{manifest_dir}/minibwa/chrM-human");
+    let dir = std::env::temp_dir().join(format!(
+        "minibwa_rs_fastmap_overlong_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let reads = dir.join("overlong.fq");
+    std::fs::write(
+        &reads,
+        b"@bad\nGATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT\n+\nFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\n",
+    )
+    .unwrap();
+    let reads_s = reads.to_string_lossy().into_owned();
+
+    let args = ["fastmap", "-l", "19", "-w", "2", &index, &reads_s];
+    let rust = Command::new(rust_bin).args(args).output().unwrap();
+    let original = Command::new(original_bin).args(args).output().unwrap();
+    assert_eq!(rust.status.code(), Some(0));
+    assert_eq!(original.status.code(), Some(0));
+    assert_eq!(rust.stdout, original.stdout);
+    assert!(rust.stdout.is_empty());
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn cli_fastmap_usage_errors_match_original() {
     let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
     let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
@@ -697,6 +991,52 @@ fn cli_fastmap_usage_errors_match_original() {
         assert_eq!(rust.stdout, original.stdout, "stdout for {args:?}");
         assert_eq!(rust.stderr, original.stderr, "stderr for {args:?}");
     }
+}
+
+#[test]
+fn cli_fastmap_missing_inputs_match_original() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let index = format!("{manifest_dir}/minibwa/chrM-human");
+    let dir =
+        std::env::temp_dir().join(format!("minibwa_rs_fastmap_missing_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let missing_index = dir.join("missing-index");
+    let missing_reads = dir.join("missing.fa");
+
+    let args = [
+        "fastmap".to_string(),
+        missing_index.to_string_lossy().into_owned(),
+        missing_reads.to_string_lossy().into_owned(),
+    ];
+    let rust = Command::new(rust_bin).args(&args).output().unwrap();
+    let original = Command::new(original_bin).args(&args).output().unwrap();
+    assert_eq!(rust.status.signal(), original.status.signal());
+    assert_eq!(rust.status.signal(), Some(11));
+    assert_eq!(rust.stdout, original.stdout);
+    assert_eq!(rust.stderr, original.stderr);
+
+    let args = [
+        "fastmap".to_string(),
+        index,
+        missing_reads.to_string_lossy().into_owned(),
+    ];
+    let rust = Command::new(rust_bin).args(&args).output().unwrap();
+    let original = Command::new(original_bin).args(&args).output().unwrap();
+    assert_eq!(rust.status.code(), original.status.code());
+    assert_eq!(rust.stdout, original.stdout);
+    assert!(rust.stdout.is_empty());
+    let rust_stderr = String::from_utf8(rust.stderr).unwrap();
+    let original_stderr = String::from_utf8(original.stderr).unwrap();
+    assert!(rust_stderr.starts_with("[M::main] Version: "));
+    assert!(original_stderr.starts_with("[M::main] Version: "));
+    assert!(rust_stderr.contains("[M::main] CMD:"));
+    assert!(original_stderr.contains("[M::main] CMD:"));
+
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -985,12 +1325,12 @@ fn cli_map_warns_like_original_for_unbalanced_paired_inputs() {
     ];
     let rust = Command::new(rust_bin).args(args).output().unwrap();
     let original = Command::new(original_bin).args(args).output().unwrap();
-    assert_eq!(rust.status.code(), Some(0));
-
     let warning =
         "[W::mb_bseq_read_frag]\u{1b}[1;31m query files have different number of records; extra records skipped.\u{1b}[0m";
     let rust_stderr = String::from_utf8(rust.stderr).unwrap();
     let original_stderr = String::from_utf8(original.stderr).unwrap();
+    assert!(!rust.status.success());
+    assert!(!original.status.success());
     assert_eq!(rust_stderr.matches(warning).count(), 1);
     assert!(original_stderr.contains(warning));
 }
@@ -1049,22 +1389,34 @@ fn cli_map_warns_like_original_for_truncated_fastq_quality() {
     std::fs::write(&next, b"@good\nACGT\n+\nFFFF\n@bad\nACGTACGT\n+\nFFFF\n").unwrap();
     std::fs::write(&overlong, b"@bad\nACGT\n+\nFFFFFF\n").unwrap();
 
-    for (reads, warning) in [
+    for (reads, chunk_size, warning) in [
         (
             &first,
+            "1k,1k",
             "[WARNING]\u{1b}[1;31m failed to parse the first FASTA/FASTQ record. Continue anyway.\u{1b}[0m",
         ),
         (
             &next,
+            "1k,1k",
             "[WARNING]\u{1b}[1;31m failed to parse the FASTA/FASTQ record next to 'good'. Continue anyway.\u{1b}[0m",
         ),
         (
             &overlong,
+            "1k,1k",
             "[WARNING]\u{1b}[1;31m failed to parse the first FASTA/FASTQ record. Continue anyway.\u{1b}[0m",
         ),
     ] {
         let reads_s = reads.to_string_lossy().into_owned();
-        let args = ["map", "--chain-only", "-t", "1", "-K", "1k,1k", &index, &reads_s];
+        let args = [
+            "map",
+            "--chain-only",
+            "-t",
+            "1",
+            "-K",
+            chunk_size,
+            &index,
+            &reads_s,
+        ];
         let rust = Command::new(rust_bin).args(args).output().unwrap();
         let original = Command::new(original_bin).args(args).output().unwrap();
         assert_eq!(rust.status.code(), Some(0));
@@ -1254,6 +1606,39 @@ fn cli_map_paired_sam_stdout_matches_original_on_real_index_reads() {
 }
 
 #[test]
+fn cli_map_paired_names_stop_at_nul_like_original() {
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let index = format!("{manifest_dir}/minibwa/chrM-human");
+    let dir = std::env::temp_dir().join(format!("minibwa_rs_pair_nul_name_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let r1 = dir.join("r1.fa");
+    let r2 = dir.join("r2.fa");
+    std::fs::write(
+        &r1,
+        b">pair\0left/1\nACTCACCTGAGTTGTAAAAAACTCCAGTTGACACAAAATAGACTACGAAAGTGGCTTTAACATATCTGAACACACAATAGCTAAGACCCAAACTGGGATTAGATACCCCACTATGCTTAGCCCTAAACCTCAACAGTTAAATCAACAAAAC\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &r2,
+        b">pair\0right/2\nACCTCATGGGCTACACCTTGACCTAACGTCTTTACGTGGGTACTTGCGCTTACTTTGTAGCCTTCATCAGGGTTTGCTGAAGATGGCGGTATATAGGCTGAGCAAGAGGTGGTGAGGTTGATCGGGGTTTATCGATTACAGAACAGGCTCC\n",
+    )
+    .unwrap();
+    let r1_s = r1.to_string_lossy().into_owned();
+    let r2_s = r2.to_string_lossy().into_owned();
+
+    let args = ["map", "-a", "-t", "1", "-K", "1k,1k", &index, &r1_s, &r2_s];
+    let rust = Command::new(rust_bin).args(args).output().unwrap();
+    let original = Command::new(original_bin).args(args).output().unwrap();
+    assert_eq!(rust.status.code(), Some(0));
+    assert_eq!(original.status.code(), Some(0));
+    assert_eq!(rust.stdout, original.stdout);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn cli_map_sam_tag_modes_match_original_on_real_index_single_read() {
     let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
     let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
@@ -1374,6 +1759,40 @@ fn cli_map_copy_comment_matches_original_for_fasta_comment() {
         assert_eq!(rust.status.code(), Some(0));
         assert_eq!(original.status.code(), Some(0));
         assert_eq!(rust.stdout, original.stdout);
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn cli_map_copy_comment_embedded_nul_truncates_like_original() {
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let index = format!("{manifest_dir}/minibwa/chrM-human");
+    let dir = std::env::temp_dir().join(format!(
+        "minibwa_rs_copy_comment_nul_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let reads = dir.join("nul-comment.fa");
+    std::fs::write(
+        &reads,
+        b">nulled cc:Z:ok\0hidden\nACTCACCTGAGTTGTAAAAAACTCCAGTTGACACAAAATAGACTACGAAAGTGGCTTTAACATATCTGAACACACAATAGCTAAGACCCAAACTGGGATTAGATACCCCACTATGCTTAGCCCTAAACCTCAACAGTTAAATCAACAAAAC\n",
+    )
+    .unwrap();
+    let reads_s = reads.to_string_lossy().into_owned();
+
+    for extra in [Vec::<&str>::new(), vec!["-a"]] {
+        let mut args = vec!["map", "-y"];
+        args.extend(extra);
+        args.extend(["-t", "1", "-K", "1k,1k", &index, &reads_s]);
+        let rust = Command::new(rust_bin).args(&args).output().unwrap();
+        let original = Command::new(original_bin).args(&args).output().unwrap();
+        assert_eq!(rust.status.code(), Some(0));
+        assert_eq!(original.status.code(), Some(0));
+        assert_eq!(rust.stdout, original.stdout);
+        assert!(!rust.stdout.windows(b"hidden".len()).any(|w| w == b"hidden"));
     }
 
     let _ = std::fs::remove_dir_all(dir);
@@ -1603,6 +2022,85 @@ fn cli_map_missing_query_file_diagnostic_matches_original() {
     let original_stderr = String::from_utf8(original.stderr).unwrap();
     assert!(rust_stderr.contains(&expected));
     assert!(original_stderr.contains(&expected));
+    assert!(rust_stderr.contains("[M::main] Version: 0.0-r352-dirty\n"));
+    assert!(original_stderr.contains("[M::main] Version: 0.0-r352-dirty\n"));
+    assert!(!rust_stderr.contains("os error"));
+    assert!(!original_stderr.contains("os error"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_map_bare_kalloc_fatal_before_index_load_like_original() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let index = format!("{manifest_dir}/minibwa/chrM-human");
+    let reads = format!("{manifest_dir}/minibwa/test/chrM-read_1.fa.gz");
+
+    let args = ["map", "--chain-only", "--kalloc", &index, &reads];
+    let rust = Command::new(rust_bin).args(args).output().unwrap();
+    let original = Command::new(original_bin).args(args).output().unwrap();
+
+    assert_eq!(rust.status.signal(), original.status.signal());
+    assert_eq!(rust.status.signal(), Some(11));
+    assert_eq!(rust.stdout, original.stdout);
+    assert_eq!(rust.stderr, original.stderr);
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_map_nonpositive_threads_fatal_after_index_load_like_original() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let index = format!("{manifest_dir}/minibwa/chrM-human");
+    let reads = format!("{manifest_dir}/minibwa/test/chrM-read_1.fa.gz");
+
+    for threads in ["0", "-1"] {
+        let args = ["map", "--chain-only", "-t", threads, &index, &reads];
+        let rust = Command::new(rust_bin).args(args).output().unwrap();
+        let original = Command::new(original_bin).args(args).output().unwrap();
+
+        assert_eq!(rust.status.signal(), original.status.signal());
+        assert_eq!(rust.status.signal(), Some(11));
+        assert_eq!(rust.stdout, original.stdout);
+
+        let rust_stderr = String::from_utf8(rust.stderr).unwrap();
+        let original_stderr = String::from_utf8(original.stderr).unwrap();
+        assert!(rust_stderr.starts_with("[M::main_map::"));
+        assert!(original_stderr.starts_with("[M::main_map::"));
+        assert!(rust_stderr.contains("] index loaded\n"));
+        assert!(original_stderr.contains("] index loaded\n"));
+    }
+}
+
+#[test]
+fn cli_map_output_open_failure_footer_matches_original() {
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let index = format!("{manifest_dir}/minibwa/chrM-human");
+    let reads = format!("{manifest_dir}/minibwa/test/chrM-read_1.fa.gz");
+    let out = std::env::temp_dir()
+        .join(format!("minibwa_rs_missing_out_dir_{}", std::process::id()))
+        .join("out.paf");
+    let out = out.to_string_lossy().into_owned();
+
+    let args = ["map", "--chain-only", "-o", &out, &index, &reads];
+    let rust = Command::new(rust_bin).args(args).output().unwrap();
+    let original = Command::new(original_bin).args(args).output().unwrap();
+    assert_eq!(rust.status.code(), Some(0));
+    assert_eq!(original.status.code(), Some(0));
+    assert_eq!(rust.stdout, original.stdout);
+
+    let rust_stderr = String::from_utf8(rust.stderr).unwrap();
+    let original_stderr = String::from_utf8(original.stderr).unwrap();
+    assert!(rust_stderr.contains("[M::main] Version: 0.0-r352-dirty\n"));
+    assert!(original_stderr.contains("[M::main] Version: 0.0-r352-dirty\n"));
 }
 
 #[test]
@@ -2001,6 +2499,46 @@ fn cli_fa2bit_output_matches_original_for_small_fasta() {
     assert_eq!(rust_pac_stdout.status.code(), Some(0));
     assert_eq!(original_pac_stdout.status.code(), Some(0));
     assert_eq!(rust_pac_stdout.stdout, original_pac_stdout.stdout);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn cli_fa2bit_metadata_control_and_nul_bytes_match_original() {
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let dir = std::env::temp_dir().join(format!(
+        "minibwa_rs_cli_fa2bit_nul_meta_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let fasta = dir.join("in.fa");
+    let rust_l2b = dir.join("rust.l2b");
+    let original_l2b = dir.join("original.l2b");
+    std::fs::write(&fasta, b">ctg\x01raw\0hidden comment\0tail\nACGT\n").unwrap();
+
+    let rust = Command::new(rust_bin)
+        .args([
+            "fa2bit",
+            &fasta.to_string_lossy(),
+            &rust_l2b.to_string_lossy(),
+        ])
+        .output()
+        .unwrap();
+    let original = Command::new(original_bin)
+        .args([
+            "fa2bit",
+            &fasta.to_string_lossy(),
+            &original_l2b.to_string_lossy(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(rust.status.code(), Some(0));
+    assert_eq!(original.status.code(), Some(0));
+    assert_eq!(
+        std::fs::read(rust_l2b).unwrap(),
+        std::fs::read(original_l2b).unwrap()
+    );
 
     let _ = std::fs::remove_dir_all(dir);
 }

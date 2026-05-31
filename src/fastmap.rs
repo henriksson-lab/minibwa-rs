@@ -1,22 +1,152 @@
 #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
-use crate::bseq::{mb_bseq_open, mb_bseq_read};
 use crate::bwt::{
     mb_bwt_sa_batch, mb_bwt_smem, mb_bwt_smem_batch_ref_with_queue, mb_sai_t, mb_sai_v,
     mb_smem_entry_ref, tiny_queue_t,
 };
 use crate::ketopt::{ketopt, ko_longopt_t, KETOPT_INIT};
-use crate::kommon::kstring_t;
+use crate::kommon::{kom_atoi, kstring_t, KOM_NT4_TABLE};
 use crate::l2bit::l2b_intv2cid;
 use crate::map_algo::{mb_idx_load, mb_idx_t};
-use std::io::Write;
+use flate2::bufread::MultiGzDecoder;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Read, Write};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct batch_seq1_t {
-    pub name: String,
+    pub name: Vec<u8>,
     pub l_seq: i32,
     pub seq: Vec<u8>,
     pub v: mb_sai_v,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RawKseqRecord {
+    pub name: Vec<u8>,
+    pub seq: Vec<u8>,
+}
+
+pub(crate) struct RawKseqReader {
+    reader: Box<dyn BufRead + Send>,
+    pending_header: Option<Vec<u8>>,
+    eof: bool,
+}
+
+impl RawKseqReader {
+    pub(crate) fn open(path: &str) -> Option<Self> {
+        let path = cstr_path(path);
+        let raw: Box<dyn Read + Send> = if path == "-" {
+            Box::new(io::stdin())
+        } else {
+            Box::new(File::open(path).ok()?)
+        };
+        let mut buffered = BufReader::new(raw);
+        let is_gzip = buffered.fill_buf().ok()?.starts_with(&[0x1f, 0x8b]);
+        let reader: Box<dyn BufRead + Send> = if is_gzip {
+            Box::new(BufReader::new(MultiGzDecoder::new(buffered)))
+        } else {
+            Box::new(buffered)
+        };
+        Some(Self {
+            reader,
+            pending_header: None,
+            eof: false,
+        })
+    }
+
+    pub(crate) fn read(&mut self) -> Option<RawKseqRecord> {
+        if self.eof {
+            return None;
+        }
+        let header = if let Some(header) = self.pending_header.take() {
+            header
+        } else {
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                let n = self.reader.read_until(b'\n', &mut line).ok()?;
+                if n == 0 {
+                    self.eof = true;
+                    return None;
+                }
+                if let Some(pos) = line.iter().position(|&c| c == b'>' || c == b'@') {
+                    break strip_line_ending(&line[pos + 1..]).to_vec();
+                }
+            }
+        };
+        let name_end = header
+            .iter()
+            .position(|&c| c.is_ascii_whitespace())
+            .unwrap_or(header.len());
+        let name = header[..name_end].to_vec();
+        let mut seq = Vec::new();
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let n = self.reader.read_until(b'\n', &mut line).ok()?;
+            if n == 0 {
+                self.eof = true;
+                break;
+            }
+            if line.first().is_some_and(|&c| c == b'>' || c == b'@') {
+                self.pending_header = Some(strip_line_ending(&line[1..]).to_vec());
+                break;
+            }
+            if line.first() == Some(&b'+') {
+                let mut qual_len = 0usize;
+                while qual_len < seq.len() {
+                    line.clear();
+                    let n = self.reader.read_until(b'\n', &mut line).ok()?;
+                    if n == 0 {
+                        self.eof = true;
+                        return None;
+                    }
+                    qual_len += strip_line_ending(&line).len();
+                }
+                if qual_len != seq.len() {
+                    self.eof = true;
+                    return None;
+                }
+                break;
+            }
+            seq.extend_from_slice(strip_line_ending(&line));
+        }
+        Some(RawKseqRecord { name, seq })
+    }
+}
+
+fn cstr_path(path: &str) -> &str {
+    let bytes = path.as_bytes();
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    &path[..end]
+}
+
+fn strip_line_ending(mut bytes: &[u8]) -> &[u8] {
+    if bytes.last() == Some(&b'\n') {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    if bytes.len() > 1 && bytes.last() == Some(&b'\r') {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
+}
+
+fn encode_nt4(seq: &[u8]) -> Vec<u8> {
+    seq.iter().map(|&c| KOM_NT4_TABLE[c as usize]).collect()
+}
+
+fn raise_sigsegv() -> ! {
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGSEGV, libc::SIG_DFL);
+        libc::raise(libc::SIGSEGV);
+    }
+    std::process::abort();
+}
+
+fn ks_put_c_bytes(out: &mut kstring_t, bytes: &[u8]) {
+    let end = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
+    ks_put_bytes(out, &bytes[..end]);
 }
 
 fn ks_put_bytes(out: &mut kstring_t, bytes: &[u8]) {
@@ -65,7 +195,7 @@ fn emit_kstring(
     if let Some(writer) = output_writer.as_deref_mut() {
         writer.write_all(&out.s[..out.l]).is_ok()
     } else {
-        emitted.push_str(std::str::from_utf8(&out.s[..out.l]).unwrap());
+        emitted.push_str(&String::from_utf8_lossy(&out.s[..out.l]));
         true
     }
 }
@@ -143,7 +273,7 @@ pub fn write_intv(
             } else {
                 let name = &idx.l2b.ctg[cid as usize].name;
                 ks_put_bytes(out, b"\t");
-                ks_put_bytes(out, name.as_bytes());
+                ks_put_c_bytes(out, name.as_bytes());
                 ks_put_bytes(out, if rev != 0 { b":-" } else { b":+" });
                 ks_put_i64(out, cst + 1);
             }
@@ -204,7 +334,7 @@ fn process_batch_append(
     for ti in t.iter_mut().take(n as usize) {
         out.l = 0;
         ks_put_bytes(out, b"SQ\t");
-        ks_put_bytes(out, ti.name.as_bytes());
+        ks_put_c_bytes(out, &ti.name);
         ks_put_bytes(out, b"\t");
         ks_put_i32(out, ti.l_seq);
         ks_put_bytes(out, b"\n");
@@ -261,13 +391,13 @@ fn main_fastmap_inner(argv: &[String], mut output_writer: Option<&mut dyn Write>
             break;
         }
         if c == 'l' as i32 {
-            min_len = o.arg.as_deref().unwrap_or("0").parse().unwrap_or(0);
+            min_len = kom_atoi(o.arg.as_deref().unwrap_or("0"));
         } else if c == 's' as i32 {
-            min_occ = o.arg.as_deref().unwrap_or("0").parse().unwrap_or(0);
+            min_occ = kom_atoi(o.arg.as_deref().unwrap_or("0"));
         } else if c == 'w' as i32 {
-            max_size_out = o.arg.as_deref().unwrap_or("0").parse().unwrap_or(0);
+            max_size_out = kom_atoi(o.arg.as_deref().unwrap_or("0"));
         } else if c == 'b' as i32 {
-            max_seq = o.arg.as_deref().unwrap_or("0").parse().unwrap_or(0);
+            max_seq = kom_atoi(o.arg.as_deref().unwrap_or("0"));
         } else if c == 901 {
             return usage_fastmap(true, min_len, min_occ, max_size_out, max_seq);
         }
@@ -276,95 +406,62 @@ fn main_fastmap_inner(argv: &[String], mut output_writer: Option<&mut dyn Write>
         return usage_fastmap(false, min_len, min_occ, max_size_out, max_seq);
     }
     let Some(idx) = mb_idx_load(&args[o.ind as usize], 0) else {
-        return (1, String::new());
+        raise_sigsegv();
     };
-    let Some(mut fp) = mb_bseq_open(Some(&args[o.ind as usize + 1])) else {
-        return (1, String::new());
+    let Some(mut fp) = RawKseqReader::open(&args[o.ind as usize + 1]) else {
+        return (0, String::new());
     };
-    fp.suppress_parse_warnings = true;
     let mut emitted = String::new();
     let mut out = kstring_t::default();
     let mut sa = vec![0u64; max_size_out.max(0) as usize];
     let mut tq = tiny_queue_t::default();
+    let mut n_seq = 0;
     let mut batch = if max_seq > 1 {
         vec![batch_seq1_t::default(); max_seq as usize]
     } else {
         Vec::new()
     };
-    loop {
-        let mut n_read = 0;
-        let reads = mb_bseq_read(
-            &mut fp,
-            if max_seq > 1 { max_seq as i64 } else { 1 },
-            0,
-            0,
-            0,
-            1,
-            if max_seq > 1 { max_seq as i64 } else { 1 },
-            &mut n_read,
-        );
-        if n_read == 0 {
-            break;
-        }
+    while let Some(r) = fp.read() {
         if max_seq > 1 {
-            let n_read_usize = n_read as usize;
-            if batch.len() < n_read_usize {
-                batch.resize_with(n_read_usize, batch_seq1_t::default);
+            if n_seq == max_seq {
+                if !process_batch_append(
+                    &idx,
+                    n_seq,
+                    &mut batch,
+                    min_len,
+                    min_occ,
+                    max_size_out,
+                    &mut sa,
+                    &mut out,
+                    &mut emitted,
+                    &mut tq,
+                    &mut output_writer,
+                ) {
+                    return (-1, String::new());
+                }
+                n_seq = 0;
             }
-            for (slot, r) in batch.iter_mut().zip(reads.iter()).take(n_read_usize) {
-                slot.name.clear();
-                slot.name.push_str(&r.name);
-                slot.l_seq = r.l_seq as i32;
-                slot.seq.clear();
-                slot.seq.extend(r.seq.bytes().map(|c| match c {
-                    b'A' | b'a' => 0,
-                    b'C' | b'c' => 1,
-                    b'G' | b'g' => 2,
-                    b'T' | b't' => 3,
-                    _ => 4,
-                }));
-            }
-            if !process_batch_append(
-                &idx,
-                n_read,
-                &mut batch,
-                min_len,
-                min_occ,
-                max_size_out,
-                &mut sa,
-                &mut out,
-                &mut emitted,
-                &mut tq,
-                &mut output_writer,
-            ) {
-                return (-1, String::new());
-            }
+            let slot = &mut batch[n_seq as usize];
+            n_seq += 1;
+            slot.name.clear();
+            slot.name.extend_from_slice(&r.name);
+            slot.l_seq = r.seq.len() as i32;
+            slot.seq = encode_nt4(&r.seq);
         } else {
-            let r = &reads[0];
-            let seq = r
-                .seq
-                .bytes()
-                .map(|c| match c {
-                    b'A' | b'a' => 0,
-                    b'C' | b'c' => 1,
-                    b'G' | b'g' => 2,
-                    b'T' | b't' => 3,
-                    _ => 4,
-                })
-                .collect::<Vec<_>>();
+            let seq = encode_nt4(&r.seq);
             out.l = 0;
             ks_put_bytes(&mut out, b"SQ\t");
-            ks_put_bytes(&mut out, r.name.as_bytes());
+            ks_put_c_bytes(&mut out, &r.name);
             ks_put_bytes(&mut out, b"\t");
-            ks_put_u64(&mut out, r.l_seq);
+            ks_put_u64(&mut out, r.seq.len() as u64);
             ks_put_bytes(&mut out, b"\n");
             let mut x = 0i64;
             let mut a = Vec::<mb_sai_t>::new();
-            while x < r.l_seq as i64 {
+            while x < r.seq.len() as i64 {
                 let mut p = mb_sai_t::default();
                 x = mb_bwt_smem(
                     &idx.bwt,
-                    r.l_seq as u32,
+                    r.seq.len() as u32,
                     &seq,
                     x,
                     min_len as i64,
@@ -382,6 +479,23 @@ fn main_fastmap_inner(argv: &[String], mut output_writer: Option<&mut dyn Write>
             if !emit_kstring(&out, &mut emitted, &mut output_writer) {
                 return (-1, String::new());
             }
+        }
+    }
+    if max_seq > 1 && n_seq > 0 {
+        if !process_batch_append(
+            &idx,
+            n_seq,
+            &mut batch,
+            min_len,
+            min_occ,
+            max_size_out,
+            &mut sa,
+            &mut out,
+            &mut emitted,
+            &mut tq,
+            &mut output_writer,
+        ) {
+            return (-1, String::new());
         }
     }
     if let Some(writer) = output_writer {
@@ -427,6 +541,13 @@ mod tests {
     }
 
     #[test]
+    fn fastmap_c_string_writer_truncates_at_nul() {
+        let mut out = kstring_t::default();
+        ks_put_c_bytes(&mut out, b"ctg\0hidden");
+        assert_eq!(&out.s[..out.l], b"ctg");
+    }
+
+    #[test]
     fn usage_fastmap_formats_defaults_and_status() {
         let (status, text) = usage_fastmap(false, 19, 1, 20, 1);
         assert_eq!(status, 1);
@@ -462,5 +583,89 @@ mod tests {
         assert!(out.contains("\nEM\t"));
         assert!(out.ends_with("//\n"));
         let _ = std::fs::remove_file(fq);
+    }
+
+    #[test]
+    fn raw_kseq_reader_preserves_u_bases_for_fastmap_input() {
+        let path = std::env::temp_dir().join(format!(
+            "minibwa_rs_fastmap_raw_u_{}.fq",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"@r0 comment\nACUuT\n+\nIIIII\n").unwrap();
+
+        let mut reader = RawKseqReader::open(&path.to_string_lossy()).expect("open raw fastq");
+        let rec = reader.read().expect("read record");
+        assert_eq!(rec.name, b"r0");
+        assert_eq!(rec.seq, b"ACUuT");
+        assert_eq!(encode_nt4(&rec.seq), vec![0, 1, 4, 4, 3]);
+        assert!(reader.read().is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn raw_kseq_reader_preserves_non_utf8_name_and_sequence_bytes() {
+        let path = std::env::temp_dir().join(format!(
+            "minibwa_rs_fastmap_raw_bytes_{}.fa",
+            std::process::id()
+        ));
+        std::fs::write(&path, b">r\xff comment\nAC\xfeT\n").unwrap();
+
+        let mut reader = RawKseqReader::open(&path.to_string_lossy()).expect("open raw fasta");
+        let rec = reader.read().expect("read record");
+        assert_eq!(rec.name, b"r\xff");
+        assert_eq!(rec.seq, b"AC\xfeT");
+        assert_eq!(encode_nt4(&rec.seq), vec![0, 1, 4, 3]);
+        assert!(reader.read().is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn raw_kseq_reader_open_path_stops_at_nul_like_gzopen() {
+        let path = std::env::temp_dir().join(format!(
+            "minibwa_rs_fastmap_nul_path_{}.fa",
+            std::process::id()
+        ));
+        std::fs::write(&path, b">r0\nACGT\n").unwrap();
+        let nul_path = format!("{}\0hidden", path.to_string_lossy());
+
+        let mut reader = RawKseqReader::open(&nul_path).expect("open C-truncated path");
+        let rec = reader.read().expect("read record");
+        assert_eq!(rec.name, b"r0");
+        assert_eq!(rec.seq, b"ACGT");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn raw_kseq_reader_seeks_header_inside_leading_garbage_like_kseq() {
+        let path = std::env::temp_dir().join(format!(
+            "minibwa_rs_fastmap_seek_header_{}.fa",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"ignored bytes before >r0 comment\nACGT\n").unwrap();
+
+        let mut reader = RawKseqReader::open(&path.to_string_lossy()).expect("open raw fasta");
+        let rec = reader.read().expect("read record");
+        assert_eq!(rec.name, b"r0");
+        assert_eq!(rec.seq, b"ACGT");
+        assert!(reader.read().is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn raw_kseq_reader_rejects_overlong_fastq_quality_like_kseq() {
+        let path = std::env::temp_dir().join(format!(
+            "minibwa_rs_fastmap_overlong_{}.fq",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"@bad\nACGT\n+\nFFFFF\n@next\nACGT\n+\nFFFF\n").unwrap();
+
+        let mut reader = RawKseqReader::open(&path.to_string_lossy()).expect("open raw fastq");
+        assert!(reader.read().is_none());
+
+        let _ = std::fs::remove_file(path);
     }
 }
