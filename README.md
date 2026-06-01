@@ -28,12 +28,17 @@ This blurb might be out of date. Go to [this page](https://github.com/henriksson
 ## Benchmark snapshot
 
 This is a development benchmark used to check translation parity, not a general
-performance claim. The run mapped 5 million single-end chr22 reads against the
-same C-built chr22 index, with one mapping thread and PAF output enabled:
+performance claim. The run mapped 5 million realistic single-end human chr22
+reads against the same C-built chr22 index, with one mapping thread and PAF
+output enabled. Timings were captured on 2026-06-01 with `/usr/bin/time -v`:
 
 ```sh
-minibwa/minibwa map -t1 ref.c.t1 reads_5m.fq > c.paf
-target/release/minibwa-rs map -t1 ref.c.t1 reads_5m.fq > rust.paf
+../minibwa/minibwa/minibwa map -t1 \
+  .tmp/large-real/human_chr22/ref.c.t1 \
+  .tmp/large-real/human_chr22/reads_5m.fq > c.paf
+target/release/minibwa-rs map -t1 \
+  .tmp/large-real/human_chr22/ref.c.t1 \
+  .tmp/large-real/human_chr22/reads_5m.fq > rust.paf
 ```
 
 Outputs were byte-identical (`cmp` exit code 0), with 5,101,858 PAF records in
@@ -41,11 +46,11 @@ both files.
 
 | Implementation | Wall time | User time | System time | Max RSS |
 | --- | ---: | ---: | ---: | ---: |
-| Original native `minibwa` | 4:42.44 | 279.85 s | 1.11 s | 1,287,216 KB |
-| `minibwa-rs` | 5:19.35 | 317.96 s | 1.07 s | 1,060,200 KB |
+| Original native `minibwa` | 5:09.20 | 307.63 s | 1.49 s | 1,282,332 KB |
+| `minibwa-rs` | 4:36.51 | 274.85 s | 1.61 s | 1,062,588 KB |
 
-In this run, the Rust CLI was about 13.1% slower by wall time and used about
-17.6% less peak RSS than the original native binary.
+In this run, the Rust CLI was about 10.6% faster by wall time and used about
+17.1% less peak RSS than the original native binary.
 
 ## Possible upstream bugs
 
