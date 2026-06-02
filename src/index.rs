@@ -849,11 +849,13 @@ pub fn main_index(argv: &[String]) -> (i32, String) {
             return (1, String::new());
         }
         l2b_save(&fn_l2b, &l2b);
-        l2b.ctg = Vec::new();
-        l2b.ambi = Vec::new();
-        l2b.mask = Vec::new();
-        l2b.cat_name = Vec::new();
-        l2b.cat_comm = Vec::new();
+        if is_meth == 0 {
+            l2b.ctg = Vec::new();
+            l2b.ambi = Vec::new();
+            l2b.mask = Vec::new();
+            l2b.cat_name = Vec::new();
+            l2b.cat_comm = Vec::new();
+        }
         let Some(mut bwt) = mb_bwt_load_raw(&fn_bwt) else {
             return (1, String::new());
         };
@@ -876,6 +878,7 @@ pub fn main_index(argv: &[String]) -> (i32, String) {
             };
             mb_bwt_gen_sa(&mut bwt, sa_bit as u32);
             mb_bwt_save(&fn_meth_bwt, &bwt);
+            l2b_save(&fn_l2b, &l2b);
         }
     } else {
         l2b_save(&fn_l2b, &l2b);
@@ -997,6 +1000,32 @@ mod tests {
         assert_eq!(main_index(&args).0, 0);
         assert!(l2b_load(format!("{}.l2b", prefix.to_string_lossy())).is_some());
         assert!(mb_bwt_load(format!("{}.mbw", prefix.to_string_lossy())).is_some());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lowmem_methylation_index_leaves_loadable_l2b() {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "minibwa_rs_index_lowmem_meth_l2b_{}_{}",
+            std::process::id(),
+            crate::kommon::kom_realtime().to_bits()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let fa = dir.join("in.fa");
+        let prefix = dir.join("idx");
+        fs::write(&fa, b">ctg\nACGTACGTACGTACGTACGTACGTACGTACGT\n").unwrap();
+        let args = vec![
+            "index".to_string(),
+            "-l".to_string(),
+            "--meth".to_string(),
+            fa.to_string_lossy().into_owned(),
+            prefix.to_string_lossy().into_owned(),
+        ];
+        assert_eq!(main_index(&args).0, 0);
+        assert!(l2b_load(format!("{}.l2b", prefix.to_string_lossy())).is_some());
+        assert!(mb_bwt_load(format!("{}.mbw", prefix.to_string_lossy())).is_some());
+        assert!(mb_bwt_load(format!("{}.meth.mbw", prefix.to_string_lossy())).is_some());
         let _ = fs::remove_dir_all(&dir);
     }
 

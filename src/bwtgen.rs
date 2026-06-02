@@ -115,6 +115,22 @@ pub fn initializeVAL_bg(startAddr: &mut [bgint_t], length: bgint_t, initValue: b
     }
 }
 
+#[inline]
+fn as_qsint_slice_mut(values: &mut [bgint_t]) -> &mut [sbgint_t] {
+    unsafe { std::slice::from_raw_parts_mut(values.as_mut_ptr() as *mut sbgint_t, values.len()) }
+}
+
+fn uninit_vec<T>(len: usize) -> Vec<T> {
+    let mut values = Vec::<std::mem::MaybeUninit<T>>::with_capacity(len);
+    unsafe {
+        values.set_len(len);
+        let ptr = values.as_mut_ptr() as *mut T;
+        let cap = values.capacity();
+        std::mem::forget(values);
+        Vec::from_raw_parts(ptr, len, cap)
+    }
+}
+
 /// Original C static function `GenerateDNAOccCountTable` from `minibwa/bwtgen.c:115`.
 pub fn GenerateDNAOccCountTable(dnaDecodeTable: &mut [u32]) {
     for i in 0..DNA_OCC_CNT_TABLE_SIZE_IN_WORD {
@@ -359,7 +375,7 @@ pub fn BWTIncCreate(
         initialMaxBuildSize: initialMaxBuildSize as u64,
         incMaxBuildSize: incMaxBuildSize as u64,
         firstCharInLastIteration: 0,
-        workingMemory: vec![0; availableWord as usize],
+        workingMemory: Vec::new(),
         packedText: Vec::new(),
         textBuffer: Vec::new(),
         packedShift,
@@ -940,11 +956,33 @@ pub fn BWTIncGetAbsoluteRank(
     cumulativeCount: &[bgint_t],
     firstCharInLastIteration: u32,
 ) -> bgint_t {
+    unsafe {
+        BWTIncGetAbsoluteRank_ptr(
+            bwt,
+            absoluteRank.as_mut_ptr(),
+            seq.as_mut_ptr(),
+            packedText.as_ptr(),
+            numChar,
+            cumulativeCount.as_ptr(),
+            firstCharInLastIteration,
+        )
+    }
+}
+
+unsafe fn BWTIncGetAbsoluteRank_ptr(
+    bwt: &BWT,
+    absoluteRank: *mut bgint_t,
+    seq: *mut bgint_t,
+    packedText: *const u32,
+    numChar: bgint_t,
+    cumulativeCount: *const bgint_t,
+    firstCharInLastIteration: u32,
+) -> bgint_t {
     let mut seqIndexFromStart = [0u64; ALPHABET_SIZE];
     let mut seqIndexFromEnd = [0u64; ALPHABET_SIZE];
     for i in 0..ALPHABET_SIZE {
-        seqIndexFromStart[i] = cumulativeCount[i];
-        seqIndexFromEnd[i] = cumulativeCount[i + 1] - 1;
+        seqIndexFromStart[i] = unsafe { *cumulativeCount.add(i) };
+        seqIndexFromEnd[i] = unsafe { *cumulativeCount.add(i + 1) } - 1;
     }
 
     let shift = BITS_IN_WORD - BIT_PER_CHAR;
@@ -954,19 +992,25 @@ pub fn BWTIncGetAbsoluteRank(
     let lastWord = numChar / CHAR_PER_WORD;
 
     for i in (0..lastWord as usize).rev() {
-        let mut t = packedText[i];
+        let mut t = unsafe { *packedText.add(i) };
         for _ in 0..CHAR_PER_WORD {
             let c = t & packedMask;
-            saIndex = bwt.cumulativeFreq[c as usize] + BWTOccValue(bwt, saIndex, c) + 1;
+            saIndex = unsafe { *bwt.cumulativeFreq.as_ptr().add(c as usize) }
+                + BWTOccValue(bwt, saIndex, c)
+                + 1;
             if saIndex > bwt.inverseSa0 {
                 let idx = seqIndexFromEnd[c as usize] as usize;
-                seq[idx] = rankIndex;
-                absoluteRank[idx] = saIndex;
+                unsafe {
+                    *seq.add(idx) = rankIndex;
+                    *absoluteRank.add(idx) = saIndex;
+                }
                 seqIndexFromEnd[c as usize] -= 1;
             } else {
                 let idx = seqIndexFromStart[c as usize] as usize;
-                seq[idx] = rankIndex;
-                absoluteRank[idx] = saIndex;
+                unsafe {
+                    *seq.add(idx) = rankIndex;
+                    *absoluteRank.add(idx) = saIndex;
+                }
                 seqIndexFromStart[c as usize] += 1;
             }
             rankIndex = rankIndex.wrapping_sub(1);
@@ -975,13 +1019,33 @@ pub fn BWTIncGetAbsoluteRank(
     }
 
     let idx = seqIndexFromStart[firstCharInLastIteration as usize] as usize;
-    absoluteRank[idx] = bwt.inverseSa0;
-    seq[idx] = numChar;
+    unsafe {
+        *absoluteRank.add(idx) = bwt.inverseSa0;
+        *seq.add(idx) = numChar;
+    }
     seqIndexFromStart[firstCharInLastIteration as usize]
 }
 
 /// Original C static function `BWTIncSortKey` from `minibwa/bwtgen.c:690`.
 pub fn BWTIncSortKey(key: &mut [bgint_t], seq: &mut [bgint_t], numItem: bgint_t) {
+    unsafe { BWTIncSortKey_ptr(key.as_mut_ptr(), seq.as_mut_ptr(), numItem) }
+}
+
+#[inline]
+unsafe fn swap_key_seq(key: *mut bgint_t, seq: *mut bgint_t, a: i64, b: i64) {
+    let a = a as usize;
+    let b = b as usize;
+    let temp_seq = unsafe { *seq.add(a) };
+    let temp_key = unsafe { *key.add(a) };
+    unsafe {
+        *seq.add(a) = *seq.add(b);
+        *key.add(a) = *key.add(b);
+        *seq.add(b) = temp_seq;
+        *key.add(b) = temp_key;
+    }
+}
+
+unsafe fn BWTIncSortKey_ptr(key: *mut bgint_t, seq: *mut bgint_t, numItem: bgint_t) {
     const EQUAL_KEY_THRESHOLD: i64 = 4;
     if numItem < 2 {
         return;
@@ -997,34 +1061,35 @@ pub fn BWTIncSortKey(key: &mut [bgint_t], seq: &mut [bgint_t], numItem: bgint_t)
         loop {
             if highIndex - lowIndex < BWTINC_INSERT_SORT_NUM_ITEM {
                 for i in lowIndex + 1..=highIndex {
-                    let tempSeq = seq[i as usize];
-                    let tempKey = key[i as usize];
+                    let tempSeq = unsafe { *seq.add(i as usize) };
+                    let tempKey = unsafe { *key.add(i as usize) };
                     let mut j = i;
-                    while j > lowIndex && key[(j - 1) as usize] > tempKey {
-                        seq[j as usize] = seq[(j - 1) as usize];
-                        key[j as usize] = key[(j - 1) as usize];
+                    while j > lowIndex && unsafe { *key.add((j - 1) as usize) } > tempKey {
+                        unsafe {
+                            *seq.add(j as usize) = *seq.add((j - 1) as usize);
+                            *key.add(j as usize) = *key.add((j - 1) as usize);
+                        }
                         j -= 1;
                     }
                     if j != i {
-                        seq[j as usize] = tempSeq;
-                        key[j as usize] = tempKey;
+                        unsafe {
+                            *seq.add(j as usize) = tempSeq;
+                            *key.add(j as usize) = tempKey;
+                        }
                     }
                 }
                 break;
             }
 
             let mut midIndex = (lowIndex & highIndex) + ((lowIndex ^ highIndex) / 2);
-            if key[lowIndex as usize] > key[midIndex as usize] {
-                seq.swap(lowIndex as usize, midIndex as usize);
-                key.swap(lowIndex as usize, midIndex as usize);
+            if unsafe { *key.add(lowIndex as usize) > *key.add(midIndex as usize) } {
+                unsafe { swap_key_seq(key, seq, lowIndex, midIndex) };
             }
-            if key[lowIndex as usize] > key[highIndex as usize] {
-                seq.swap(lowIndex as usize, highIndex as usize);
-                key.swap(lowIndex as usize, highIndex as usize);
+            if unsafe { *key.add(lowIndex as usize) > *key.add(highIndex as usize) } {
+                unsafe { swap_key_seq(key, seq, lowIndex, highIndex) };
             }
-            if key[midIndex as usize] > key[highIndex as usize] {
-                seq.swap(midIndex as usize, highIndex as usize);
-                key.swap(midIndex as usize, highIndex as usize);
+            if unsafe { *key.add(midIndex as usize) > *key.add(highIndex as usize) } {
+                unsafe { swap_key_seq(key, seq, midIndex, highIndex) };
             }
 
             let mut numberOfEqualKey = 0i64;
@@ -1033,16 +1098,23 @@ pub fn BWTIncSortKey(key: &mut [bgint_t], seq: &mut [bgint_t], numItem: bgint_t)
 
             loop {
                 while lowPartitionIndex <= highPartitionIndex
-                    && key[lowPartitionIndex as usize] <= key[midIndex as usize]
+                    && unsafe {
+                        *key.add(lowPartitionIndex as usize) <= *key.add(midIndex as usize)
+                    }
                 {
-                    numberOfEqualKey +=
-                        (key[lowPartitionIndex as usize] == key[midIndex as usize]) as i64;
+                    numberOfEqualKey += unsafe {
+                        (*key.add(lowPartitionIndex as usize) == *key.add(midIndex as usize)) as i64
+                    };
                     lowPartitionIndex += 1;
                 }
                 while lowPartitionIndex < highPartitionIndex {
-                    if key[midIndex as usize] >= key[highPartitionIndex as usize] {
-                        numberOfEqualKey +=
-                            (key[midIndex as usize] == key[highPartitionIndex as usize]) as i64;
+                    if unsafe {
+                        *key.add(midIndex as usize) >= *key.add(highPartitionIndex as usize)
+                    } {
+                        numberOfEqualKey += unsafe {
+                            (*key.add(midIndex as usize) == *key.add(highPartitionIndex as usize))
+                                as i64
+                        };
                         break;
                     }
                     highPartitionIndex -= 1;
@@ -1050,8 +1122,7 @@ pub fn BWTIncSortKey(key: &mut [bgint_t], seq: &mut [bgint_t], numItem: bgint_t)
                 if lowPartitionIndex >= highPartitionIndex {
                     break;
                 }
-                seq.swap(lowPartitionIndex as usize, highPartitionIndex as usize);
-                key.swap(lowPartitionIndex as usize, highPartitionIndex as usize);
+                unsafe { swap_key_seq(key, seq, lowPartitionIndex, highPartitionIndex) };
                 if highPartitionIndex == midIndex {
                     midIndex = lowPartitionIndex;
                 }
@@ -1062,8 +1133,7 @@ pub fn BWTIncSortKey(key: &mut [bgint_t], seq: &mut [bgint_t], numItem: bgint_t)
             highPartitionIndex = lowPartitionIndex;
             lowPartitionIndex -= 1;
 
-            seq.swap(midIndex as usize, lowPartitionIndex as usize);
-            key.swap(midIndex as usize, lowPartitionIndex as usize);
+            unsafe { swap_key_seq(key, seq, midIndex, lowPartitionIndex) };
 
             if highIndex - lowIndex + BWTINC_INSERT_SORT_NUM_ITEM
                 <= EQUAL_KEY_THRESHOLD * numberOfEqualKey
@@ -1071,20 +1141,24 @@ pub fn BWTIncSortKey(key: &mut [bgint_t], seq: &mut [bgint_t], numItem: bgint_t)
                 midIndex = lowIndex;
                 loop {
                     while midIndex < lowPartitionIndex
-                        && key[midIndex as usize] < key[lowPartitionIndex as usize]
+                        && unsafe {
+                            *key.add(midIndex as usize) < *key.add(lowPartitionIndex as usize)
+                        }
                     {
                         midIndex += 1;
                     }
                     while midIndex < lowPartitionIndex
-                        && key[lowPartitionIndex as usize] == key[(lowPartitionIndex - 1) as usize]
+                        && unsafe {
+                            *key.add(lowPartitionIndex as usize)
+                                == *key.add((lowPartitionIndex - 1) as usize)
+                        }
                     {
                         lowPartitionIndex -= 1;
                     }
                     if midIndex >= lowPartitionIndex {
                         break;
                     }
-                    seq.swap(midIndex as usize, (lowPartitionIndex - 1) as usize);
-                    key.swap(midIndex as usize, (lowPartitionIndex - 1) as usize);
+                    unsafe { swap_key_seq(key, seq, midIndex, lowPartitionIndex - 1) };
                     midIndex += 1;
                     lowPartitionIndex -= 1;
                 }
@@ -1123,49 +1197,74 @@ pub fn BWTIncBuildRelativeRank(
     seq: &mut [bgint_t],
     relativeRank: &mut [bgint_t],
     numItem: bgint_t,
-    mut oldInverseSa0: bgint_t,
+    oldInverseSa0: bgint_t,
     cumulativeCount: &[bgint_t],
 ) {
-    let mut lastIndex = numItem;
-    let mut lastRank = sortedRank[numItem as usize];
-    if lastRank > oldInverseSa0 {
-        sortedRank[numItem as usize] -= 1;
+    unsafe {
+        BWTIncBuildRelativeRank_ptr(
+            sortedRank.as_mut_ptr(),
+            seq.as_mut_ptr(),
+            relativeRank.as_mut_ptr(),
+            numItem,
+            oldInverseSa0,
+            cumulativeCount.as_ptr(),
+        )
     }
-    let mut s = seq[numItem as usize];
-    relativeRank[s as usize] = numItem;
+}
+
+unsafe fn BWTIncBuildRelativeRank_ptr(
+    sortedRank: *mut bgint_t,
+    seq: *mut bgint_t,
+    relativeRank: *mut bgint_t,
+    numItem: bgint_t,
+    mut oldInverseSa0: bgint_t,
+    cumulativeCount: *const bgint_t,
+) {
+    let mut lastIndex = numItem;
+    let mut lastRank = unsafe { *sortedRank.add(numItem as usize) };
+    if lastRank > oldInverseSa0 {
+        unsafe { *sortedRank.add(numItem as usize) -= 1 };
+    }
+    let mut s = unsafe { *seq.add(numItem as usize) };
+    unsafe { *relativeRank.add(s as usize) = numItem };
     if lastRank == oldInverseSa0 {
         oldInverseSa0 += 1;
         lastRank += 1;
     }
 
     let mut c = ALPHABET_SIZE as u64 - 1;
-    let mut freq = cumulativeCount[c as usize];
+    let mut freq = unsafe { *cumulativeCount.add(c as usize) };
     for i in (0..numItem).rev() {
-        let r = sortedRank[i as usize];
+        let r = unsafe { *sortedRank.add(i as usize) };
         if r > oldInverseSa0 {
-            sortedRank[i as usize] -= 1;
+            unsafe { *sortedRank.add(i as usize) -= 1 };
         }
-        s = seq[i as usize];
+        s = unsafe { *seq.add(i as usize) };
         if i < freq {
             if lastIndex >= freq {
                 lastRank += 1;
             }
             c -= 1;
-            freq = cumulativeCount[c as usize];
+            freq = unsafe { *cumulativeCount.add(c as usize) };
         }
         if r == lastRank {
-            relativeRank[s as usize] = lastIndex;
+            unsafe { *relativeRank.add(s as usize) = lastIndex };
         } else {
             if i == lastIndex - 1 {
-                if lastIndex < numItem && (seq[(lastIndex + 1) as usize] as sbgint_t) < 0 {
-                    seq[lastIndex as usize] = seq[(lastIndex + 1) as usize].wrapping_sub(1);
+                if lastIndex < numItem
+                    && (unsafe { *seq.add((lastIndex + 1) as usize) } as sbgint_t) < 0
+                {
+                    unsafe {
+                        *seq.add(lastIndex as usize) =
+                            (*seq.add((lastIndex + 1) as usize)).wrapping_sub(1);
+                    }
                 } else {
-                    seq[lastIndex as usize] = (-1i64) as bgint_t;
+                    unsafe { *seq.add(lastIndex as usize) = (-1i64) as bgint_t };
                 }
             }
             lastIndex = i;
             lastRank = r;
-            relativeRank[s as usize] = i;
+            unsafe { *relativeRank.add(s as usize) = i };
             if r == oldInverseSa0 {
                 oldInverseSa0 += 1;
                 lastRank += 1;
@@ -1202,31 +1301,54 @@ pub fn BWTIncMergeBwt(
     numOldBwt: bgint_t,
     numInsertBwt: bgint_t,
 ) {
+    unsafe {
+        BWTIncMergeBwt_ptr(
+            sortedRank.as_ptr(),
+            oldBwt.as_ptr(),
+            insertBwt.as_ptr(),
+            mergedBwt.as_mut_ptr(),
+            numOldBwt,
+            numInsertBwt,
+        )
+    }
+}
+
+unsafe fn BWTIncMergeBwt_ptr(
+    sortedRank: *const bgint_t,
+    oldBwt: *const u32,
+    insertBwt: *const u32,
+    mergedBwt: *mut u32,
+    numOldBwt: bgint_t,
+    numInsertBwt: bgint_t,
+) {
     let mut oIndex = 0u64;
     let mut iIndex = 0u64;
     let mut mIndex = 0u64;
     let mut mWord = 0u64;
     let mut mChar = 0u64;
-    mergedBwt[0] = 0;
+    unsafe { *mergedBwt = 0 };
 
     while oIndex < numOldBwt {
-        while iIndex <= numInsertBwt && sortedRank[iIndex as usize] <= oIndex {
-            if sortedRank[iIndex as usize] != 0 {
-                mergedBwt[mWord as usize] |= insertBwt[iIndex as usize]
-                    << (BITS_IN_WORD - (mChar as u32 + 1) * BIT_PER_CHAR);
+        while iIndex <= numInsertBwt && unsafe { *sortedRank.add(iIndex as usize) } <= oIndex {
+            let rank = unsafe { *sortedRank.add(iIndex as usize) };
+            if rank != 0 {
+                unsafe {
+                    *mergedBwt.add(mWord as usize) |= *insertBwt.add(iIndex as usize)
+                        << (BITS_IN_WORD - (mChar as u32 + 1) * BIT_PER_CHAR);
+                }
                 mIndex += 1;
                 mChar += 1;
                 if mChar == CHAR_PER_WORD {
                     mChar = 0;
                     mWord += 1;
-                    mergedBwt[mWord as usize] = 0;
+                    unsafe { *mergedBwt.add(mWord as usize) = 0 };
                 }
             }
             iIndex += 1;
         }
 
         let o = if iIndex <= numInsertBwt {
-            sortedRank[iIndex as usize]
+            unsafe { *sortedRank.add(iIndex as usize) }
         } else {
             numOldBwt
         };
@@ -1237,38 +1359,51 @@ pub fn BWTIncMergeBwt(
         if oChar > mChar {
             let leftShift = ((oChar - mChar) as u32) * BIT_PER_CHAR;
             let rightShift = ((CHAR_PER_WORD + mChar - oChar) as u32) * BIT_PER_CHAR;
-            mergedBwt[mWord as usize] |= (oldBwt[oWord as usize] << (oChar as u32 * BIT_PER_CHAR)
-                >> (mChar as u32 * BIT_PER_CHAR))
-                | (oldBwt[oWord as usize + 1] >> rightShift);
+            unsafe {
+                *mergedBwt.add(mWord as usize) |= (*oldBwt.add(oWord as usize)
+                    << (oChar as u32 * BIT_PER_CHAR)
+                    >> (mChar as u32 * BIT_PER_CHAR))
+                    | (*oldBwt.add(oWord as usize + 1) >> rightShift);
+            }
             oIndex += numInsert.min(CHAR_PER_WORD - mChar);
             while o > oIndex {
                 oWord += 1;
                 mWord += 1;
-                mergedBwt[mWord as usize] = (oldBwt[oWord as usize] << leftShift)
-                    | (oldBwt[oWord as usize + 1] >> rightShift);
+                unsafe {
+                    *mergedBwt.add(mWord as usize) = (*oldBwt.add(oWord as usize) << leftShift)
+                        | (*oldBwt.add(oWord as usize + 1) >> rightShift);
+                }
                 oIndex += CHAR_PER_WORD;
             }
         } else if oChar < mChar {
             let rightShift = ((mChar - oChar) as u32) * BIT_PER_CHAR;
             let leftShift = ((CHAR_PER_WORD + oChar - mChar) as u32) * BIT_PER_CHAR;
-            mergedBwt[mWord as usize] |= oldBwt[oWord as usize] << (oChar as u32 * BIT_PER_CHAR)
-                >> (mChar as u32 * BIT_PER_CHAR);
+            unsafe {
+                *mergedBwt.add(mWord as usize) |= *oldBwt.add(oWord as usize)
+                    << (oChar as u32 * BIT_PER_CHAR)
+                    >> (mChar as u32 * BIT_PER_CHAR);
+            }
             oIndex += numInsert.min(CHAR_PER_WORD - mChar);
             while o > oIndex {
                 oWord += 1;
                 mWord += 1;
-                mergedBwt[mWord as usize] = (oldBwt[oWord as usize - 1] << leftShift)
-                    | (oldBwt[oWord as usize] >> rightShift);
+                unsafe {
+                    *mergedBwt.add(mWord as usize) = (*oldBwt.add(oWord as usize - 1) << leftShift)
+                        | (*oldBwt.add(oWord as usize) >> rightShift);
+                }
                 oIndex += CHAR_PER_WORD;
             }
         } else {
-            mergedBwt[mWord as usize] |= oldBwt[oWord as usize] << (mChar as u32 * BIT_PER_CHAR)
-                >> (mChar as u32 * BIT_PER_CHAR);
+            unsafe {
+                *mergedBwt.add(mWord as usize) |= *oldBwt.add(oWord as usize)
+                    << (mChar as u32 * BIT_PER_CHAR)
+                    >> (mChar as u32 * BIT_PER_CHAR);
+            }
             oIndex += numInsert.min(CHAR_PER_WORD - mChar);
             while o > oIndex {
                 oWord += 1;
                 mWord += 1;
-                mergedBwt[mWord as usize] = oldBwt[oWord as usize];
+                unsafe { *mergedBwt.add(mWord as usize) = *oldBwt.add(oWord as usize) };
                 oIndex += CHAR_PER_WORD;
             }
         }
@@ -1278,23 +1413,27 @@ pub fn BWTIncMergeBwt(
         mWord = mIndex / CHAR_PER_WORD;
         mChar = mIndex - mWord * CHAR_PER_WORD;
         if mChar == 0 {
-            mergedBwt[mWord as usize] = 0;
+            unsafe { *mergedBwt.add(mWord as usize) = 0 };
         } else {
             let offset = BITS_IN_WORD - mChar as u32 * BIT_PER_CHAR;
-            mergedBwt[mWord as usize] = mergedBwt[mWord as usize] >> offset << offset;
+            unsafe {
+                let word = mergedBwt.add(mWord as usize);
+                *word = *word >> offset << offset;
+            }
         }
     }
 
     while iIndex <= numInsertBwt {
-        if sortedRank[iIndex as usize] != 0 {
-            mergedBwt[mWord as usize] |=
-                insertBwt[iIndex as usize] << (BITS_IN_WORD - (mChar as u32 + 1) * BIT_PER_CHAR);
-            mIndex += 1;
+        if unsafe { *sortedRank.add(iIndex as usize) } != 0 {
+            unsafe {
+                *mergedBwt.add(mWord as usize) |= *insertBwt.add(iIndex as usize)
+                    << (BITS_IN_WORD - (mChar as u32 + 1) * BIT_PER_CHAR);
+            }
             mChar += 1;
             if mChar == CHAR_PER_WORD {
                 mChar = 0;
                 mWord += 1;
-                mergedBwt[mWord as usize] = 0;
+                unsafe { *mergedBwt.add(mWord as usize) = 0 };
             }
         }
         iIndex += 1;
@@ -1514,9 +1653,9 @@ pub fn BWTIncConstruct(bwtInc: &mut BWTInc, numChar: bgint_t) {
     let mut mergedBwt;
 
     if bwtInc.bwt.textLength == 0 {
-        let mut seq = vec![0u64; bwtInc.buildSize as usize + 1];
-        let mut relativeRank = vec![0u64; bwtInc.buildSize as usize + 1];
-        mergedBwt = vec![0u32; mergedBwtSizeInWord as usize + 1];
+        let num_items = numChar as usize + 1;
+        let mut seq = uninit_vec::<u64>(num_items);
+        let mut relativeRank = uninit_vec::<u64>(num_items);
 
         BWTIncPutPackedTextToRank(
             &bwtInc.packedText,
@@ -1528,26 +1667,13 @@ pub fn BWTIncConstruct(bwtInc: &mut BWTInc, numChar: bgint_t) {
         firstCharInThisIteration = relativeRank[0] as u32;
         relativeRank[numChar as usize] = 0;
 
-        let mut qs_v = relativeRank
-            .iter()
-            .take(numChar as usize + 1)
-            .map(|&x| x as i64)
-            .collect::<Vec<_>>();
-        let mut qs_i = vec![0i64; numChar as usize + 1];
-        QSufSortSuffixSort(
-            &mut qs_v,
-            &mut qs_i,
-            numChar as i64,
-            ALPHABET_SIZE as i64 - 1,
-            0,
-            0,
-        );
-        for i in 0..=numChar as usize {
-            relativeRank[i] = qs_v[i] as u64;
-            seq[i] = qs_i[i] as u64;
-        }
+        let qs_v = as_qsint_slice_mut(&mut relativeRank[..numChar as usize + 1]);
+        let qs_i = as_qsint_slice_mut(&mut seq[..numChar as usize + 1]);
+        QSufSortSuffixSort(qs_v, qs_i, numChar as i64, ALPHABET_SIZE as i64 - 1, 0, 0);
         newInverseSa0 = relativeRank[0];
+        drop(seq);
 
+        mergedBwt = uninit_vec::<u32>(mergedBwtSizeInWord as usize + 1);
         initializeVAL(&mut mergedBwt, mergedBwtSizeInWord, 0);
         BWTIncBuildPackedBwt(
             &relativeRank,
@@ -1559,10 +1685,10 @@ pub fn BWTIncConstruct(bwtInc: &mut BWTInc, numChar: bgint_t) {
 
         bwtInc.firstCharInLastIteration = ALPHABET_SIZE as u32;
     } else {
-        let mut sortedRank = vec![0u64; bwtInc.buildSize as usize + 1];
-        let mut seq = vec![0u64; bwtInc.buildSize as usize + 1];
-        let mut insertBwt = vec![0u32; numChar as usize + 1];
-        let mut relativeRank = vec![0u64; bwtInc.buildSize as usize + 1];
+        let num_items = numChar as usize + 1;
+        let mut sortedRank = uninit_vec::<u64>(num_items);
+        let mut seq = uninit_vec::<u64>(num_items);
+        let mut relativeRank = uninit_vec::<u64>(num_items);
 
         firstCharInThisIteration = bwtInc.packedText[0] >> (BITS_IN_WORD - BIT_PER_CHAR);
 
@@ -1624,35 +1750,26 @@ pub fn BWTIncConstruct(bwtInc: &mut BWTInc, numChar: bgint_t) {
         );
         assert_eq!(relativeRank[numChar as usize], oldInverseSa0RelativeRank);
 
-        let mut qs_v = relativeRank
-            .iter()
-            .take(numChar as usize + 1)
-            .map(|&x| x as i64)
-            .collect::<Vec<_>>();
-        let mut qs_i = seq
-            .iter()
-            .take(numChar as usize + 1)
-            .map(|&x| x as i64)
-            .collect::<Vec<_>>();
-        QSufSortSuffixSort(&mut qs_v, &mut qs_i, numChar as i64, numChar as i64, 1, 1);
-        for i in 0..=numChar as usize {
-            relativeRank[i] = qs_v[i] as u64;
-            seq[i] = qs_i[i] as u64;
-        }
+        let qs_v = as_qsint_slice_mut(&mut relativeRank[..numChar as usize + 1]);
+        let qs_i = as_qsint_slice_mut(&mut seq[..numChar as usize + 1]);
+        QSufSortSuffixSort(qs_v, qs_i, numChar as i64, numChar as i64, 1, 1);
+        drop(seq);
 
         let newInverseSa0RelativeRank = relativeRank[0];
         newInverseSa0 = sortedRank[newInverseSa0RelativeRank as usize] + newInverseSa0RelativeRank;
         sortedRank[newInverseSa0RelativeRank as usize] = 0;
 
+        let mut insertBwt = uninit_vec::<u32>(numChar as usize + 1);
         BWTIncBuildBwt(
             &mut insertBwt,
             &relativeRank,
             numChar,
             &bwtInc.cumulativeCountInCurrentBuild,
         );
+        drop(relativeRank);
 
-        mergedBwt = vec![0u32; mergedBwtSizeInWord as usize + 2];
-        let mut oldBwt = bwtInc.bwt.bwtCode.clone();
+        mergedBwt = uninit_vec::<u32>(mergedBwtSizeInWord as usize + 2);
+        let mut oldBwt = std::mem::take(&mut bwtInc.bwt.bwtCode);
         oldBwt.resize(oldBwt.len() + 2, 0);
         BWTIncMergeBwt(
             &sortedRank,
@@ -1668,7 +1785,8 @@ pub fn BWTIncConstruct(bwtInc: &mut BWTInc, numChar: bgint_t) {
     bwtInc.bwt.bwtCode = mergedBwt;
     bwtInc.bwt.bwtSizeInWord = mergedBwtSizeInWord;
     bwtInc.bwt.occSizeInWord = mergedOccSizeInWord;
-    bwtInc.bwt.occValue = vec![0; mergedOccSizeInWord as usize];
+    bwtInc.bwt.occValue.clear();
+    bwtInc.bwt.occValue.resize(mergedOccSizeInWord as usize, 0);
 
     BWTClearTrailingBwtCode(&mut bwtInc.bwt);
     BWTGenerateOccValueFromBwt(

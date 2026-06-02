@@ -22,7 +22,8 @@ include = [
 
 [features]
 default = []
-cli = ["dep:mimalloc"]
+cli = []
+mimalloc = ["dep:mimalloc"]
 stage-time = []
 
 [lib]

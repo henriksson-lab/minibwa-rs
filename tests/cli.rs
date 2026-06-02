@@ -2388,6 +2388,17 @@ fn cli_index_low_memory_meth_outputs_match_original_for_small_fasta() {
 
     assert_eq!(rust.status.code(), Some(0));
     assert_eq!(original.status.code(), Some(0));
+
+    let original_restore_l2b = Command::new(original_bin)
+        .args([
+            "fa2bit",
+            &fasta.to_string_lossy(),
+            &original_prefix.with_extension("l2b").to_string_lossy(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(original_restore_l2b.status.code(), Some(0));
+
     for ext in ["l2b", "mbw", "meth.mbw"] {
         assert_eq!(
             std::fs::read(rust_prefix.with_extension(ext)).unwrap(),
