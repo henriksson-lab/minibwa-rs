@@ -1,7 +1,7 @@
 #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
 use std::fs::File;
-use std::io::{BufWriter, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const MB_MAGIC: &[u8; 4] = b"MBW\x02";
@@ -946,10 +946,10 @@ pub fn bwt_invPsi(bwt: &mb_bwt_t, k: u64) -> u64 {
 /// Original C global function `mb_bwt_gen_sa` from `minibwa/bwt.c:469`.
 pub fn mb_bwt_gen_sa(bwt: &mut mb_bwt_t, sa_bit: u32) {
     assert!(!bwt.data.is_empty());
-    bwt.sa.clear();
+    drop(std::mem::take(&mut bwt.sa));
     bwt.sa_bit = sa_bit;
     bwt.n_sa = (bwt.seq_len + (1u64 << sa_bit)) >> sa_bit;
-    bwt.sa = vec![0; bwt.n_sa as usize];
+    bwt.sa = uninit_u64_vec(bwt.n_sa as usize);
 
     let mut isa = 0u64;
     let mut sa = bwt.seq_len;
@@ -1189,6 +1189,32 @@ fn read_huge_u64_vec<R: Read>(fp: &mut R, n: u64) -> Option<Vec<u64>> {
     Some(a)
 }
 
+fn uninit_u64_vec(len: usize) -> Vec<u64> {
+    let mut a = Vec::<std::mem::MaybeUninit<u64>>::with_capacity(len);
+    unsafe {
+        a.set_len(len);
+        let ptr = a.as_mut_ptr() as *mut u64;
+        let cap = a.capacity();
+        std::mem::forget(a);
+        Vec::from_raw_parts(ptr, len, cap)
+    }
+}
+
+fn read_huge_u64_vec_uninit<R: Read>(fp: &mut R, n: u64) -> Option<Vec<u64>> {
+    let mut a = uninit_u64_vec(n as usize);
+    let bytes = unsafe {
+        std::slice::from_raw_parts_mut(a.as_mut_ptr() as *mut u8, n.checked_mul(8)? as usize)
+    };
+    read_huge(fp, n.checked_mul(8)?, bytes);
+    #[cfg(target_endian = "big")]
+    {
+        for x in &mut a {
+            *x = u64::from_le(*x);
+        }
+    }
+    Some(a)
+}
+
 /// Original C global function `mb_bwt_load_raw` from `minibwa/bwt.c:600`.
 pub fn mb_bwt_load_raw<P: AsRef<Path>>(fn_: P) -> Option<mb_bwt_t> {
     let mut fp = File::open(c_path(fn_)).ok()?;
@@ -1216,7 +1242,7 @@ pub fn mb_bwt_save<P: AsRef<Path>>(fn_: P, bwt: &mb_bwt_t) -> i32 {
         Ok(fp) => fp,
         Err(_) => return -1,
     };
-    let mut fp = BufWriter::with_capacity(1 << 20, fp);
+    let mut fp = fp;
     let _ = fp.write_all(MB_MAGIC);
     let _ = fp.write_all(&bwt.sa_bit.to_le_bytes());
     let _ = fp.write_all(&bwt.primary.to_le_bytes());
@@ -1275,7 +1301,7 @@ pub fn mb_bwt_load<P: AsRef<Path>>(fn_: P) -> Option<mb_bwt_t> {
     let _ = fp.read(&mut n_sa);
     bwt.n_sa = u64::from_le_bytes(n_sa);
     if bwt.sa_bit != u32::MAX && bwt.n_sa > 0 {
-        bwt.sa = read_huge_u64_vec(&mut fp, bwt.n_sa)?;
+        bwt.sa = read_huge_u64_vec_uninit(&mut fp, bwt.n_sa)?;
     }
     Some(bwt)
 }

@@ -154,7 +154,52 @@ pub fn mb_tbuf_reset(b: &mut mb_tbuf_t, max_blk_sz: i64) -> i32 {
     if !b.km {
         return 0;
     }
-    0
+    let max_sz = max_blk_sz.clamp(1, 1 << 28) as usize;
+    let mut largest = 0usize;
+    let mut capacity = 0usize;
+    macro_rules! account_typed {
+        ($vec:expr, $ty:ty) => {{
+            let bytes = $vec.capacity() * std::mem::size_of::<$ty>();
+            largest = largest.max(bytes);
+            capacity = capacity.saturating_add(bytes);
+        }};
+    }
+
+    account_typed!(b.se_len, i32);
+    account_typed!(b.se_buf, u8);
+    account_typed!(b.se_seq_ptrs, usize);
+    account_typed!(b.se_sai, mb_sai_v);
+    for sai in &b.se_sai {
+        let bytes = sai.a.capacity() * std::mem::size_of::<mb_sai_t>();
+        largest = largest.max(bytes);
+        capacity = capacity.saturating_add(bytes);
+    }
+    account_typed!(b.anchor_v.a, mb_anchor_t);
+    account_typed!(b.anchor_aux, (i64, i64));
+    account_typed!(b.anchor_sa, u64);
+    account_typed!(b.anchor_sa_batch, (u64, u64));
+    account_typed!(b.anchor_batch, (i64, i64));
+    account_typed!(b.chain_w, u64);
+    account_typed!(b.align_tseq, u8);
+    account_typed!(b.align_qseq0, u8);
+
+    if largest > max_sz || capacity > max_sz.saturating_mul(2) {
+        b.se_len = Vec::new();
+        b.se_buf = Vec::new();
+        b.se_seq_ptrs = Vec::new();
+        b.se_sai = Vec::new();
+        b.anchor_v = mb_anchor_v::default();
+        b.anchor_aux = Vec::new();
+        b.anchor_sa = Vec::new();
+        b.anchor_sa_batch = Vec::new();
+        b.anchor_batch = Vec::new();
+        b.chain_w = Vec::new();
+        b.align_tseq = Vec::new();
+        b.align_qseq0 = Vec::new();
+        1
+    } else {
+        0
+    }
 }
 
 /// Original C global function `mb_cal_mblen` from `minibwa/map-algo.c:97`.
@@ -1844,9 +1889,6 @@ pub fn mb_map_batch(
                 opt.max_sub_occ,
                 &mut sai[..sb_n as usize],
             );
-            for k in 0..sb_n as usize {
-                seq4[k] = Vec::new();
-            }
             for k in 0..sb_n as usize {
                 let idx_k = sb_st as usize + k;
                 let mut opt_adap = mb_opt_t::default();

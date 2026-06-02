@@ -23,6 +23,15 @@ fn run_with_index_pool<R: Send>(n_thread: i32, f: impl FnOnce() -> R + Send) -> 
     pool.install(f)
 }
 
+fn append_uninit_u8(seq: &mut Vec<u8>, len: usize) -> &mut [u8] {
+    let old_len = seq.len();
+    seq.reserve(len);
+    unsafe {
+        seq.set_len(old_len + len);
+    }
+    &mut seq[old_len..]
+}
+
 #[cfg(unix)]
 fn raise_sigsegv_like_null_deref() -> ! {
     unsafe {
@@ -379,26 +388,19 @@ pub fn mb_bwt_libsais(
     let mut seq = Vec::<u8>::with_capacity(len);
     if is_meth != 0 {
         let copy_len = l2b.tot_len as usize;
-        seq.resize(copy_len, 0);
-        mb_l2b_fill_forward_meth_2bit(&mut seq, l2b, false);
-        let old_len = seq.len();
-        seq.resize(old_len + copy_len, 0);
-        mb_l2b_fill_forward_meth_2bit(&mut seq[old_len..], l2b, true);
+        mb_l2b_fill_forward_meth_2bit(append_uninit_u8(&mut seq, copy_len), l2b, false);
+        mb_l2b_fill_forward_meth_2bit(append_uninit_u8(&mut seq, copy_len), l2b, true);
         if both_strand != 0 {
-            let old_len = seq.len();
-            seq.resize(old_len + copy_len, 0);
-            mb_l2b_fill_reverse_meth_2bit(&mut seq[old_len..], l2b, true);
-            let old_len = seq.len();
-            seq.resize(old_len + copy_len, 0);
-            mb_l2b_fill_reverse_meth_2bit(&mut seq[old_len..], l2b, false);
+            mb_l2b_fill_reverse_meth_2bit(append_uninit_u8(&mut seq, copy_len), l2b, true);
+            mb_l2b_fill_reverse_meth_2bit(append_uninit_u8(&mut seq, copy_len), l2b, false);
         }
     } else {
-        seq.resize(l2b.tot_len as usize, 0);
-        mb_l2b_fill_forward_2bit(&mut seq, l2b);
+        mb_l2b_fill_forward_2bit(append_uninit_u8(&mut seq, l2b.tot_len as usize), l2b);
         if both_strand != 0 {
-            let old_len = seq.len();
-            seq.resize(old_len + l2b.tot_len as usize, 0);
-            mb_l2b_fill_reverse_complement_2bit(&mut seq[old_len..], l2b);
+            mb_l2b_fill_reverse_complement_2bit(
+                append_uninit_u8(&mut seq, l2b.tot_len as usize),
+                l2b,
+            );
         }
     }
     assert_eq!(seq.len(), len);

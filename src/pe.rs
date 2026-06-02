@@ -1429,21 +1429,40 @@ pub fn mb_matesw(
         } else {
             l2b_meth_t::L2B_METH_C2T
         };
-        let h0 = ha[r].a[j].clone();
-        if let Some(sc) = mb_matesw_core(
-            km,
-            opt,
-            l2b,
-            pes,
-            &h0,
-            r as i32,
-            qlen[1 - r],
-            &mut qs[1 - r],
-            mt,
-            &mut ha[1 - r],
-            min_sc[1 - r],
-            &mut ez,
-        ) {
+        let sc = if r == 0 {
+            let (left, right) = ha.split_at_mut(1);
+            mb_matesw_core(
+                km,
+                opt,
+                l2b,
+                pes,
+                &left[0].a[j],
+                r as i32,
+                qlen[1 - r],
+                &mut qs[1 - r],
+                mt,
+                &mut right[0],
+                min_sc[1 - r],
+                &mut ez,
+            )
+        } else {
+            let (left, right) = ha.split_at_mut(1);
+            mb_matesw_core(
+                km,
+                opt,
+                l2b,
+                pes,
+                &right[0].a[j],
+                r as i32,
+                qlen[1 - r],
+                &mut qs[1 - r],
+                mt,
+                &mut left[0],
+                min_sc[1 - r],
+                &mut ez,
+            )
+        };
+        if let Some(sc) = sc {
             let sc = sc as i32;
             if sc > max[r] {
                 max2[r] = max[r];

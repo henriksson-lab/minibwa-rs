@@ -856,6 +856,24 @@ pub fn BWTOccValueExplicit(bwt: &BWT, occIndexExplicit: bgint_t, character: u32)
     }
 }
 
+#[inline]
+unsafe fn BWTOccValueExplicit_ptr(bwt: &BWT, occIndexExplicit: bgint_t, character: u32) -> bgint_t {
+    let occIndexMajor = occIndexExplicit * OCC_INTERVAL / OCC_INTERVAL_MAJOR;
+    let major = bwt.occValueMajor.as_ptr();
+    let minor = bwt.occValue.as_ptr();
+    let major_idx = occIndexMajor * ALPHABET_SIZE as u64 + character as u64;
+    let minor_idx = occIndexExplicit / OCC_VALUE_PER_WORD * ALPHABET_SIZE as u64 + character as u64;
+    let packed = unsafe { *minor.add(minor_idx as usize) };
+    unsafe {
+        *major.add(major_idx as usize)
+            + if occIndexExplicit % OCC_VALUE_PER_WORD == 0 {
+                (packed >> 16) as u64
+            } else {
+                (packed & 0xffff) as u64
+            }
+    }
+}
+
 /// Original C static function `ForwardDNAOccCount` from `minibwa/bwtgen.c:549`.
 pub fn ForwardDNAOccCount(dna: &[u32], index: u32, character: u32, dnaDecodeTable: &[u32]) -> u32 {
     const TRUNCATE_RIGHT_MASK: [u32; 16] = [
@@ -877,6 +895,40 @@ pub fn ForwardDNAOccCount(dna: &[u32], index: u32, character: u32, dnaDecodeTabl
         let c = dna[wordToCount as usize] & TRUNCATE_RIGHT_MASK[charToCount as usize];
         sum = sum.wrapping_add(dnaDecodeTable[(c >> 16) as usize]);
         sum = sum.wrapping_add(dnaDecodeTable[(c & 0xffff) as usize]);
+        sum = sum.wrapping_add(charToCount).wrapping_sub(16);
+    }
+
+    (sum >> (character * 8)) & 0x000000ff
+}
+
+#[inline]
+unsafe fn ForwardDNAOccCount_ptr(
+    dna: *const u32,
+    index: u32,
+    character: u32,
+    dnaDecodeTable: *const u32,
+) -> u32 {
+    const TRUNCATE_RIGHT_MASK: [u32; 16] = [
+        0x00000000, 0xC0000000, 0xF0000000, 0xFC000000, 0xFF000000, 0xFFC00000, 0xFFF00000,
+        0xFFFC0000, 0xFFFF0000, 0xFFFFC000, 0xFFFFF000, 0xFFFFFC00, 0xFFFFFF00, 0xFFFFFFC0,
+        0xFFFFFFF0, 0xFFFFFFFC,
+    ];
+
+    let wordToCount = index / 16;
+    let charToCount = index - wordToCount * 16;
+    let mut sum = 0u32;
+
+    for i in 0..wordToCount as usize {
+        let word = unsafe { *dna.add(i) };
+        sum = sum.wrapping_add(unsafe { *dnaDecodeTable.add((word >> 16) as usize) });
+        sum = sum.wrapping_add(unsafe { *dnaDecodeTable.add((word & 0x0000ffff) as usize) });
+    }
+
+    if charToCount > 0 {
+        let c = unsafe { *dna.add(wordToCount as usize) }
+            & unsafe { *TRUNCATE_RIGHT_MASK.as_ptr().add(charToCount as usize) };
+        sum = sum.wrapping_add(unsafe { *dnaDecodeTable.add((c >> 16) as usize) });
+        sum = sum.wrapping_add(unsafe { *dnaDecodeTable.add((c & 0xffff) as usize) });
         sum = sum.wrapping_add(charToCount).wrapping_sub(16);
     }
 
@@ -907,6 +959,43 @@ pub fn BackwardDNAOccCount(dna: &[u32], index: u32, character: u32, dnaDecodeTab
         pos += 1;
         sum = sum.wrapping_add(dnaDecodeTable[(dna[pos] >> 16) as usize]);
         sum = sum.wrapping_add(dnaDecodeTable[(dna[pos] & 0x0000ffff) as usize]);
+    }
+
+    (sum >> (character * 8)) & 0x000000ff
+}
+
+#[inline]
+unsafe fn BackwardDNAOccCount_ptr(
+    dna: *const u32,
+    dna_len: usize,
+    index: u32,
+    character: u32,
+    dnaDecodeTable: *const u32,
+) -> u32 {
+    const TRUNCATE_LEFT_MASK: [u32; 16] = [
+        0x00000000, 0x00000003, 0x0000000f, 0x0000003f, 0x000000ff, 0x000003ff, 0x00000fff,
+        0x00003fff, 0x0000ffff, 0x0003ffff, 0x000fffff, 0x003fffff, 0x00ffffff, 0x03ffffff,
+        0x0fffffff, 0x3fffffff,
+    ];
+
+    let wordToCount = index / 16;
+    let charToCount = index - wordToCount * 16;
+    let mut sum = 0u32;
+    let mut pos = dna_len - wordToCount as usize - 1;
+
+    if charToCount > 0 {
+        let c = unsafe { *dna.add(pos) }
+            & unsafe { *TRUNCATE_LEFT_MASK.as_ptr().add(charToCount as usize) };
+        sum = sum.wrapping_add(unsafe { *dnaDecodeTable.add((c >> 16) as usize) });
+        sum = sum.wrapping_add(unsafe { *dnaDecodeTable.add((c & 0xffff) as usize) });
+        sum = sum.wrapping_add(charToCount).wrapping_sub(16);
+    }
+
+    for _ in 0..wordToCount {
+        pos += 1;
+        let word = unsafe { *dna.add(pos) };
+        sum = sum.wrapping_add(unsafe { *dnaDecodeTable.add((word >> 16) as usize) });
+        sum = sum.wrapping_add(unsafe { *dnaDecodeTable.add((word & 0x0000ffff) as usize) });
     }
 
     (sum >> (character * 8)) & 0x000000ff
@@ -943,6 +1032,47 @@ pub fn BWTOccValue(bwt: &BWT, mut index: bgint_t, character: u32) -> bgint_t {
                 character,
                 &bwt.decodeTable,
             ) as u64
+    }
+}
+
+#[inline]
+unsafe fn BWTOccValue_ptr(bwt: &BWT, mut index: bgint_t, character: u32) -> bgint_t {
+    if index > bwt.inverseSa0 {
+        index -= 1;
+    }
+
+    let occExplicitIndex = (index + OCC_INTERVAL / 2 - 1) / OCC_INTERVAL;
+    let occIndex = occExplicitIndex * OCC_INTERVAL;
+    let occValue = unsafe { BWTOccValueExplicit_ptr(bwt, occExplicitIndex, character) };
+
+    if occIndex == index {
+        return occValue;
+    }
+
+    let wordIndex = (occIndex / CHAR_PER_WORD) as usize;
+    let bwt_code = bwt.bwtCode.as_ptr();
+    let decode = bwt.decodeTable.as_ptr();
+    if occIndex < index {
+        occValue
+            + unsafe {
+                ForwardDNAOccCount_ptr(
+                    bwt_code.add(wordIndex),
+                    (index - occIndex) as u32,
+                    character,
+                    decode,
+                )
+            } as u64
+    } else {
+        occValue
+            - unsafe {
+                BackwardDNAOccCount_ptr(
+                    bwt_code,
+                    wordIndex,
+                    (occIndex - index) as u32,
+                    character,
+                    decode,
+                )
+            } as u64
     }
 }
 
@@ -996,7 +1126,7 @@ unsafe fn BWTIncGetAbsoluteRank_ptr(
         for _ in 0..CHAR_PER_WORD {
             let c = t & packedMask;
             saIndex = unsafe { *bwt.cumulativeFreq.as_ptr().add(c as usize) }
-                + BWTOccValue(bwt, saIndex, c)
+                + unsafe { BWTOccValue_ptr(bwt, saIndex, c) }
                 + 1;
             if saIndex > bwt.inverseSa0 {
                 let idx = seqIndexFromEnd[c as usize] as usize;
@@ -1032,9 +1162,7 @@ pub fn BWTIncSortKey(key: &mut [bgint_t], seq: &mut [bgint_t], numItem: bgint_t)
 }
 
 #[inline]
-unsafe fn swap_key_seq(key: *mut bgint_t, seq: *mut bgint_t, a: i64, b: i64) {
-    let a = a as usize;
-    let b = b as usize;
+unsafe fn swap_key_seq(key: *mut bgint_t, seq: *mut bgint_t, a: usize, b: usize) {
     let temp_seq = unsafe { *seq.add(a) };
     let temp_key = unsafe { *key.add(a) };
     unsafe {
@@ -1046,35 +1174,36 @@ unsafe fn swap_key_seq(key: *mut bgint_t, seq: *mut bgint_t, a: i64, b: i64) {
 }
 
 unsafe fn BWTIncSortKey_ptr(key: *mut bgint_t, seq: *mut bgint_t, numItem: bgint_t) {
-    const EQUAL_KEY_THRESHOLD: i64 = 4;
+    const INSERT_SORT_NUM_ITEM: usize = BWTINC_INSERT_SORT_NUM_ITEM as usize;
+    const EQUAL_KEY_THRESHOLD: usize = 4;
     if numItem < 2 {
         return;
     }
 
-    let mut lowIndex = 0i64;
-    let mut highIndex = numItem as i64 - 1;
-    let mut lowStack = [0i64; 32];
-    let mut highStack = [0i64; 32];
+    let mut lowIndex = 0usize;
+    let mut highIndex = numItem as usize - 1;
+    let mut lowStack = [0usize; 32];
+    let mut highStack = [0usize; 32];
     let mut stackDepth = 0usize;
 
     loop {
         loop {
-            if highIndex - lowIndex < BWTINC_INSERT_SORT_NUM_ITEM {
+            if highIndex - lowIndex < INSERT_SORT_NUM_ITEM {
                 for i in lowIndex + 1..=highIndex {
-                    let tempSeq = unsafe { *seq.add(i as usize) };
-                    let tempKey = unsafe { *key.add(i as usize) };
+                    let tempSeq = unsafe { *seq.add(i) };
+                    let tempKey = unsafe { *key.add(i) };
                     let mut j = i;
-                    while j > lowIndex && unsafe { *key.add((j - 1) as usize) } > tempKey {
+                    while j > lowIndex && unsafe { *key.add(j - 1) } > tempKey {
                         unsafe {
-                            *seq.add(j as usize) = *seq.add((j - 1) as usize);
-                            *key.add(j as usize) = *key.add((j - 1) as usize);
+                            *seq.add(j) = *seq.add(j - 1);
+                            *key.add(j) = *key.add(j - 1);
                         }
                         j -= 1;
                     }
                     if j != i {
                         unsafe {
-                            *seq.add(j as usize) = tempSeq;
-                            *key.add(j as usize) = tempKey;
+                            *seq.add(j) = tempSeq;
+                            *key.add(j) = tempKey;
                         }
                     }
                 }
@@ -1082,38 +1211,32 @@ unsafe fn BWTIncSortKey_ptr(key: *mut bgint_t, seq: *mut bgint_t, numItem: bgint
             }
 
             let mut midIndex = (lowIndex & highIndex) + ((lowIndex ^ highIndex) / 2);
-            if unsafe { *key.add(lowIndex as usize) > *key.add(midIndex as usize) } {
+            if unsafe { *key.add(lowIndex) > *key.add(midIndex) } {
                 unsafe { swap_key_seq(key, seq, lowIndex, midIndex) };
             }
-            if unsafe { *key.add(lowIndex as usize) > *key.add(highIndex as usize) } {
+            if unsafe { *key.add(lowIndex) > *key.add(highIndex) } {
                 unsafe { swap_key_seq(key, seq, lowIndex, highIndex) };
             }
-            if unsafe { *key.add(midIndex as usize) > *key.add(highIndex as usize) } {
+            if unsafe { *key.add(midIndex) > *key.add(highIndex) } {
                 unsafe { swap_key_seq(key, seq, midIndex, highIndex) };
             }
 
-            let mut numberOfEqualKey = 0i64;
+            let mut numberOfEqualKey = 0usize;
             let mut lowPartitionIndex = lowIndex + 1;
             let mut highPartitionIndex = highIndex - 1;
 
             loop {
                 while lowPartitionIndex <= highPartitionIndex
-                    && unsafe {
-                        *key.add(lowPartitionIndex as usize) <= *key.add(midIndex as usize)
-                    }
+                    && unsafe { *key.add(lowPartitionIndex) <= *key.add(midIndex) }
                 {
-                    numberOfEqualKey += unsafe {
-                        (*key.add(lowPartitionIndex as usize) == *key.add(midIndex as usize)) as i64
-                    };
+                    numberOfEqualKey +=
+                        unsafe { (*key.add(lowPartitionIndex) == *key.add(midIndex)) as usize };
                     lowPartitionIndex += 1;
                 }
                 while lowPartitionIndex < highPartitionIndex {
-                    if unsafe {
-                        *key.add(midIndex as usize) >= *key.add(highPartitionIndex as usize)
-                    } {
+                    if unsafe { *key.add(midIndex) >= *key.add(highPartitionIndex) } {
                         numberOfEqualKey += unsafe {
-                            (*key.add(midIndex as usize) == *key.add(highPartitionIndex as usize))
-                                as i64
+                            (*key.add(midIndex) == *key.add(highPartitionIndex)) as usize
                         };
                         break;
                     }
@@ -1135,23 +1258,17 @@ unsafe fn BWTIncSortKey_ptr(key: *mut bgint_t, seq: *mut bgint_t, numItem: bgint
 
             unsafe { swap_key_seq(key, seq, midIndex, lowPartitionIndex) };
 
-            if highIndex - lowIndex + BWTINC_INSERT_SORT_NUM_ITEM
-                <= EQUAL_KEY_THRESHOLD * numberOfEqualKey
+            if highIndex - lowIndex + INSERT_SORT_NUM_ITEM <= EQUAL_KEY_THRESHOLD * numberOfEqualKey
             {
                 midIndex = lowIndex;
                 loop {
                     while midIndex < lowPartitionIndex
-                        && unsafe {
-                            *key.add(midIndex as usize) < *key.add(lowPartitionIndex as usize)
-                        }
+                        && unsafe { *key.add(midIndex) < *key.add(lowPartitionIndex) }
                     {
                         midIndex += 1;
                     }
                     while midIndex < lowPartitionIndex
-                        && unsafe {
-                            *key.add(lowPartitionIndex as usize)
-                                == *key.add((lowPartitionIndex - 1) as usize)
-                        }
+                        && unsafe { *key.add(lowPartitionIndex) == *key.add(lowPartitionIndex - 1) }
                     {
                         lowPartitionIndex -= 1;
                     }
@@ -1820,8 +1937,8 @@ pub fn BWTIncConstructFromPacked(
     incMaxBuildSize: bgint_t,
 ) -> std::io::Result<BWTInc> {
     let inputFileName = c_path(inputFileName);
-    let packed = match std::fs::read(&inputFileName) {
-        Ok(packed) => packed,
+    let mut fp = match std::fs::File::open(&inputFileName) {
+        Ok(fp) => fp,
         Err(err) => {
             let reason = err
                 .raw_os_error()
@@ -1835,7 +1952,8 @@ pub fn BWTIncConstructFromPacked(
             std::process::exit(1);
         }
     };
-    if packed.is_empty() {
+    let file_len = fp.metadata()?.len();
+    if file_len == 0 {
         eprintln!(
             "BWTIncConstructFromPacked() : Can't seek on {} : {}",
             inputFileName.display(),
@@ -1843,10 +1961,13 @@ pub fn BWTIncConstructFromPacked(
         );
         std::process::exit(1);
     }
-    let lastByteLength = *packed.last().unwrap() as u32;
-    let packedFileLen = packed.len() as u64 - 1;
+    use std::io::Read;
+    let mut packed_input = Vec::with_capacity(file_len as usize);
+    fp.read_to_end(&mut packed_input)?;
+    let last = *packed_input.last().unwrap();
+    let lastByteLength = last as u32;
+    let packedFileLen = file_len - 1;
     let totalTextLength = TextLengthFromBytePacked(packedFileLen, BIT_PER_CHAR, lastByteLength);
-    let packedData = &packed[..packed.len() - 1];
 
     let mut bwtInc = BWTIncCreate(
         totalTextLength,
@@ -1854,6 +1975,7 @@ pub fn BWTIncConstructFromPacked(
         incMaxBuildSize as u32,
     );
     BWTIncSetBuildSizeAndTextAddr(&mut bwtInc);
+    bwtInc.textBuffer = packed_input;
 
     let mut textToLoad = if bwtInc.buildSize > totalTextLength {
         totalTextLength
@@ -1863,14 +1985,17 @@ pub fn BWTIncConstructFromPacked(
                 * CHAR_PER_WORD)
     };
     let mut textSizeInByte = textToLoad / CHAR_PER_BYTE as u64;
-    let Some(mut chunkStart) = packedData.len().checked_sub(textSizeInByte as usize + 1) else {
+    let Some(mut chunkStart) = packedFileLen.checked_sub(textSizeInByte + 1) else {
         bwt_packed_seek_error_and_exit(&inputFileName);
     };
-    bwtInc.textBuffer = packedData[chunkStart..chunkStart + textSizeInByte as usize + 1].to_vec();
-    bwtInc.packedText =
-        vec![0; (textToLoad as usize + CHAR_PER_WORD as usize - 1) / CHAR_PER_WORD as usize + 1];
+    bwtInc.packedText.clear();
+    bwtInc.packedText.resize(
+        (textToLoad as usize + CHAR_PER_WORD as usize - 1) / CHAR_PER_WORD as usize + 1,
+        0,
+    );
+    let chunkEnd = (chunkStart + textSizeInByte + 1) as usize;
     ConvertBytePackedToWordPacked(
-        &bwtInc.textBuffer,
+        &bwtInc.textBuffer[chunkStart as usize..chunkEnd],
         &mut bwtInc.packedText,
         ALPHABET_SIZE as u32,
         textToLoad,
@@ -1884,18 +2009,18 @@ pub fn BWTIncConstructFromPacked(
             textToLoad = totalTextLength - processedTextLength;
         }
         textSizeInByte = textToLoad / CHAR_PER_BYTE as u64;
-        chunkStart = match chunkStart.checked_sub(textSizeInByte as usize) {
+        chunkStart = match chunkStart.checked_sub(textSizeInByte) {
             Some(chunkStart) => chunkStart,
             None => bwt_packed_seek_error_and_exit(&inputFileName),
         };
-        bwtInc.textBuffer = packedData[chunkStart..chunkStart + textSizeInByte as usize].to_vec();
-        bwtInc.packedText =
-            vec![
-                0;
-                (textToLoad as usize + CHAR_PER_WORD as usize - 1) / CHAR_PER_WORD as usize + 1
-            ];
+        bwtInc.packedText.clear();
+        bwtInc.packedText.resize(
+            (textToLoad as usize + CHAR_PER_WORD as usize - 1) / CHAR_PER_WORD as usize + 1,
+            0,
+        );
+        let chunkEnd = (chunkStart + textSizeInByte) as usize;
         ConvertBytePackedToWordPacked(
-            &bwtInc.textBuffer,
+            &bwtInc.textBuffer[chunkStart as usize..chunkEnd],
             &mut bwtInc.packedText,
             ALPHABET_SIZE as u32,
             textToLoad,
@@ -1932,7 +2057,7 @@ pub fn BWTSaveBwtCodeAndOcc(
     occValueFileName: Option<&std::path::Path>,
 ) -> std::io::Result<()> {
     let bwtFileName = c_path(bwtFileName);
-    let mut bwtFile = match std::fs::File::create(&bwtFileName) {
+    let bwtFile = match std::fs::File::create(&bwtFileName) {
         Ok(file) => file,
         Err(err) => {
             let reason = err
@@ -1947,6 +2072,7 @@ pub fn BWTSaveBwtCodeAndOcc(
             std::process::exit(1);
         }
     };
+    let mut bwtFile = std::io::BufWriter::with_capacity(64 * 1024, bwtFile);
     let bwtLength = BWTFileSizeInWord(bwt.textLength);
     use std::io::Write;
     if let Err(err) = bwtFile.write_all(&bwt.inverseSa0.to_le_bytes()) {
