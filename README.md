@@ -65,10 +65,14 @@ For each dataset, the C and Rust PAF outputs were byte-identical.
 | WGS paired-end 1M | 13.95 s | 14.12 s | 1.01x | 311.28 s | 328.22 s | 3.47 s | 2.94 s | 8,736,640 KB | 8,183,580 KB | 0.94x | identical |
 | Hi-C paired-end 1M | 18.21 s | 18.16 s | 1.00x | 438.91 s | 448.07 s | 3.68 s | 3.19 s | 8,963,144 KB | 8,278,780 KB | 0.92x | identical |
 | HiFi 10k | 11.01 s | 11.33 s | 1.03x | 207.31 s | 227.77 s | 5.93 s | 5.25 s | 11,309,104 KB | 10,536,768 KB | 0.93x | identical |
-| ONT 10k | 12.80 s | 13.57 s | 1.06x | 276.23 s | 304.79 s | 4.40 s | 5.59 s | 10,648,100 KB | 10,675,120 KB | 1.00x | identical |
+| ONT 10k | 12.86 s | 12.91 s | 1.00x | 275.79 s | 283.24 s | 6.83 s | 5.45 s | 10,686,408 KB | 10,700,920 KB | 1.00x | identical |
 
-In these runs, `minibwa-rs` is near wall-time parity on WGS and Hi-C, 3-4%
-slower on HiFi, and 4-6% slower on ONT. Peak RSS remains lower on WGS and Hi-C,
+The 30-thread ONT row was refreshed after the KSW DP register-carry
+optimization with the same command shape, writing to
+`/big/temp/minibwa/zenodo-20097931-bench-mimalloc-t30-readme-20260603-v2`.
+
+In these runs, `minibwa-rs` is near wall-time parity on WGS, Hi-C, and
+30-thread ONT, and 3-4% slower on HiFi. Peak RSS remains lower on WGS and Hi-C,
 lower on 30-thread HiFi, and roughly at parity on ONT.
 
 ## Possible upstream bugs
