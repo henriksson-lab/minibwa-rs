@@ -1,8 +1,8 @@
 #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
 use crate::align::mb_align_skeleton_with_scratch;
-use crate::bwt::mb_sai_v;
 use crate::bwt::{mb_bwt_cache, mb_bwt_load, mb_bwt_t, mb_sai_t};
+use crate::bwt::{mb_sai_v, mb_sai_v_clear};
 use crate::kommon::KOM_NT4_TABLE;
 use crate::l2bit::{l2b_load, l2b_meth_t, l2b_t};
 use crate::lchain::{mb128_t, mb_anchor_t, mb_lchain_dp, radix_sort_mb128x};
@@ -1554,7 +1554,7 @@ pub fn mb_map_sai(
     const MIN_RECHAIN_RATIO: f64 = 0.1;
     *n_hit_ = 0;
     if u.n == 0 {
-        u.a.clear();
+        mb_sai_v_clear(u);
         return Vec::new();
     }
     let mut hash = qname.map(mb_hash_str).unwrap_or(0);
@@ -1594,8 +1594,7 @@ pub fn mb_map_sai(
             &mut b.anchor_batch,
         )
     });
-    u.n = 0;
-    u.a.clear();
+    mb_sai_v_clear(u);
 
     let mut n_hit = 0;
     let mut w = std::mem::take(&mut b.chain_w);

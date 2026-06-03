@@ -2,7 +2,7 @@
 
 use crate::bwt::{
     mb_bwt_sa_batch, mb_bwt_smem, mb_bwt_smem_batch_ref_with_queue, mb_sai_t, mb_sai_v,
-    mb_smem_entry_ref, tiny_queue_t,
+    mb_sai_v_clear, mb_smem_entry_ref, tiny_queue_t,
 };
 use crate::ketopt::{ketopt, ko_longopt_t, KETOPT_INIT};
 use crate::kommon::{kom_atoi, kstring_t, KOM_NT4_TABLE};
@@ -216,8 +216,7 @@ fn batch_smem_with_queue(
 ) {
     let mut v = Vec::with_capacity(n as usize);
     for ti in t.iter_mut().take(n as usize) {
-        ti.v.n = 0;
-        ti.v.a.clear();
+        mb_sai_v_clear(&mut ti.v);
         v.push(std::mem::take(&mut ti.v));
     }
     let mut s = Vec::with_capacity(n as usize);

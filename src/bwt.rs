@@ -49,6 +49,36 @@ pub struct mb_sai_v {
     pub a: Vec<mb_sai_t>,
 }
 
+#[inline(always)]
+pub fn mb_sai_v_clear(v: &mut mb_sai_v) {
+    v.n = 0;
+    v.a.clear();
+    v.m = v.a.capacity();
+}
+
+#[inline(always)]
+fn mb_sai_v_grow(v: &mut mb_sai_v) {
+    v.m = v.n + 1;
+    v.m += (v.m >> 1) + 16;
+    v.a.reserve(v.m.saturating_sub(v.a.capacity()));
+    v.m = v.a.capacity();
+}
+
+#[inline(always)]
+fn mb_sai_v_push_reserved(v: &mut mb_sai_v, x: mb_sai_t) {
+    if v.n >= v.a.capacity() {
+        mb_sai_v_grow(v);
+    }
+    let n = v.n;
+    unsafe {
+        v.a.as_mut_ptr().add(n).write(x);
+        if n == v.a.len() {
+            v.a.set_len(n + 1);
+        }
+    }
+    v.n = n + 1;
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct mb_smem_entry_t {
     pub min_len: i32,
@@ -209,9 +239,10 @@ fn c_assert_fail_bwt_init_from_raw(line: u32, assertion: &str) -> ! {
 /// Original C static function `mb_bwt_set_intv` from `minibwa/bwt.h:71`.
 #[inline(always)]
 pub fn mb_bwt_set_intv(bwt: &mb_bwt_t, c: i32, ik: &mut mb_sai_t) {
-    ik.x[0] = bwt.L2[c as usize] + 1;
-    ik.x[1] = bwt.L2[(3 - c) as usize] + 1;
-    ik.size = bwt.L2[c as usize + 1] - bwt.L2[c as usize];
+    let c = c as usize;
+    ik.x[0] = unsafe { *bwt.L2.get_unchecked(c) } + 1;
+    ik.x[1] = unsafe { *bwt.L2.get_unchecked(3 - c) } + 1;
+    ik.size = unsafe { *bwt.L2.get_unchecked(c + 1) } - unsafe { *bwt.L2.get_unchecked(c) };
     ik.info = 0;
 }
 
@@ -249,7 +280,8 @@ pub fn mb_bwt_rank11(bwt: &mb_bwt_t, mut k: u64, c: u8) -> u64 {
         return 0;
     }
     if k == bwt.seq_len + 1 {
-        return bwt.L2[c as usize + 1] - bwt.L2[c as usize];
+        return unsafe { *bwt.L2.get_unchecked(c as usize + 1) }
+            - unsafe { *bwt.L2.get_unchecked(c as usize) };
     }
     k -= 1;
     k -= (k >= bwt.primary) as u64;
@@ -259,18 +291,21 @@ pub fn mb_bwt_rank11(bwt: &mb_bwt_t, mut k: u64, c: u8) -> u64 {
         0
     };
     let block = ((k >> 7) << 3) as usize;
-    let mut n = (bwt.data[block + c as usize] & BWT_CNT_MASK)
-        + ((bwt.data[block + c as usize] >> BWT_CNT_SHIFT) & mask);
+    let word = unsafe { *bwt.data.get_unchecked(block + c as usize) };
+    let mut n = (word & BWT_CNT_MASK) + ((word >> BWT_CNT_SHIFT) & mask);
     let mut p = block + 4;
     let end = p + ((k & 0x7f) >> 5) as usize;
     if (k & 0x7f) >= 64 {
         p += 2;
     }
     if p < end {
-        n += rank_aux1(bwt.data[p], c) as u64;
+        n += rank_aux1(unsafe { *bwt.data.get_unchecked(p) }, c) as u64;
         p += 1;
     }
-    n += rank_aux1(bwt.data[p] << ((!k & 0x1f) << 1), c) as u64;
+    n += rank_aux1(
+        unsafe { *bwt.data.get_unchecked(p) } << ((!k & 0x1f) << 1),
+        c,
+    ) as u64;
     if c == 0 {
         n -= !k & 0x1f;
     }
@@ -286,20 +321,27 @@ pub fn seek_block(bwt: &mb_bwt_t, k: u64, cnt: &mut [u64; 4]) -> usize {
     } else {
         0
     };
-    cnt[0] = (bwt.data[p] & BWT_CNT_MASK) + ((bwt.data[p] >> BWT_CNT_SHIFT) & mask);
-    cnt[1] = (bwt.data[p + 1] & BWT_CNT_MASK) + ((bwt.data[p + 1] >> BWT_CNT_SHIFT) & mask);
-    cnt[2] = (bwt.data[p + 2] & BWT_CNT_MASK) + ((bwt.data[p + 2] >> BWT_CNT_SHIFT) & mask);
-    cnt[3] = (bwt.data[p + 3] & BWT_CNT_MASK) + ((bwt.data[p + 3] >> BWT_CNT_SHIFT) & mask);
+    let data = bwt.data.as_ptr();
+    let x0 = unsafe { *data.add(p) };
+    let x1 = unsafe { *data.add(p + 1) };
+    let x2 = unsafe { *data.add(p + 2) };
+    let x3 = unsafe { *data.add(p + 3) };
+    cnt[0] = (x0 & BWT_CNT_MASK) + ((x0 >> BWT_CNT_SHIFT) & mask);
+    cnt[1] = (x1 & BWT_CNT_MASK) + ((x1 >> BWT_CNT_SHIFT) & mask);
+    cnt[2] = (x2 & BWT_CNT_MASK) + ((x2 >> BWT_CNT_SHIFT) & mask);
+    cnt[3] = (x3 & BWT_CNT_MASK) + ((x3 >> BWT_CNT_SHIFT) & mask);
     (p + 4) * 2
 }
 
 /// Original C static function `rank_aux4` from `minibwa/bwt.c:168`.
 #[inline(always)]
 pub fn rank_aux4(bwt: &mb_bwt_t, x: u32) -> u32 {
-    bwt.cnt_table[(x & 0xff) as usize]
-        + bwt.cnt_table[((x >> 8) & 0xff) as usize]
-        + bwt.cnt_table[((x >> 16) & 0xff) as usize]
-        + bwt.cnt_table[(x >> 24) as usize]
+    unsafe {
+        *bwt.cnt_table.get_unchecked((x & 0xff) as usize)
+            + *bwt.cnt_table.get_unchecked(((x >> 8) & 0xff) as usize)
+            + *bwt.cnt_table.get_unchecked(((x >> 16) & 0xff) as usize)
+            + *bwt.cnt_table.get_unchecked((x >> 24) as usize)
+    }
 }
 
 #[inline(always)]
@@ -358,7 +400,7 @@ pub fn mb_bwt_rank2a(
         mb_bwt_rank1a(bwt, k, cntk);
         *cntl = *cntk;
         let base = (((z >> 7) << 3) + 4 + (((z & 127) >> 5) as u64)) as usize;
-        let c = ((bwt.data[base] >> ((z & 31) << 1)) & 3) as usize;
+        let c = ((unsafe { *bwt.data.get_unchecked(base) } >> ((z & 31) << 1)) & 3) as usize;
         cntl[c] += 1;
     } else {
         k = k1;
@@ -412,10 +454,10 @@ pub fn mb_bwt_extend_forward(bwt: &mb_bwt_t, ik: &mb_sai_t, ok: &mut [mb_sai_t; 
     let mut tk = [0u64; 4];
     let mut tl = [0u64; 4];
     mb_bwt_rank2a(bwt, ik.x[1], ik.x[1] + ik.size, &mut tk, &mut tl);
-    ok[0].x[1] = bwt.L2[0] + 1 + tk[0];
-    ok[1].x[1] = bwt.L2[1] + 1 + tk[1];
-    ok[2].x[1] = bwt.L2[2] + 1 + tk[2];
-    ok[3].x[1] = bwt.L2[3] + 1 + tk[3];
+    ok[0].x[1] = unsafe { *bwt.L2.get_unchecked(0) } + 1 + tk[0];
+    ok[1].x[1] = unsafe { *bwt.L2.get_unchecked(1) } + 1 + tk[1];
+    ok[2].x[1] = unsafe { *bwt.L2.get_unchecked(2) } + 1 + tk[2];
+    ok[3].x[1] = unsafe { *bwt.L2.get_unchecked(3) } + 1 + tk[3];
     tl[0] -= tk[0];
     tl[1] -= tk[1];
     tl[2] -= tk[2];
@@ -448,8 +490,11 @@ pub fn mb_bwt_extend_forward_one(bwt: &mb_bwt_t, ik: &mb_sai_t, c: usize) -> mb_
         _ => x0,
     };
     mb_sai_t {
-        x: [x0, bwt.L2[c] + 1 + tk[c]],
-        size: tl[c],
+        x: [
+            x0,
+            unsafe { *bwt.L2.get_unchecked(c) } + 1 + unsafe { *tk.get_unchecked(c) },
+        ],
+        size: unsafe { *tl.get_unchecked(c) },
         info: 0,
     }
 }
@@ -459,10 +504,10 @@ pub fn mb_bwt_extend_back(bwt: &mb_bwt_t, ik: &mb_sai_t, ok: &mut [mb_sai_t; 4])
     let mut tk = [0u64; 4];
     let mut tl = [0u64; 4];
     mb_bwt_rank2a(bwt, ik.x[0], ik.x[0] + ik.size, &mut tk, &mut tl);
-    ok[0].x[0] = bwt.L2[0] + 1 + tk[0];
-    ok[1].x[0] = bwt.L2[1] + 1 + tk[1];
-    ok[2].x[0] = bwt.L2[2] + 1 + tk[2];
-    ok[3].x[0] = bwt.L2[3] + 1 + tk[3];
+    ok[0].x[0] = unsafe { *bwt.L2.get_unchecked(0) } + 1 + tk[0];
+    ok[1].x[0] = unsafe { *bwt.L2.get_unchecked(1) } + 1 + tk[1];
+    ok[2].x[0] = unsafe { *bwt.L2.get_unchecked(2) } + 1 + tk[2];
+    ok[3].x[0] = unsafe { *bwt.L2.get_unchecked(3) } + 1 + tk[3];
     tl[0] -= tk[0];
     tl[1] -= tk[1];
     tl[2] -= tk[2];
@@ -495,8 +540,11 @@ pub fn mb_bwt_extend_back_one(bwt: &mb_bwt_t, ik: &mb_sai_t, c: usize) -> mb_sai
         _ => x1,
     };
     mb_sai_t {
-        x: [bwt.L2[c] + 1 + tk[c], x1],
-        size: tl[c],
+        x: [
+            unsafe { *bwt.L2.get_unchecked(c) } + 1 + unsafe { *tk.get_unchecked(c) },
+            x1,
+        ],
+        size: unsafe { *tl.get_unchecked(c) },
         info: 0,
     }
 }
@@ -525,7 +573,7 @@ pub fn mb_bwt_back(
             l += 1;
         }
         debug_assert!(z < (1u64 << (f.pre_len * 2)));
-        *p = f.pre[z as usize];
+        *p = unsafe { *f.pre.get_unchecked(z as usize) };
     } else {
         p.size = 0;
     }
@@ -642,7 +690,13 @@ pub fn tq_init(km: (), q: &mut tiny_queue_t, n: i32) {
 /// Original C static function `tq_push` from `minibwa/bwt.c:321`.
 #[inline(always)]
 pub fn tq_push(q: &mut tiny_queue_t, x: i32) {
-    q.a[((q.count + q.front) & (q.cap - 1)) as usize] = x;
+    debug_assert!(q.cap > 0);
+    debug_assert!(q.count < q.cap);
+    let idx = ((q.count + q.front) & (q.cap - 1)) as usize;
+    debug_assert!(idx < q.a.len());
+    unsafe {
+        *q.a.get_unchecked_mut(idx) = x;
+    }
     q.count += 1;
 }
 
@@ -652,7 +706,10 @@ pub fn tq_shift(q: &mut tiny_queue_t) -> i32 {
     if q.count == 0 {
         return -1;
     }
-    let x = q.a[q.front as usize];
+    debug_assert!(q.cap > 0);
+    let idx = q.front as usize;
+    debug_assert!(idx < q.a.len());
+    let x = unsafe { *q.a.get_unchecked(idx) };
     q.front += 1;
     q.front &= q.cap - 1;
     q.count -= 1;
@@ -689,6 +746,7 @@ pub fn mb_bwt_smem_batch(km: (), bwt: &mb_bwt_t, n: i32, a: &mut [mb_smem_entry_
         if s.v.m < 64 {
             s.v.m = 64;
             s.v.a.reserve(s.v.m.saturating_sub(s.v.a.capacity()));
+            s.v.m = s.v.a.capacity();
         }
     }
 
@@ -728,7 +786,7 @@ pub fn mb_bwt_smem_batch(km: (), bwt: &mb_bwt_t, n: i32, a: &mut [mb_smem_entry_
                 }
             }
         } else if s.stage == 2 || s.stage == 5 {
-            s.p = bwt.pre[s.kmer as usize];
+            s.p = unsafe { *bwt.pre.get_unchecked(s.kmer as usize) };
             if s.p.size < s.min_occ as u64 {
                 s.i += bwt.pre_len as i32;
                 mb_bwt_set_intv(bwt, s.q[s.i as usize] as i32, &mut s.p);
@@ -747,13 +805,7 @@ pub fn mb_bwt_smem_batch(km: (), bwt: &mb_bwt_t, n: i32, a: &mut [mb_smem_entry_
         } else if s.stage == 4 {
             if s.i == s.en {
                 s.p.info = (s.x as u64) << 32 | s.i as u64;
-                if s.v.n >= s.v.m {
-                    s.v.m = s.v.n + 1;
-                    s.v.m += (s.v.m >> 1) + 16;
-                    s.v.a.reserve(s.v.m.saturating_sub(s.v.a.capacity()));
-                }
-                s.v.a.push(s.p);
-                s.v.n += 1;
+                mb_sai_v_push_reserved(&mut s.v, s.p);
                 continue;
             } else {
                 let c = 3 - s.q[s.i as usize] as i32;
@@ -768,13 +820,7 @@ pub fn mb_bwt_smem_batch(km: (), bwt: &mb_bwt_t, n: i32, a: &mut [mb_smem_entry_
                     mb_bwt_block_prefetch(bwt, s.p.x[1] + s.p.size);
                 } else {
                     s.p.info = (s.x as u64) << 32 | s.i as u64;
-                    if s.v.n >= s.v.m {
-                        s.v.m = s.v.n + 1;
-                        s.v.m += (s.v.m >> 1) + 16;
-                        s.v.a.reserve(s.v.m.saturating_sub(s.v.a.capacity()));
-                    }
-                    s.v.a.push(s.p);
-                    s.v.n += 1;
+                    mb_sai_v_push_reserved(&mut s.v, s.p);
                     if c < 0 {
                         s.x = s.i + 1;
                         s.stage = 1;
@@ -852,6 +898,7 @@ pub fn mb_bwt_smem_batch_ref_with_queue(
         if sv.m < 64 {
             sv.m = 64;
             sv.a.reserve(sv.m.saturating_sub(sv.a.capacity()));
+            sv.m = sv.a.capacity();
         }
     }
 
@@ -891,7 +938,7 @@ pub fn mb_bwt_smem_batch_ref_with_queue(
                 }
             }
         } else if s.stage == 2 || s.stage == 5 {
-            s.p = bwt.pre[s.kmer as usize];
+            s.p = unsafe { *bwt.pre.get_unchecked(s.kmer as usize) };
             if s.p.size < s.min_occ as u64 {
                 s.i += bwt.pre_len as i32;
                 mb_bwt_set_intv(bwt, unsafe { smem_q_ref(s, s.i) } as i32, &mut s.p);
@@ -911,13 +958,7 @@ pub fn mb_bwt_smem_batch_ref_with_queue(
             if s.i == s.en {
                 s.p.info = (s.x as u64) << 32 | s.i as u64;
                 let sv = unsafe { &mut *s.v };
-                if sv.n >= sv.m {
-                    sv.m = sv.n + 1;
-                    sv.m += (sv.m >> 1) + 16;
-                    sv.a.reserve(sv.m.saturating_sub(sv.a.capacity()));
-                }
-                sv.a.push(s.p);
-                sv.n += 1;
+                mb_sai_v_push_reserved(sv, s.p);
                 continue;
             } else {
                 let c = 3 - unsafe { smem_q_ref(s, s.i) } as i32;
@@ -936,13 +977,7 @@ pub fn mb_bwt_smem_batch_ref_with_queue(
                 } else {
                     s.p.info = (s.x as u64) << 32 | s.i as u64;
                     let sv = unsafe { &mut *s.v };
-                    if sv.n >= sv.m {
-                        sv.m = sv.n + 1;
-                        sv.m += (sv.m >> 1) + 16;
-                        sv.a.reserve(sv.m.saturating_sub(sv.a.capacity()));
-                    }
-                    sv.a.push(s.p);
-                    sv.n += 1;
+                    mb_sai_v_push_reserved(sv, s.p);
                     if c < 0 {
                         s.x = s.i + 1;
                         s.stage = 1;
@@ -982,8 +1017,8 @@ pub fn mb_bwt_smem_batch_ref_with_queue(
 pub fn bwt_invPsi(bwt: &mb_bwt_t, k: u64) -> u64 {
     let x = k - (k > bwt.primary) as u64;
     let block = (((x >> 7) << 3) + 4 + ((x & 127) >> 5)) as usize;
-    let c = ((bwt.data[block] >> ((x & 31) << 1)) & 3) as u8;
-    let next = bwt.L2[c as usize] + 1 + mb_bwt_rank11(bwt, k, c);
+    let c = ((unsafe { *bwt.data.get_unchecked(block) } >> ((x & 31) << 1)) & 3) as u8;
+    let next = unsafe { *bwt.L2.get_unchecked(c as usize) } + 1 + mb_bwt_rank11(bwt, k, c);
     if k == bwt.primary {
         0
     } else {

@@ -28,29 +28,48 @@ This blurb might be out of date. Go to [this page](https://github.com/henriksson
 ## Benchmark snapshot
 
 This is a development benchmark used to check translation parity, not a general
-performance claim. The run mapped 5 million realistic single-end human chr22
-reads against the same C-built chr22 index, with one mapping thread and PAF
-output enabled. Timings were captured on 2026-06-01 with `/usr/bin/time -v`:
+performance claim. The run mapped realistic human read fixtures from Zenodo
+record 20097931 against whole-genome GRCh38 indexes, with 20 mapping threads
+and PAF output enabled. Timings were captured on 2026-06-03 with
+`/usr/bin/time -v`; both binaries were release builds using mimalloc, and the
+normal indexes were built with the low-memory indexer:
 
 ```sh
-../minibwa/minibwa/minibwa map -t1 \
-  .tmp/large-real/human_chr22/ref.c.t1 \
-  .tmp/large-real/human_chr22/reads_5m.fq > c.paf
-target/release/minibwa-rs map -t1 \
-  .tmp/large-real/human_chr22/ref.c.t1 \
-  .tmp/large-real/human_chr22/reads_5m.fq > rust.paf
+TMPDIR=/big/temp/minibwa \
+python3 tools/benchmark_zenodo_20097931.py \
+  --data-dir .tmp/zenodo-20097931 \
+  --out-dir /big/temp/minibwa/zenodo-20097931-bench-mimalloc-t20-readme-20260603-v1 \
+  --ref .tmp/large-real/human_grch38/ref.fa.gz \
+  --threads 20 \
+  --allocator mimalloc \
+  --datasets wgs hic hifi ont \
+  --skip-build \
+  --skip-index
 ```
 
-Outputs were byte-identical (`cmp` exit code 0), with 5,101,858 PAF records in
-both files.
+For each dataset, the C and Rust PAF outputs were byte-identical.
 
-| Implementation | Wall time | User time | System time | Max RSS |
-| --- | ---: | ---: | ---: | ---: |
-| Original native `minibwa` | 5:09.20 | 307.63 s | 1.49 s | 1,282,332 KB |
-| `minibwa-rs` | 4:36.51 | 274.85 s | 1.61 s | 1,062,588 KB |
+20 mapping threads:
 
-In this run, the Rust CLI was about 10.6% faster by wall time and used about
-17.1% less peak RSS than the original native binary.
+| Dataset | C wall | Rust wall | Rust/C wall | C user | Rust user | C system | Rust system | C RSS | Rust RSS | Rust/C RSS | Parity |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| WGS paired-end 1M | 14.64 s | 15.14 s | 1.03x | 225.11 s | 239.53 s | 3.04 s | 2.79 s | 8,655,788 KB | 8,109,976 KB | 0.94x | identical |
+| Hi-C paired-end 1M | 19.21 s | 19.29 s | 1.00x | 314.83 s | 322.07 s | 3.35 s | 2.88 s | 8,932,968 KB | 8,216,752 KB | 0.92x | identical |
+| HiFi 10k | 11.26 s | 11.68 s | 1.04x | 142.88 s | 155.82 s | 3.29 s | 4.19 s | 9,760,572 KB | 10,052,532 KB | 1.03x | identical |
+| ONT 10k | 13.54 s | 14.06 s | 1.04x | 198.14 s | 212.37 s | 3.92 s | 4.90 s | 9,827,808 KB | 9,939,756 KB | 1.01x | identical |
+
+30 mapping threads:
+
+| Dataset | C wall | Rust wall | Rust/C wall | C user | Rust user | C system | Rust system | C RSS | Rust RSS | Rust/C RSS | Parity |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| WGS paired-end 1M | 13.95 s | 14.12 s | 1.01x | 311.28 s | 328.22 s | 3.47 s | 2.94 s | 8,736,640 KB | 8,183,580 KB | 0.94x | identical |
+| Hi-C paired-end 1M | 18.21 s | 18.16 s | 1.00x | 438.91 s | 448.07 s | 3.68 s | 3.19 s | 8,963,144 KB | 8,278,780 KB | 0.92x | identical |
+| HiFi 10k | 11.01 s | 11.33 s | 1.03x | 207.31 s | 227.77 s | 5.93 s | 5.25 s | 11,309,104 KB | 10,536,768 KB | 0.93x | identical |
+| ONT 10k | 12.80 s | 13.57 s | 1.06x | 276.23 s | 304.79 s | 4.40 s | 5.59 s | 10,648,100 KB | 10,675,120 KB | 1.00x | identical |
+
+In these runs, `minibwa-rs` is near wall-time parity on WGS and Hi-C, 3-4%
+slower on HiFi, and 4-6% slower on ONT. Peak RSS remains lower on WGS and Hi-C,
+lower on 30-thread HiFi, and roughly at parity on ONT.
 
 ## Possible upstream bugs
 

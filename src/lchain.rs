@@ -105,6 +105,13 @@ pub fn mb_log2(x: f32) -> f32 {
     log_2
 }
 
+#[inline(always)]
+fn penalty_to_i64(x: f32) -> i64 {
+    debug_assert!(x.is_finite());
+    debug_assert!(x >= i64::MIN as f32 && x <= i64::MAX as f32);
+    unsafe { x.to_int_unchecked::<i64>() }
+}
+
 /// Anchor format in minibwa (`mb_anchor_t`):
 ///   - `tid2`: target (reference) sequence ID
 ///   - `len`:  length of the seed (q_span)
@@ -174,12 +181,14 @@ pub fn mb_chain_backtrack(
     max_drop: i32,
     n_u_: &mut i32,
     n_v_: &mut i32,
-) -> Vec<u64> {
+    u: &mut Vec<u64>,
+) {
     *n_u_ = 0;
     *n_v_ = 0;
+    u.clear();
     let n_z = (0..n as usize).filter(|&i| f[i] >= min_sc).count();
     if n_z == 0 {
-        return Vec::new();
+        return;
     }
     let mut z = Vec::with_capacity(n_z);
     for i in 0..n as usize {
@@ -218,7 +227,7 @@ pub fn mb_chain_backtrack(
         }
     }
 
-    let mut u = vec![0u64; n_u as usize];
+    u.resize(n_u as usize, 0);
     t[..n as usize].fill(0);
     n_v = 0;
     n_u = 0;
@@ -249,7 +258,6 @@ pub fn mb_chain_backtrack(
     debug_assert!(n_v < i32::MAX as i64);
     *n_u_ = n_u;
     *n_v_ = n_v as i32;
-    u
 }
 
 /// Original C static function `compact_a` from `minibwa/lchain.c:94`.
@@ -336,7 +344,7 @@ pub fn comput_sc(
         } else {
             0.0
         };
-        sc -= (lin_pen + 0.5 * log_pen) as i64;
+        sc -= penalty_to_i64(lin_pen + 0.5 * log_pen);
     }
     sc as i32
 }
@@ -357,7 +365,7 @@ pub fn mb_lchain_dp(
     n_u_: &mut i32,
     _u: &mut Vec<u64>,
 ) -> Vec<mb_anchor_t> {
-    *_u = Vec::new();
+    _u.clear();
     *n_u_ = 0;
     if n == 0 || a.is_empty() {
         return Vec::new();
@@ -415,7 +423,7 @@ pub fn mb_lchain_dp(
                             } else {
                                 0.0
                             };
-                            sc0 -= (lin_pen + 0.5 * log_pen) as i64;
+                            sc0 -= penalty_to_i64(lin_pen + 0.5 * log_pen);
                         }
                         sc = sc0 as i32;
                     }
@@ -483,7 +491,7 @@ pub fn mb_lchain_dp(
                             } else {
                                 0.0
                             };
-                            sc0 -= (lin_pen + 0.5 * log_pen) as i64;
+                            sc0 -= penalty_to_i64(lin_pen + 0.5 * log_pen);
                         }
                         tmp = sc0 as i32;
                     }
@@ -521,17 +529,14 @@ pub fn mb_lchain_dp(
 
     let mut n_u = 0i32;
     let mut n_v = 0i32;
-    let mut u = mb_chain_backtrack(
-        km, n, &f, &p, &mut v, &mut t, min_sc, max_drop, &mut n_u, &mut n_v,
+    mb_chain_backtrack(
+        km, n, &f, &p, &mut v, &mut t, min_sc, max_drop, &mut n_u, &mut n_v, _u,
     );
     *n_u_ = n_u;
     if n_u == 0 {
-        *_u = u;
         return Vec::new();
     }
-    let b = compact_a(km, l2b, n_u, &mut u, n_v, v, a);
-    *_u = u;
-    b
+    compact_a(km, l2b, n_u, _u, n_v, v, a)
 }
 
 #[cfg(test)]

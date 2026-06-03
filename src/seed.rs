@@ -2,7 +2,7 @@
 
 use crate::bwt::{
     mb_bwt_sa_batch_with_scratch, mb_bwt_smem, mb_bwt_smem_batch_ref_with_queue, mb_bwt_t,
-    mb_sai_t, mb_sai_v, mb_smem_entry_ref, tiny_queue_t,
+    mb_sai_t, mb_sai_v, mb_sai_v_clear, mb_smem_entry_ref, tiny_queue_t,
 };
 use crate::l2bit::{l2b_getseq, l2b_intv2cid, l2b_intv2cid_meth, l2b_meth_rev, l2b_meth_t, l2b_t};
 use crate::lchain::mb_anchor_t;
@@ -27,8 +27,7 @@ pub fn mb_seed_intv(
 ) {
     let mut x = 0i64;
     let mut p = mb_sai_t::default();
-    v.n = 0;
-    v.a.clear();
+    mb_sai_v_clear(v);
     loop {
         x = mb_bwt_smem(bwt, len as u32, seq, x, min_len as i64, 1, &mut p);
         if p.size > 0 {
@@ -84,8 +83,7 @@ pub fn mb_seed_intv_batch(
 ) {
     const MAX_BATCH_SIZE: usize = 50;
     for vi in v.iter_mut().take(n_seq as usize) {
-        vi.n = 0;
-        vi.a.clear();
+        mb_sai_v_clear(vi);
     }
     let mut tq = tiny_queue_t::default();
     let mut s = Vec::with_capacity(MAX_BATCH_SIZE);
@@ -155,20 +153,20 @@ pub fn mb_seed_sort_dedup(u: &mut mb_sai_v) {
     if u.n <= 1 {
         return;
     }
-    radix_sort_mb_sai_by_key(&mut u.a[..u.n], |x| x.x[0]);
+    radix_sort_mb_sai_by_key::<0>(&mut u.a[..u.n]);
     let mut i0 = 0usize;
     let mut i = 1usize;
     while i <= u.n {
         if i == u.n || u.a[i].x[0] != u.a[i0].x[0] {
             if i - i0 > 1 {
-                radix_sort_mb_sai_by_key(&mut u.a[i0..i], |x| x.size);
+                radix_sort_mb_sai_by_key::<1>(&mut u.a[i0..i]);
                 u.a[..u.n].reverse();
                 let mut k0 = i0;
                 let mut k = i0 + 1;
                 while k <= i {
                     if k == i || u.a[k0].size != u.a[k].size {
                         if k - k0 > 1 {
-                            radix_sort_mb_sai_by_key(&mut u.a[k0..k], |x| x.info);
+                            radix_sort_mb_sai_by_key::<2>(&mut u.a[k0..k]);
                         }
                         k0 = k;
                     }
@@ -192,16 +190,27 @@ pub fn mb_seed_sort_dedup(u: &mut mb_sai_v) {
     u.m = u.a.capacity();
 }
 
-fn radix_sort_mb_sai_by_key(a: &mut [mb_sai_t], key: fn(&mb_sai_t) -> u64) {
+fn radix_sort_mb_sai_by_key<const KEY: u8>(a: &mut [mb_sai_t]) {
     const RS_MIN_SIZE: usize = 64;
     const RS_MAX_BITS: u32 = 8;
+    const RS_BUCKETS: usize = 1usize << RS_MAX_BITS;
 
-    fn insertion_sort(a: &mut [mb_sai_t], key: fn(&mb_sai_t) -> u64) {
+    #[inline(always)]
+    fn key<const KEY: u8>(x: &mb_sai_t) -> u64 {
+        match KEY {
+            0 => x.x[0],
+            1 => x.size,
+            2 => x.info,
+            _ => unreachable!(),
+        }
+    }
+
+    fn insertion_sort<const KEY: u8>(a: &mut [mb_sai_t]) {
         for i in 1..a.len() {
-            if key(&a[i]) < key(&a[i - 1]) {
+            if key::<KEY>(&a[i]) < key::<KEY>(&a[i - 1]) {
                 let tmp = a[i];
                 let mut j = i;
-                while j > 0 && key(&tmp) < key(&a[j - 1]) {
+                while j > 0 && key::<KEY>(&tmp) < key::<KEY>(&a[j - 1]) {
                     a[j] = a[j - 1];
                     j -= 1;
                 }
@@ -210,13 +219,14 @@ fn radix_sort_mb_sai_by_key(a: &mut [mb_sai_t], key: fn(&mb_sai_t) -> u64) {
         }
     }
 
-    fn sort_rec(a: &mut [mb_sai_t], key: fn(&mb_sai_t) -> u64, n_bits: u32, s: u32) {
-        let size = 1usize << n_bits;
-        let mask = size - 1;
-        let mut b = vec![0usize; size];
-        let mut e = vec![0usize; size];
+    fn sort_rec<const KEY: u8>(a: &mut [mb_sai_t], n_bits: u32, s: u32) {
+        debug_assert_eq!(n_bits, RS_MAX_BITS);
+        let size = RS_BUCKETS;
+        let mask = RS_BUCKETS - 1;
+        let mut b = [0usize; RS_BUCKETS];
+        let mut e = [0usize; RS_BUCKETS];
         for x in a.iter() {
-            e[((key(x) >> s) as usize) & mask] += 1;
+            e[((key::<KEY>(x) >> s) as usize) & mask] += 1;
         }
         let mut sum = 0usize;
         for k in 0..size {
@@ -225,18 +235,18 @@ fn radix_sort_mb_sai_by_key(a: &mut [mb_sai_t], key: fn(&mb_sai_t) -> u64) {
             sum += count;
             e[k] = sum;
         }
-        let bucket_end = e.clone();
+        let bucket_end = e;
 
         let mut k = 0usize;
         while k < size {
             if b[k] != e[k] {
-                let mut l = ((key(&a[b[k]]) >> s) as usize) & mask;
+                let mut l = ((key::<KEY>(&a[b[k]]) >> s) as usize) & mask;
                 if l != k {
                     let mut tmp = a[b[k]];
                     loop {
                         std::mem::swap(&mut tmp, &mut a[b[l]]);
                         b[l] += 1;
-                        l = ((key(&tmp) >> s) as usize) & mask;
+                        l = ((key::<KEY>(&tmp) >> s) as usize) & mask;
                         if l == k {
                             break;
                         }
@@ -251,27 +261,25 @@ fn radix_sort_mb_sai_by_key(a: &mut [mb_sai_t], key: fn(&mb_sai_t) -> u64) {
             }
         }
 
-        let mut bucket_start = vec![0usize; size];
-        bucket_start[1..size].copy_from_slice(&bucket_end[..size - 1]);
         if s != 0 {
             let next_s = s.saturating_sub(n_bits);
             for k in 0..size {
-                let start = bucket_start[k];
+                let start = if k == 0 { 0 } else { bucket_end[k - 1] };
                 let end = bucket_end[k];
                 let len = end - start;
                 if len > RS_MIN_SIZE {
-                    sort_rec(&mut a[start..end], key, n_bits, next_s);
+                    sort_rec::<KEY>(&mut a[start..end], n_bits, next_s);
                 } else if len > 1 {
-                    insertion_sort(&mut a[start..end], key);
+                    insertion_sort::<KEY>(&mut a[start..end]);
                 }
             }
         }
     }
 
     if a.len() <= RS_MIN_SIZE {
-        insertion_sort(a, key);
+        insertion_sort::<KEY>(a);
     } else {
-        sort_rec(a, key, RS_MAX_BITS, 7 * RS_MAX_BITS);
+        sort_rec::<KEY>(a, RS_MAX_BITS, 7 * RS_MAX_BITS);
     }
 }
 
@@ -324,6 +332,7 @@ pub fn mb_anchor_dedup(v: &mut mb_anchor_v) {
 fn radix_sort_mb_anchor_by_tpos(a: &mut [mb_anchor_t]) {
     const RS_MIN_SIZE: usize = 64;
     const RS_MAX_BITS: u32 = 8;
+    const RS_BUCKETS: usize = 1usize << RS_MAX_BITS;
 
     fn key(x: &mb_anchor_t) -> u64 {
         x.tpos as u64
@@ -344,10 +353,11 @@ fn radix_sort_mb_anchor_by_tpos(a: &mut [mb_anchor_t]) {
     }
 
     fn sort_rec(a: &mut [mb_anchor_t], n_bits: u32, s: u32) {
-        let size = 1usize << n_bits;
-        let mask = size - 1;
-        let mut b = vec![0usize; size];
-        let mut e = vec![0usize; size];
+        debug_assert_eq!(n_bits, RS_MAX_BITS);
+        let size = RS_BUCKETS;
+        let mask = RS_BUCKETS - 1;
+        let mut b = [0usize; RS_BUCKETS];
+        let mut e = [0usize; RS_BUCKETS];
         for x in a.iter() {
             e[((key(x) >> s) as usize) & mask] += 1;
         }
@@ -358,7 +368,7 @@ fn radix_sort_mb_anchor_by_tpos(a: &mut [mb_anchor_t]) {
             sum += count;
             e[k] = sum;
         }
-        let bucket_end = e.clone();
+        let bucket_end = e;
 
         let mut k = 0usize;
         while k < size {
@@ -384,12 +394,10 @@ fn radix_sort_mb_anchor_by_tpos(a: &mut [mb_anchor_t]) {
             }
         }
 
-        let mut bucket_start = vec![0usize; size];
-        bucket_start[1..size].copy_from_slice(&bucket_end[..size - 1]);
         if s != 0 {
             let next_s = s.saturating_sub(n_bits);
             for k in 0..size {
-                let start = bucket_start[k];
+                let start = if k == 0 { 0 } else { bucket_end[k - 1] };
                 let end = bucket_end[k];
                 let len = end - start;
                 if len > RS_MIN_SIZE {
@@ -614,6 +622,13 @@ pub fn mb_anchor_with_scratch(
         return 1.0;
     }
     mb_seed_sort_dedup(u);
+    let max_occ_u = max_occ.max(0) as u64;
+    let n_anchor_cap =
+        u.a.iter()
+            .take(u.n)
+            .map(|q| q.size.min(max_occ_u) as usize)
+            .sum::<usize>();
+    v.a.reserve(n_anchor_cap.saturating_sub(v.a.capacity()));
     aux.clear();
     let mut i0 = 0usize;
     let mut i = 1usize;

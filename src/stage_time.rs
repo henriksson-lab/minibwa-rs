@@ -10,8 +10,12 @@ pub enum Bucket {
     MapqPost = 6,
     Pair = 7,
     Output = 8,
+    PipeReadSend = 9,
+    PipeMapRecv = 10,
+    PipeMapSend = 11,
+    PipeOutRecv = 12,
 }
-pub const N: usize = 9;
+pub const N: usize = 13;
 
 #[cfg(feature = "stage-time")]
 mod imp {
@@ -32,9 +36,17 @@ mod imp {
         "mapq+post",
         "pair",
         "output",
+        "pipe_read_send",
+        "pipe_map_recv",
+        "pipe_map_send",
+        "pipe_out_recv",
     ];
 
     static TOTALS: [AtomicU64; N] = [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
         AtomicU64::new(0),
         AtomicU64::new(0),
         AtomicU64::new(0),
@@ -48,10 +60,12 @@ mod imp {
 
     thread_local! {
         static LOCAL: [Cell<u64>; N] = const {
-            [
+                [
                 Cell::new(0), Cell::new(0), Cell::new(0),
                 Cell::new(0), Cell::new(0), Cell::new(0),
                 Cell::new(0), Cell::new(0), Cell::new(0),
+                Cell::new(0), Cell::new(0), Cell::new(0),
+                Cell::new(0),
             ]
         };
     }
@@ -106,6 +120,7 @@ mod imp {
         if !ENABLED.load(Ordering::Relaxed) {
             return;
         }
+        flush_local();
         let mut total: u64 = 0;
         let mut vals = [0u64; N];
         for i in 0..N {

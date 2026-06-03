@@ -11,6 +11,7 @@ use crate::kommon::{
     kom_atof, kom_panic, kom_parse_num, kom_percent_cpu, kom_realtime, kom_strtol, kstring_t,
     KOM_NT4_TABLE,
 };
+use crate::kthread::kt_for_parallel;
 use crate::l2bit::l2b_meth_t;
 use crate::main::MB_VERSION;
 use crate::map_algo::{
@@ -28,7 +29,6 @@ use crate::options::{
 };
 use crate::pe::{mb_hit_buf_t, mb_hit_t, mb_pair, mb_pestat, mb_pestat_t};
 use crate::seed::mb_seed_intv_batch;
-use rayon::prelude::*;
 use rayon::ThreadPool;
 use std::cell::RefCell;
 use std::sync::atomic::Ordering;
@@ -292,8 +292,6 @@ fn worker_for_se_batch_collect_view(
             &mut sai,
         );
     });
-    buf = Vec::new();
-    seq = Vec::new();
     p = 0;
     for k in 0..view.sb_cnt[sb_i] as usize {
         let frag = view.sb_off[sb_i] as usize + k;
@@ -587,18 +585,14 @@ pub fn worker_pipeline<'a, 'w, 'p>(
                 len: s.tbuf.len(),
             };
             pool.install(|| {
-                (0..s.n_sb as usize).into_par_iter().for_each(|i| {
-                    let tid = rayon::current_thread_index()
-                        .expect("map workers must run inside the configured Rayon pool");
-                    let b = unsafe { scratch.get(tid) };
-                    let _ = worker_for_se_batch_collect_view(
-                        view,
-                        i as i64,
-                        tid as i32,
-                        b,
-                        Some(outputs),
-                    );
-                })
+                kt_for_parallel(
+                    opt.n_thread,
+                    |i, tid| {
+                        let b = unsafe { scratch.get(tid as usize) };
+                        let _ = worker_for_se_batch_collect_view(view, i, tid, b, Some(outputs));
+                    },
+                    s.n_sb as i64,
+                );
             });
         } else {
             for i in 0..s.n_sb {
@@ -643,10 +637,13 @@ pub fn worker_pipeline<'a, 'w, 'p>(
                     hit: s.hit.as_mut_ptr(),
                 };
                 pool.install(|| {
-                    (0..s.n_frag as usize).into_par_iter().for_each(|i| {
-                        let tid = rayon::current_thread_index().unwrap_or(0) as i32;
-                        unsafe { outputs.pair_in_place(view, i, tid) };
-                    })
+                    kt_for_parallel(
+                        opt.n_thread,
+                        |i, tid| {
+                            unsafe { outputs.pair_in_place(view, i as usize, tid) };
+                        },
+                        s.n_frag as i64,
+                    );
                 });
             } else {
                 for i in 0..s.n_frag {
@@ -868,10 +865,10 @@ pub fn mb_map_file_with_pool(
         None
     };
     let run = |fp: Vec<mb_bseq_file_t>, output_writer: Option<&mut dyn Write>| -> (i32, String) {
-        if worker_pool.is_some() && opt.mb_size <= 20_000_000 {
+        if worker_pool.is_some() {
             return std::thread::scope(|scope| {
-                let (read_tx, read_rx) = mpsc::sync_channel(0);
-                let (map_tx, map_rx) = mpsc::sync_channel(0);
+                let (read_tx, read_rx) = mpsc::sync_channel(2);
+                let (map_tx, map_rx) = mpsc::sync_channel(2);
                 scope.spawn(move || {
                     let mut read_pl = pipeline_t {
                         n_fp: n,
@@ -888,7 +885,11 @@ pub fn mb_map_file_with_pool(
                         output_error: false,
                     };
                     while let Some(s0) = worker_pipeline(&mut read_pl, 0, None) {
-                        if read_tx.send(s0).is_err() {
+                        let send_result = crate::stage_time::measure(
+                            crate::stage_time::Bucket::PipeReadSend,
+                            || read_tx.send(s0),
+                        );
+                        if send_result.is_err() {
                             break;
                         }
                     }
@@ -896,6 +897,7 @@ pub fn mb_map_file_with_pool(
                     for f in fp {
                         mb_bseq_close(Some(f));
                     }
+                    crate::stage_time::flush_local();
                 });
                 scope.spawn(move || {
                     let mut map_pl = pipeline_t {
@@ -912,15 +914,27 @@ pub fn mb_map_file_with_pool(
                         output_writer: None,
                         output_error: false,
                     };
-                    for s0 in read_rx {
+                    loop {
+                        let recv_result = crate::stage_time::measure(
+                            crate::stage_time::Bucket::PipeMapRecv,
+                            || read_rx.recv(),
+                        );
+                        let Ok(s0) = recv_result else {
+                            break;
+                        };
                         if let Some(s1) = worker_pipeline(&mut map_pl, 1, Some(s0)) {
                             let mut s1 = s1;
                             release_step_tbuf(&mut s1);
-                            if map_tx.send(s1).is_err() {
+                            let send_result = crate::stage_time::measure(
+                                crate::stage_time::Bucket::PipeMapSend,
+                                || map_tx.send(s1),
+                            );
+                            if send_result.is_err() {
                                 break;
                             }
                         }
                     }
+                    crate::stage_time::flush_local();
                 });
                 let mut out_pl = pipeline_t {
                     n_fp: n,
@@ -936,12 +950,20 @@ pub fn mb_map_file_with_pool(
                     output_writer,
                     output_error: false,
                 };
-                for s1 in map_rx {
+                loop {
+                    let recv_result =
+                        crate::stage_time::measure(crate::stage_time::Bucket::PipeOutRecv, || {
+                            map_rx.recv()
+                        });
+                    let Ok(s1) = recv_result else {
+                        break;
+                    };
                     worker_pipeline(&mut out_pl, 2, Some(s1));
                     if out_pl.output_error {
                         break;
                     }
                 }
+                crate::stage_time::flush_local();
                 if out_pl.output_error {
                     (-1, String::new())
                 } else if let Some(writer) = out_pl.output_writer.as_mut() {

@@ -1,5 +1,7 @@
 #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
+use std::sync::atomic::{AtomicI64, Ordering};
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ktf_worker_t {
     pub i: i64,
@@ -89,6 +91,63 @@ where
             func(j, 0);
         }
     }
+}
+
+fn steal_work_atomic(work: &[AtomicI64], n_threads: i32, n: i64) -> i64 {
+    let mut min_i = 0usize;
+    let mut min = i64::MAX;
+    for i in 0..n_threads as usize {
+        let x = work[i].load(Ordering::Relaxed);
+        if min > x {
+            min = x;
+            min_i = i;
+        }
+    }
+    let k = work[min_i].fetch_add(n_threads as i64, Ordering::Relaxed);
+    if k >= n {
+        -1
+    } else {
+        k
+    }
+}
+
+/// Parallel `kt_for` with the same work distribution as the original C code.
+pub fn kt_for_parallel<F>(n_threads: i32, func: F, n: i64)
+where
+    F: Fn(i64, i32) + Sync,
+{
+    if n_threads <= 1 {
+        for j in 0..n {
+            func(j, 0);
+        }
+        return;
+    }
+
+    let work = (0..n_threads)
+        .map(|i| AtomicI64::new(i as i64))
+        .collect::<Vec<_>>();
+    std::thread::scope(|scope| {
+        for tid in 0..n_threads {
+            let work = &work;
+            let func = &func;
+            scope.spawn(move || {
+                loop {
+                    let i = work[tid as usize].fetch_add(n_threads as i64, Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    func(i, tid);
+                }
+                loop {
+                    let i = steal_work_atomic(work, n_threads, n);
+                    if i < 0 {
+                        break;
+                    }
+                    func(i, tid);
+                }
+            });
+        }
+    });
 }
 
 /// Original C static function `ktp_worker` from `minibwa/kthread.c:97`.
