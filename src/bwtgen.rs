@@ -1,6 +1,7 @@
 #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
 use crate::QSufSort::QSufSortSuffixSort;
+use std::io::Seek;
 
 pub type bgint_t = u64;
 pub type sbgint_t = i64;
@@ -58,6 +59,28 @@ fn bwt_packed_seek_error_and_exit(path: &std::path::Path) -> ! {
         c_strerror(libc::EINVAL)
     );
     std::process::exit(1);
+}
+
+fn bwt_packed_read_error_and_exit(path: &std::path::Path, err: std::io::Error) -> ! {
+    let reason = err
+        .raw_os_error()
+        .map(c_strerror)
+        .unwrap_or_else(|| err.to_string());
+    eprintln!(
+        "BWTIncConstructFromPacked() : Can't read from {} : {}",
+        path.display(),
+        reason
+    );
+    std::process::exit(1);
+}
+
+fn bwt_packed_seek_back(fp: &mut std::fs::File, path: &std::path::Path, n: u64) {
+    let Ok(delta) = i64::try_from(n) else {
+        bwt_packed_seek_error_and_exit(path);
+    };
+    if fp.seek(std::io::SeekFrom::Current(-delta)).is_err() {
+        bwt_packed_seek_error_and_exit(path);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1952,8 +1975,9 @@ pub fn BWTIncConstructFromPacked(
             std::process::exit(1);
         }
     };
-    let file_len = fp.metadata()?.len();
-    if file_len == 0 {
+    use std::io::{Read, Seek};
+
+    if fp.seek(std::io::SeekFrom::End(-1)).is_err() {
         eprintln!(
             "BWTIncConstructFromPacked() : Can't seek on {} : {}",
             inputFileName.display(),
@@ -1961,12 +1985,15 @@ pub fn BWTIncConstructFromPacked(
         );
         std::process::exit(1);
     }
-    use std::io::Read;
-    let mut packed_input = Vec::with_capacity(file_len as usize);
-    fp.read_to_end(&mut packed_input)?;
-    let last = *packed_input.last().unwrap();
-    let lastByteLength = last as u32;
-    let packedFileLen = file_len - 1;
+    let packedFileLen = match fp.stream_position() {
+        Ok(pos) => pos,
+        Err(_) => bwt_packed_seek_error_and_exit(&inputFileName),
+    };
+    let mut last = [0u8; 1];
+    if let Err(err) = fp.read_exact(&mut last) {
+        bwt_packed_read_error_and_exit(&inputFileName, err);
+    }
+    let lastByteLength = last[0] as u32;
     let totalTextLength = TextLengthFromBytePacked(packedFileLen, BIT_PER_CHAR, lastByteLength);
 
     let mut bwtInc = BWTIncCreate(
@@ -1975,7 +2002,6 @@ pub fn BWTIncConstructFromPacked(
         incMaxBuildSize as u32,
     );
     BWTIncSetBuildSizeAndTextAddr(&mut bwtInc);
-    bwtInc.textBuffer = packed_input;
 
     let mut textToLoad = if bwtInc.buildSize > totalTextLength {
         totalTextLength
@@ -1985,17 +2011,19 @@ pub fn BWTIncConstructFromPacked(
                 * CHAR_PER_WORD)
     };
     let mut textSizeInByte = textToLoad / CHAR_PER_BYTE as u64;
-    let Some(mut chunkStart) = packedFileLen.checked_sub(textSizeInByte + 1) else {
-        bwt_packed_seek_error_and_exit(&inputFileName);
-    };
     bwtInc.packedText.clear();
     bwtInc.packedText.resize(
         (textToLoad as usize + CHAR_PER_WORD as usize - 1) / CHAR_PER_WORD as usize + 1,
         0,
     );
-    let chunkEnd = (chunkStart + textSizeInByte + 1) as usize;
+    bwtInc.textBuffer.resize(textSizeInByte as usize + 1, 0);
+    bwt_packed_seek_back(&mut fp, &inputFileName, textSizeInByte + 2);
+    if let Err(err) = fp.read_exact(&mut bwtInc.textBuffer) {
+        bwt_packed_read_error_and_exit(&inputFileName, err);
+    }
+    bwt_packed_seek_back(&mut fp, &inputFileName, textSizeInByte + 1);
     ConvertBytePackedToWordPacked(
-        &bwtInc.textBuffer[chunkStart as usize..chunkEnd],
+        &bwtInc.textBuffer,
         &mut bwtInc.packedText,
         ALPHABET_SIZE as u32,
         textToLoad,
@@ -2009,18 +2037,19 @@ pub fn BWTIncConstructFromPacked(
             textToLoad = totalTextLength - processedTextLength;
         }
         textSizeInByte = textToLoad / CHAR_PER_BYTE as u64;
-        chunkStart = match chunkStart.checked_sub(textSizeInByte) {
-            Some(chunkStart) => chunkStart,
-            None => bwt_packed_seek_error_and_exit(&inputFileName),
-        };
         bwtInc.packedText.clear();
         bwtInc.packedText.resize(
             (textToLoad as usize + CHAR_PER_WORD as usize - 1) / CHAR_PER_WORD as usize + 1,
             0,
         );
-        let chunkEnd = (chunkStart + textSizeInByte) as usize;
+        bwtInc.textBuffer.resize(textSizeInByte as usize, 0);
+        bwt_packed_seek_back(&mut fp, &inputFileName, textSizeInByte);
+        if let Err(err) = fp.read_exact(&mut bwtInc.textBuffer) {
+            bwt_packed_read_error_and_exit(&inputFileName, err);
+        }
+        bwt_packed_seek_back(&mut fp, &inputFileName, textSizeInByte);
         ConvertBytePackedToWordPacked(
-            &bwtInc.textBuffer[chunkStart as usize..chunkEnd],
+            &bwtInc.textBuffer,
             &mut bwtInc.packedText,
             ALPHABET_SIZE as u32,
             textToLoad,
