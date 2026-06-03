@@ -292,6 +292,8 @@ fn worker_for_se_batch_collect_view(
             &mut sai,
         );
     });
+    buf = Vec::new();
+    seq = Vec::new();
     p = 0;
     for k in 0..view.sb_cnt[sb_i] as usize {
         let frag = view.sb_off[sb_i] as usize + k;
@@ -307,7 +309,7 @@ fn worker_for_se_batch_collect_view(
                 l2b_meth_t::L2B_METH_G2A
             };
             let mut opt_adap = mb_opt_t::default();
-            mb_opt_adap(opt, len[p], &mut opt_adap);
+            mb_opt_adap(opt, t.l_seq as i32, &mut opt_adap);
             let mut n_hit = 0;
             let hit = mb_map_sai(
                 &opt_adap,
@@ -330,11 +332,11 @@ fn worker_for_se_batch_collect_view(
     }
     let _ = tot;
     let _ = tid;
-    mb_tbuf_reset(b, opt.cap_kalloc);
     b.se_len = len;
     b.se_buf = buf;
     b.se_seq_ptrs = seq;
     b.se_sai = sai;
+    mb_tbuf_reset(b, opt.cap_kalloc);
     crate::stage_time::flush_local();
     out
 }
@@ -663,6 +665,7 @@ pub fn worker_pipeline<'a, 'w, 'p>(
         let mut s = input?;
         let mut out = kstring_t::default();
         const OUTPUT_FLUSH_BYTES: usize = 1 << 20;
+        const OUTPUT_RETAIN_BYTES: usize = 16 << 20;
         let mut tot_len = 0i64;
         release_step_tbuf(&mut s);
         let _stage2 = if crate::stage_time::enabled() {
@@ -723,6 +726,10 @@ pub fn worker_pipeline<'a, 'w, 'p>(
                     );
                 }
             }
+            for i in seg_st..seg_en {
+                s.hit[i] = mb_hit_buf_t::default();
+                s.seq[i] = mb_bseq1_t::default();
+            }
             if p.output_writer.is_some() {
                 if out.l >= OUTPUT_FLUSH_BYTES {
                     if let Some(writer) = p.output_writer.as_mut() {
@@ -731,9 +738,13 @@ pub fn worker_pipeline<'a, 'w, 'p>(
                         }
                     }
                     out.l = 0;
+                    if out.s.capacity() > OUTPUT_RETAIN_BYTES {
+                        out = kstring_t::default();
+                    }
                 }
             } else {
                 p.output.push_str(&String::from_utf8_lossy(&out.s[..out.l]));
+                out.l = 0;
             }
         }
         if out.l > 0 && p.output_writer.is_some() {

@@ -1673,11 +1673,11 @@ pub fn mb_update_dp_max(qlen: i32, n_regs: i32, regs: &mut [mb_hit_t], frac: f64
     if max_i < 0 || max2_i < 0 {
         return;
     }
-    if regs[max_i as usize].qe - regs[max_i as usize].qs < (qlen as f64 * frac) as i32 {
+    if ((regs[max_i as usize].qe - regs[max_i as usize].qs) as f64) < qlen as f64 * frac {
         return;
     }
-    if regs[max2_i as usize].qe - regs[max2_i as usize].qs
-        < ((regs[max_i as usize].qe - regs[max_i as usize].qs) as f64 * frac.sqrt()) as i32
+    if ((regs[max2_i as usize].qe - regs[max2_i as usize].qs) as f64)
+        < ((regs[max_i as usize].qe - regs[max_i as usize].qs) as f64) * frac.sqrt()
     {
         return;
     }

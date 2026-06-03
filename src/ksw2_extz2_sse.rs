@@ -23,6 +23,13 @@ thread_local! {
     static EXTZ_OFF_END: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
 }
 
+const KSW_TLS_RETAIN_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+#[inline(always)]
+fn retain_capacity<T>(v: &Vec<T>) -> bool {
+    v.capacity().saturating_mul(std::mem::size_of::<T>()) <= KSW_TLS_RETAIN_MAX_BYTES
+}
+
 #[inline(always)]
 fn take_u8(key: &'static LocalKey<RefCell<Vec<u8>>>, len: usize, fill: u8) -> Vec<u8> {
     key.with(|cell| {
@@ -48,6 +55,9 @@ fn take_u8_uninit(key: &'static LocalKey<RefCell<Vec<u8>>>, len: usize) -> Vec<u
 #[inline(always)]
 fn put_u8(key: &'static LocalKey<RefCell<Vec<u8>>>, mut v: Vec<u8>) {
     v.clear();
+    if !retain_capacity(&v) {
+        v = Vec::new();
+    }
     key.with(|cell| {
         *cell.borrow_mut() = v;
     });
@@ -78,6 +88,9 @@ fn take_i32_uninit(key: &'static LocalKey<RefCell<Vec<i32>>>, len: usize) -> Vec
 #[inline(always)]
 fn put_i32(key: &'static LocalKey<RefCell<Vec<i32>>>, mut v: Vec<i32>) {
     v.clear();
+    if !retain_capacity(&v) {
+        v = Vec::new();
+    }
     key.with(|cell| {
         *cell.borrow_mut() = v;
     });

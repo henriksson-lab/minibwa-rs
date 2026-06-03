@@ -5,7 +5,7 @@ use crate::bwt::mb_sai_v;
 use crate::bwt::{mb_bwt_cache, mb_bwt_load, mb_bwt_t, mb_sai_t};
 use crate::kommon::KOM_NT4_TABLE;
 use crate::l2bit::{l2b_load, l2b_meth_t, l2b_t};
-use crate::lchain::{mb_anchor_t, mb_lchain_dp};
+use crate::lchain::{mb128_t, mb_anchor_t, mb_lchain_dp, radix_sort_mb128x};
 use crate::mbpriv::{
     mb_cstr_prefix, mb_hash64, mb_hash_str, mb_is_sr_mode, KOM_DBG_FLAG, MB_DBG_ANCHOR,
     MB_DBG_QNAME, MB_DBG_SEED,
@@ -932,22 +932,22 @@ pub fn mb_gen_hit(
         ) & 0xffff_ffff) as u32;
         let x = ui ^ h as u64;
         let y = ((k as u64) << 32) | (ui as u32 as u64);
-        z.push((x, y));
+        z.push(mb128_t { x, y });
         k += ui as u32 as usize;
     }
-    z.sort_by_key(|&(x, _)| x);
+    radix_sort_mb128x(&mut z);
     z.reverse();
 
     let mut r = Vec::with_capacity(n_u as usize);
-    for (i, &(x, y)) in z.iter().enumerate() {
+    for (i, zy) in z.iter().enumerate() {
         let mut ri = mb_hit_t {
             id: i as i32,
             parent: MB_PARENT_UNSET,
-            score: (x >> 32) as i32,
-            score0: (x >> 32) as i32,
-            hash: x as u32,
-            cnt: y as u32 as i32,
-            as_: (y >> 32) as i32,
+            score: (zy.x >> 32) as i32,
+            score0: (zy.x >> 32) as i32,
+            hash: zy.x as u32,
+            cnt: zy.y as u32 as i32,
+            as_: (zy.y >> 32) as i32,
             ..Default::default()
         };
         mb_hit_set_coor(&mut ri, qlen, l2b, a);
@@ -1299,16 +1299,19 @@ pub fn mb_hit_sort(km: (), n_regs: &mut i32, r: &mut Vec<mb_hit_t>) {
     for i in 0..n {
         if r[i].inv() != 0 || r[i].cnt >= 0 {
             let score = r[i].p.as_ref().map(|p| p.dp_max).unwrap_or(r[i].score);
-            aux.push((((score as u64) << 32) | r[i].hash as u64, i));
+            aux.push(mb128_t {
+                x: ((score as u64) << 32) | r[i].hash as u64,
+                y: i as u64,
+            });
         } else if r[i].p.is_some() {
             r[i].p = None;
         }
     }
-    aux.sort_by_key(|&(x, _)| x);
+    radix_sort_mb128x(&mut aux);
     let mut old = std::mem::take(r);
     let mut t = Vec::with_capacity(aux.len());
-    for &(_, idx) in aux.iter().rev() {
-        t.push(std::mem::take(&mut old[idx]));
+    for zy in aux.iter().rev() {
+        t.push(std::mem::take(&mut old[zy.y as usize]));
     }
     *n_regs = t.len() as i32;
     *r = t;
@@ -1375,15 +1378,18 @@ pub fn mb_set_inv_mapq(km: (), n_regs: i32, regs: &mut [mb_hit_t]) {
     let mut aux = Vec::new();
     for (i, r) in regs.iter().take(n).enumerate() {
         if r.parent == i as i32 || r.parent < 0 {
-            aux.push((((r.tid as u64) << 32) | r.ts as u64, i));
+            aux.push(mb128_t {
+                x: ((r.tid as u64) << 32) | r.ts as u64,
+                y: i as u64,
+            });
         }
     }
-    aux.sort_by_key(|&(x, _)| x);
+    radix_sort_mb128x(&mut aux);
     for i in 1..aux.len().saturating_sub(1) {
-        let inv_i = aux[i].1;
+        let inv_i = aux[i].y as usize;
         if regs[inv_i].inv() != 0 {
-            let l_mapq = regs[aux[i - 1].1].mapq;
-            let r_mapq = regs[aux[i + 1].1].mapq;
+            let l_mapq = regs[aux[i - 1].y as usize].mapq;
+            let r_mapq = regs[aux[i + 1].y as usize].mapq;
             regs[inv_i].mapq = l_mapq.min(r_mapq);
         }
     }
@@ -1875,7 +1881,7 @@ pub fn mb_map_batch(
                 );
                 sai[k] = mb_sai_v::default();
             }
-            let seq4_refs = seq4[..sb_n as usize]
+            let mut seq4_refs = seq4[..sb_n as usize]
                 .iter()
                 .map(|s| s.as_ptr())
                 .collect::<Vec<_>>();
@@ -1889,6 +1895,10 @@ pub fn mb_map_batch(
                 opt.max_sub_occ,
                 &mut sai[..sb_n as usize],
             );
+            seq4_refs.clear();
+            for s in seq4.iter_mut().take(sb_n as usize) {
+                *s = Vec::new();
+            }
             for k in 0..sb_n as usize {
                 let idx_k = sb_st as usize + k;
                 let mut opt_adap = mb_opt_t::default();

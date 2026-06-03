@@ -431,6 +431,30 @@ pub fn mb_bwt_extend_forward(bwt: &mb_bwt_t, ik: &mb_sai_t, ok: &mut [mb_sai_t; 
 }
 
 #[inline(always)]
+pub fn mb_bwt_extend_forward_one(bwt: &mb_bwt_t, ik: &mb_sai_t, c: usize) -> mb_sai_t {
+    debug_assert!(c < 4);
+    let mut tk = [0u64; 4];
+    let mut tl = [0u64; 4];
+    mb_bwt_rank2a(bwt, ik.x[1], ik.x[1] + ik.size, &mut tk, &mut tl);
+    tl[0] -= tk[0];
+    tl[1] -= tk[1];
+    tl[2] -= tk[2];
+    tl[3] -= tk[3];
+    let x0 = ik.x[0] + ((ik.x[1] <= bwt.primary && ik.x[1] + ik.size > bwt.primary) as u64);
+    let x0 = match c {
+        0 => x0 + tl[3] + tl[2] + tl[1],
+        1 => x0 + tl[3] + tl[2],
+        2 => x0 + tl[3],
+        _ => x0,
+    };
+    mb_sai_t {
+        x: [x0, bwt.L2[c] + 1 + tk[c]],
+        size: tl[c],
+        info: 0,
+    }
+}
+
+#[inline(always)]
 pub fn mb_bwt_extend_back(bwt: &mb_bwt_t, ik: &mb_sai_t, ok: &mut [mb_sai_t; 4]) {
     let mut tk = [0u64; 4];
     let mut tl = [0u64; 4];
@@ -451,6 +475,30 @@ pub fn mb_bwt_extend_back(bwt: &mb_bwt_t, ik: &mb_sai_t, ok: &mut [mb_sai_t; 4])
     ok[2].x[1] = ok[3].x[1] + tl[3];
     ok[1].x[1] = ok[2].x[1] + tl[2];
     ok[0].x[1] = ok[1].x[1] + tl[1];
+}
+
+#[inline(always)]
+pub fn mb_bwt_extend_back_one(bwt: &mb_bwt_t, ik: &mb_sai_t, c: usize) -> mb_sai_t {
+    debug_assert!(c < 4);
+    let mut tk = [0u64; 4];
+    let mut tl = [0u64; 4];
+    mb_bwt_rank2a(bwt, ik.x[0], ik.x[0] + ik.size, &mut tk, &mut tl);
+    tl[0] -= tk[0];
+    tl[1] -= tk[1];
+    tl[2] -= tk[2];
+    tl[3] -= tk[3];
+    let x1 = ik.x[1] + ((ik.x[0] <= bwt.primary && ik.x[0] + ik.size > bwt.primary) as u64);
+    let x1 = match c {
+        0 => x1 + tl[3] + tl[2] + tl[1],
+        1 => x1 + tl[3] + tl[2],
+        2 => x1 + tl[3],
+        _ => x1,
+    };
+    mb_sai_t {
+        x: [bwt.L2[c] + 1 + tk[c], x1],
+        size: tl[c],
+        info: 0,
+    }
 }
 
 /// Backward search from pos.
@@ -761,15 +809,14 @@ pub fn mb_bwt_smem_batch(km: (), bwt: &mb_bwt_t, n: i32, a: &mut [mb_smem_entry_
 
 #[inline(always)]
 pub fn se_one_step_back_ref(bwt: &mb_bwt_t, s: &mut mb_smem_entry_ref) {
-    let mut ok = [mb_sai_t::default(); 4];
-    let c = unsafe { smem_q_ref(s, s.i) } as i32;
+    let c = unsafe { smem_q_ref(s, s.i) } as usize;
     debug_assert!(c < 4);
-    mb_bwt_extend_back(bwt, &s.p, &mut ok);
-    if ok[c as usize].size < s.min_occ as u64 {
+    let child = mb_bwt_extend_back_one(bwt, &s.p, c);
+    if child.size < s.min_occ as u64 {
         s.x = s.i + 1;
         s.stage = 1;
     } else {
-        s.p = ok[c as usize];
+        s.p = child;
         s.i -= 1;
         mb_bwt_block_prefetch(bwt, s.p.x[0]);
         mb_bwt_block_prefetch(bwt, s.p.x[0] + s.p.size);
@@ -874,12 +921,15 @@ pub fn mb_bwt_smem_batch_ref_with_queue(
                 continue;
             } else {
                 let c = 3 - unsafe { smem_q_ref(s, s.i) } as i32;
-                let mut ok = [mb_sai_t::default(); 4];
-                if c >= 0 {
-                    mb_bwt_extend_forward(bwt, &s.p, &mut ok);
-                }
-                if c >= 0 && ok[c as usize].size >= s.min_occ as u64 {
-                    s.p = ok[c as usize];
+                if c >= 0 && {
+                    let child = mb_bwt_extend_forward_one(bwt, &s.p, c as usize);
+                    if child.size >= s.min_occ as u64 {
+                        s.p = child;
+                        true
+                    } else {
+                        false
+                    }
+                } {
                     s.i += 1;
                     mb_bwt_block_prefetch(bwt, s.p.x[1]);
                     mb_bwt_block_prefetch(bwt, s.p.x[1] + s.p.size);

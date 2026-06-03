@@ -9,6 +9,7 @@ use crate::ksw2::{
 use crate::ksw2_extz2_sse::ksw_extz2_sse;
 use crate::ksw2_ll_sse::{ksw_ll_i16_core, ksw_ll_qinit, ksw_ll_u8_core};
 use crate::l2bit::{l2b_getseq, l2b_meth_rev, l2b_meth_t, l2b_t};
+use crate::lchain::{mb128_t, radix_sort_mb128x};
 use crate::map_algo::{
     mb_hit_sort, mb_set_mapq, mb_set_parent, mb_set_sam_pri, mb_sync_high_cov, MB_PARENT_UNSET,
 };
@@ -827,46 +828,49 @@ pub fn mb_pair_hits(
     if n_hit[0] == 0 || n_hit[1] == 0 {
         return;
     }
-    let mut pa = Vec::<(u64, u64)>::with_capacity((n_hit[0] + n_hit[1]) as usize);
+    let mut pa = Vec::<mb128_t>::with_capacity((n_hit[0] + n_hit[1]) as usize);
     for r in 0..2usize {
         for i in 0..n_hit[r] as usize {
             let h = &mut hit[r][i];
             h.set_proper_pair(0);
             let p = l2b.ctg[h.tid as usize].off + if h.rev() != 0 { h.te } else { h.ts } as u64;
-            pa.push((p, ((i as u64) << 2) | ((h.rev() as u64) << 1) | r as u64));
+            pa.push(mb128_t {
+                x: p,
+                y: ((i as u64) << 2) | ((h.rev() as u64) << 1) | r as u64,
+            });
         }
     }
-    pa.sort_by_key(|&(x, _)| x);
+    radix_sort_mb128x(&mut pa);
     let mut y = [-1i32; 4];
     let mut pp = Vec::<(u64, u64)>::new();
     for i in 0..pa.len() {
-        let (pix, piy) = pa[i];
-        let pi_read = (piy & 1) as usize;
-        let pi_idx = (piy >> 2) as usize;
+        let pi = pa[i];
+        let pi_read = (pi.y & 1) as usize;
+        let pi_idx = (pi.y >> 2) as usize;
         let hi_tid = hit[pi_read][pi_idx].tid;
         for r in 0..2usize {
-            let dir = (r << 1) | ((piy >> 1) as usize & 1);
+            let dir = (r << 1) | ((pi.y >> 1) as usize & 1);
             if pes[dir].failed != 0 {
                 continue;
             }
-            let which = (r << 1) | ((piy as usize & 1) ^ 1);
+            let which = (r << 1) | ((pi.y as usize & 1) ^ 1);
             if y[which] < 0 {
                 continue;
             }
             let mut k = y[which] as isize;
             while k >= 0 {
-                let (pkx, pky) = pa[k as usize];
-                if (pky & 3) as usize != which {
+                let pk = pa[k as usize];
+                if (pk.y & 3) as usize != which {
                     k -= 1;
                     continue;
                 }
-                let pk_read = (pky & 1) as usize;
-                let pk_idx = (pky >> 2) as usize;
+                let pk_read = (pk.y & 1) as usize;
+                let pk_idx = (pk.y >> 2) as usize;
                 let hk_tid = hit[pk_read][pk_idx].tid;
                 if hi_tid != hk_tid {
                     break;
                 }
-                let dist = pix as i64 - pkx as i64;
+                let dist = pi.x as i64 - pk.x as i64;
                 if dist > pes[dir].hi as i64 {
                     break;
                 }
@@ -886,7 +890,7 @@ pub fn mb_pair_hits(
                     if s < 0.0 {
                         s = 0.0;
                     }
-                    let yv = if (pky & 1) == 0 {
+                    let yv = if (pk.y & 1) == 0 {
                         ((pk_idx as u64) << 32) | pi_idx as u64
                     } else {
                         ((pi_idx as u64) << 32) | pk_idx as u64
@@ -897,7 +901,7 @@ pub fn mb_pair_hits(
                 k -= 1;
             }
         }
-        y[(piy & 3) as usize] = i as i32;
+        y[(pi.y & 3) as usize] = i as i32;
     }
     ret.n_pp = pp.len() as i32;
     if !pp.is_empty() {

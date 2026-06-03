@@ -2250,6 +2250,111 @@ fn cli_map_paired_option_matrix_stdout_matches_original() {
     }
 }
 
+fn grch38_index_prefix_from_env_or_bench_default(impl_name: &str) -> String {
+    if let Ok(prefix) = std::env::var(format!(
+        "MINIBWA_GRCH38_{}_INDEX_PREFIX",
+        impl_name.to_ascii_uppercase()
+    )) {
+        return prefix;
+    }
+    let bench_root = std::env::var("MINIBWA_GRCH38_BENCH_INDEX_ROOT").unwrap_or_else(|_| {
+        "/big/temp/minibwa/zenodo-20097931-bench-mimalloc-t20-normal/index".to_string()
+    });
+    format!("{bench_root}/{impl_name}/ref.normal")
+}
+
+fn assert_grch38_index_available(prefix: &str) {
+    for ext in ["l2b", "mbw"] {
+        let path = format!("{prefix}.{ext}");
+        assert!(
+            std::path::Path::new(&path).exists(),
+            "missing full GRCh38 index file {path}; set MINIBWA_GRCH38_BENCH_INDEX_ROOT or MINIBWA_GRCH38_C_INDEX_PREFIX/MINIBWA_GRCH38_RUST_INDEX_PREFIX"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires full GRCh38 normal indexes from the Zenodo 20097931 benchmark"]
+fn cli_map_zenodo_wgs_20thread_core_mismatch_fixture_matches_original() {
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let c_index = grch38_index_prefix_from_env_or_bench_default("c");
+    let rust_index = grch38_index_prefix_from_env_or_bench_default("rust");
+    assert_grch38_index_available(&c_index);
+    assert_grch38_index_available(&rust_index);
+    let read1 =
+        format!("{manifest_dir}/tests/fixtures/zenodo_20097931_parity/wgs_core_mismatch_1.fq");
+    let read2 =
+        format!("{manifest_dir}/tests/fixtures/zenodo_20097931_parity/wgs_core_mismatch_2.fq");
+
+    let original = Command::new(original_bin)
+        .args(["map", "-t", "20", &c_index, &read1, &read2])
+        .output()
+        .unwrap();
+    let rust = Command::new(rust_bin)
+        .args(["map", "-t", "20", &rust_index, &read1, &read2])
+        .output()
+        .unwrap();
+    assert_eq!(original.status.code(), Some(0), "original status");
+    assert_eq!(rust.status.code(), Some(0), "rust status");
+    assert_eq!(rust.stdout, original.stdout);
+}
+
+#[test]
+#[ignore = "requires full GRCh38 normal indexes from the Zenodo 20097931 benchmark"]
+fn cli_map_zenodo_ont_20thread_mapq_tag_fixture_matches_original() {
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let c_index = grch38_index_prefix_from_env_or_bench_default("c");
+    let rust_index = grch38_index_prefix_from_env_or_bench_default("rust");
+    assert_grch38_index_available(&c_index);
+    assert_grch38_index_available(&rust_index);
+    let reads =
+        format!("{manifest_dir}/tests/fixtures/zenodo_20097931_parity/ont_mapq_tag_mismatch.fa");
+
+    let original = Command::new(original_bin)
+        .args(["map", "-x", "lr", "-t", "20", &c_index, &reads])
+        .output()
+        .unwrap();
+    let rust = Command::new(rust_bin)
+        .args(["map", "-x", "lr", "-t", "20", &rust_index, &reads])
+        .output()
+        .unwrap();
+    assert_eq!(original.status.code(), Some(0), "original status");
+    assert_eq!(rust.status.code(), Some(0), "rust status");
+    assert_eq!(rust.stdout, original.stdout);
+}
+
+#[test]
+#[ignore = "requires full GRCh38 normal indexes from the Zenodo 20097931 benchmark"]
+fn cli_map_zenodo_wgs_20thread_mapq_tag_fixture_matches_original() {
+    let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");
+    let original_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/minibwa/minibwa");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let c_index = grch38_index_prefix_from_env_or_bench_default("c");
+    let rust_index = grch38_index_prefix_from_env_or_bench_default("rust");
+    assert_grch38_index_available(&c_index);
+    assert_grch38_index_available(&rust_index);
+    let read1 =
+        format!("{manifest_dir}/tests/fixtures/zenodo_20097931_parity/wgs_mapq_tag_mismatch_1.fq");
+    let read2 =
+        format!("{manifest_dir}/tests/fixtures/zenodo_20097931_parity/wgs_mapq_tag_mismatch_2.fq");
+
+    let original = Command::new(original_bin)
+        .args(["map", "-t", "20", &c_index, &read1, &read2])
+        .output()
+        .unwrap();
+    let rust = Command::new(rust_bin)
+        .args(["map", "-t", "20", &rust_index, &read1, &read2])
+        .output()
+        .unwrap();
+    assert_eq!(original.status.code(), Some(0), "original status");
+    assert_eq!(rust.status.code(), Some(0), "rust status");
+    assert_eq!(rust.stdout, original.stdout);
+}
+
 #[test]
 fn cli_index_outputs_match_original_for_small_fasta() {
     let rust_bin = env!("CARGO_BIN_EXE_minibwa-rs");

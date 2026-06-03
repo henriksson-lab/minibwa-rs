@@ -86,7 +86,7 @@ fn radix_sort_mb128x_rec(a: &mut [mb128_t], n_bits: u32, s: u32) {
     }
 }
 
-fn radix_sort_mb128x(a: &mut [mb128_t]) {
+pub(crate) fn radix_sort_mb128x(a: &mut [mb128_t]) {
     const RS_MIN_SIZE: usize = 64;
     if a.len() <= RS_MIN_SIZE {
         radix_insert_sort_mb128x(a);
@@ -377,84 +377,140 @@ pub fn mb_lchain_dp(
     let mut mmax_f = 0i32;
     let max_drop = bw;
     let mut max_ii = -1i64;
+    let a_ptr = a.as_ptr();
+    let f_ptr = f.as_mut_ptr();
+    let p_ptr = p.as_mut_ptr();
+    let v_ptr = v.as_mut_ptr();
+    let t_ptr = t.as_mut_ptr();
     for i in 0..n {
+        let i_usize = i as usize;
+        let ai = unsafe { *a_ptr.add(i_usize) };
         let mut max_j = -1i64;
-        let mut max_f = a[i as usize].len;
+        let mut max_f = ai.len;
         let mut n_skip = 0i32;
         let mut j = i - 1;
         while j >= 0 && j >= i - max_iter as i64 {
-            if a[i as usize].tpos - a[j as usize].tpos >= (max_dist_x + a[i as usize].len) as i64 {
+            let j_usize = j as usize;
+            let aj = unsafe { *a_ptr.add(j_usize) };
+            if ai.tpos - aj.tpos >= (max_dist_x + ai.len) as i64 {
                 break;
             }
-            let mut sc = comput_sc(
-                &a[i as usize],
-                &a[j as usize],
-                max_dist_x,
-                max_dist_y,
-                bw,
-                chn_pen_gap,
-            );
+            let mut sc = i32::MIN;
+            let dq = (ai.qpos - aj.qpos) as i64;
+            if dq > 0 && dq <= (max_dist_y + ai.len) as i64 && ai.sid == aj.sid {
+                let dr = ai.tpos - aj.tpos;
+                if dr > 0 && dq <= (max_dist_x + ai.len) as i64 {
+                    let dd = if dr > dq { dr - dq } else { dq - dr };
+                    if dd <= bw as i64 {
+                        let dg = if dr < dq { dr } else { dq };
+                        let mut sc0 = if (ai.len as i64) < dg {
+                            ai.len as i64
+                        } else {
+                            dg
+                        };
+                        if dd != 0 {
+                            let lin_pen = chn_pen_gap * dd as f32;
+                            let log_pen = if dd >= 1 {
+                                mb_log2((dd + 1) as f32)
+                            } else {
+                                0.0
+                            };
+                            sc0 -= (lin_pen + 0.5 * log_pen) as i64;
+                        }
+                        sc = sc0 as i32;
+                    }
+                }
+            }
             if sc != i32::MIN {
-                sc += f[j as usize];
+                sc += unsafe { *f_ptr.add(j_usize) };
                 if sc > max_f {
                     max_f = sc;
                     max_j = j;
                     if n_skip > 0 {
                         n_skip -= 1;
                     }
-                } else if t[j as usize] == i as i32 {
+                } else if unsafe { *t_ptr.add(j_usize) } == i as i32 {
                     n_skip += 1;
                     if n_skip > max_skip {
                         break;
                     }
                 }
-                if p[j as usize] >= 0 {
-                    t[p[j as usize] as usize] = i as i32;
+                let pj = unsafe { *p_ptr.add(j_usize) };
+                if pj >= 0 {
+                    unsafe {
+                        *t_ptr.add(pj as usize) = i as i32;
+                    }
                 }
             }
             j -= 1;
         }
         let end_j = j;
         if max_ii < 0
-            || a[i as usize].tpos - a[max_ii as usize].tpos
-                > (max_dist_x + a[i as usize].len) as i64
+            || ai.tpos - unsafe { (*a_ptr.add(max_ii as usize)).tpos }
+                > (max_dist_x + ai.len) as i64
         {
             let mut max = i32::MIN;
             max_ii = -1;
             j = i - 1;
             while j >= end_j && j >= 0 {
-                if max < f[j as usize] {
-                    max = f[j as usize];
+                let fj = unsafe { *f_ptr.add(j as usize) };
+                if max < fj {
+                    max = fj;
                     max_ii = j;
                 }
                 j -= 1;
             }
         }
         if max_ii >= 0 && max_ii < end_j {
-            let tmp = comput_sc(
-                &a[i as usize],
-                &a[max_ii as usize],
-                max_dist_x,
-                max_dist_y,
-                bw,
-                chn_pen_gap,
-            );
-            if tmp != i32::MIN && max_f < tmp + f[max_ii as usize] {
-                max_f = tmp + f[max_ii as usize];
+            let aj = unsafe { *a_ptr.add(max_ii as usize) };
+            let mut tmp = i32::MIN;
+            let dq = (ai.qpos - aj.qpos) as i64;
+            if dq > 0 && dq <= (max_dist_y + ai.len) as i64 && ai.sid == aj.sid {
+                let dr = ai.tpos - aj.tpos;
+                if dr > 0 && dq <= (max_dist_x + ai.len) as i64 {
+                    let dd = if dr > dq { dr - dq } else { dq - dr };
+                    if dd <= bw as i64 {
+                        let dg = if dr < dq { dr } else { dq };
+                        let mut sc0 = if (ai.len as i64) < dg {
+                            ai.len as i64
+                        } else {
+                            dg
+                        };
+                        if dd != 0 {
+                            let lin_pen = chn_pen_gap * dd as f32;
+                            let log_pen = if dd >= 1 {
+                                mb_log2((dd + 1) as f32)
+                            } else {
+                                0.0
+                            };
+                            sc0 -= (lin_pen + 0.5 * log_pen) as i64;
+                        }
+                        tmp = sc0 as i32;
+                    }
+                }
+            }
+            let f_max_ii = unsafe { *f_ptr.add(max_ii as usize) };
+            if tmp != i32::MIN && max_f < tmp + f_max_ii {
+                max_f = tmp + f_max_ii;
                 max_j = max_ii;
             }
         }
-        f[i as usize] = max_f;
-        p[i as usize] = max_j;
-        v[i as usize] = if max_j >= 0 && v[max_j as usize] > max_f {
-            v[max_j as usize]
+        unsafe {
+            *f_ptr.add(i_usize) = max_f;
+            *p_ptr.add(i_usize) = max_j;
+        }
+        let vi = if max_j >= 0 && unsafe { *v_ptr.add(max_j as usize) } > max_f {
+            unsafe { *v_ptr.add(max_j as usize) }
         } else {
             max_f
         };
+        unsafe {
+            *v_ptr.add(i_usize) = vi;
+        }
         if max_ii < 0
-            || (a[i as usize].tpos - a[max_ii as usize].tpos
-                <= (max_dist_x + a[i as usize].len) as i64
-                && f[max_ii as usize] < f[i as usize])
+            || (ai.tpos - unsafe { (*a_ptr.add(max_ii as usize)).tpos }
+                <= (max_dist_x + ai.len) as i64
+                && unsafe { *f_ptr.add(max_ii as usize) } < max_f)
         {
             max_ii = i;
         }

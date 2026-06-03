@@ -5,6 +5,7 @@ use crate::ksw2::{
     KSW_EZ_APPROX_MAX, KSW_EZ_EXTZ_ONLY, KSW_EZ_GENERIC_SC, KSW_EZ_REV_CIGAR, KSW_EZ_RIGHT,
     KSW_EZ_SCORE_ONLY, KSW_NEG_INF,
 };
+#[cfg(not(target_arch = "x86_64"))]
 use crate::s2n_lite;
 use std::cell::RefCell;
 use std::thread::LocalKey;
@@ -22,6 +23,13 @@ thread_local! {
     static EXTD_P: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static EXTD_OFF: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
     static EXTD_OFF_END: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+}
+
+const KSW_TLS_RETAIN_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+#[inline(always)]
+fn retain_capacity<T>(v: &Vec<T>) -> bool {
+    v.capacity().saturating_mul(std::mem::size_of::<T>()) <= KSW_TLS_RETAIN_MAX_BYTES
 }
 
 #[inline(always)]
@@ -49,6 +57,9 @@ fn take_u8_uninit(key: &'static LocalKey<RefCell<Vec<u8>>>, len: usize) -> Vec<u
 #[inline(always)]
 fn put_u8(key: &'static LocalKey<RefCell<Vec<u8>>>, mut v: Vec<u8>) {
     v.clear();
+    if !retain_capacity(&v) {
+        v = Vec::new();
+    }
     key.with(|cell| {
         *cell.borrow_mut() = v;
     });
@@ -79,6 +90,9 @@ fn take_i32_uninit(key: &'static LocalKey<RefCell<Vec<i32>>>, len: usize) -> Vec
 #[inline(always)]
 fn put_i32(key: &'static LocalKey<RefCell<Vec<i32>>>, mut v: Vec<i32>) {
     v.clear();
+    if !retain_capacity(&v) {
+        v = Vec::new();
+    }
     key.with(|cell| {
         *cell.borrow_mut() = v;
     });
@@ -141,8 +155,65 @@ unsafe fn loadu128_u8(slice: &[u8], offset: usize) -> std::arch::x86_64::__m128i
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
+unsafe fn loadu128_u8_ptr(ptr: *const u8, offset: usize) -> std::arch::x86_64::__m128i {
+    unsafe { std::arch::x86_64::_mm_loadu_si128(ptr.add(offset).cast()) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn loada128_u8_ptr(ptr: *const u8, offset: usize) -> std::arch::x86_64::__m128i {
+    unsafe { std::arch::x86_64::_mm_load_si128(ptr.add(offset).cast()) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
 unsafe fn storeu128_u8(slice: &mut [u8], offset: usize, value: std::arch::x86_64::__m128i) {
     unsafe { std::arch::x86_64::_mm_storeu_si128(slice.as_mut_ptr().add(offset).cast(), value) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn storeu128_u8_ptr(ptr: *mut u8, offset: usize, value: std::arch::x86_64::__m128i) {
+    unsafe { std::arch::x86_64::_mm_storeu_si128(ptr.add(offset).cast(), value) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn storea128_u8_ptr(ptr: *mut u8, offset: usize, value: std::arch::x86_64::__m128i) {
+    unsafe { std::arch::x86_64::_mm_store_si128(ptr.add(offset).cast(), value) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn loadu128_i32_ptr(ptr: *const i32, offset: usize) -> std::arch::x86_64::__m128i {
+    unsafe { std::arch::x86_64::_mm_loadu_si128(ptr.add(offset).cast()) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn storeu128_i32_ptr(ptr: *mut i32, offset: usize, value: std::arch::x86_64::__m128i) {
+    unsafe { std::arch::x86_64::_mm_storeu_si128(ptr.add(offset).cast(), value) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn i8x4_to_i32x4_ptr(ptr: *const u8, offset: usize) -> std::arch::x86_64::__m128i {
+    let p = unsafe { ptr.add(offset) };
+    #[cfg(target_feature = "sse4.1")]
+    unsafe {
+        std::arch::x86_64::_mm_cvtepi8_epi32(std::arch::x86_64::_mm_cvtsi32_si128(
+            std::ptr::read_unaligned(p.cast::<i32>()),
+        ))
+    }
+    #[cfg(not(target_feature = "sse4.1"))]
+    unsafe {
+        std::arch::x86_64::_mm_setr_epi32(
+            *p.add(0) as i8 as i32,
+            *p.add(1) as i8 as i32,
+            *p.add(2) as i8 as i32,
+            *p.add(3) as i8 as i32,
+        )
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -211,6 +282,26 @@ unsafe fn min_epi8_native(
         std::arch::x86_64::_mm_or_si128(
             std::arch::x86_64::_mm_and_si128(mask, b),
             std::arch::x86_64::_mm_andnot_si128(mask, a),
+        )
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn max_epi32_native(
+    a: std::arch::x86_64::__m128i,
+    b: std::arch::x86_64::__m128i,
+) -> std::arch::x86_64::__m128i {
+    #[cfg(target_feature = "sse4.1")]
+    unsafe {
+        std::arch::x86_64::_mm_max_epi32(a, b)
+    }
+    #[cfg(not(target_feature = "sse4.1"))]
+    unsafe {
+        let mask = std::arch::x86_64::_mm_cmpgt_epi32(a, b);
+        std::arch::x86_64::_mm_or_si128(
+            std::arch::x86_64::_mm_and_si128(mask, a),
+            std::arch::x86_64::_mm_andnot_si128(mask, b),
         )
     }
 }
@@ -336,22 +427,39 @@ pub fn ksw_extd2_sse(
         mat[m * m - 1] as u8
     };
     let wildcard = (m - 1) as u8;
+    #[cfg(not(target_arch = "x86_64"))]
     let sc_mch_v = s2n_lite::_mm_set1_epi8(sc_mch as i32);
+    #[cfg(not(target_arch = "x86_64"))]
     let sc_mis_v = s2n_lite::_mm_set1_epi8(sc_mis as i32);
+    #[cfg(not(target_arch = "x86_64"))]
     let sc_n_v = s2n_lite::_mm_set1_epi8(sc_n as i32);
+    #[cfg(not(target_arch = "x86_64"))]
     let wildcard_v = s2n_lite::_mm_set1_epi8(wildcard as i32);
+    #[cfg(not(target_arch = "x86_64"))]
     let zero_v = s2n_lite::_mm_setzero_si128();
+    #[cfg(not(target_arch = "x86_64"))]
     let q_v = s2n_lite::_mm_set1_epi8(q_byte as i32);
+    #[cfg(not(target_arch = "x86_64"))]
     let q2_v = s2n_lite::_mm_set1_epi8(q2_byte as i32);
+    #[cfg(not(target_arch = "x86_64"))]
     let qe_v = s2n_lite::_mm_set1_epi8(qe_byte as i32);
+    #[cfg(not(target_arch = "x86_64"))]
     let qe2_v = s2n_lite::_mm_set1_epi8(qe2_byte as i32);
+    #[cfg(not(target_arch = "x86_64"))]
     let flag1_v = s2n_lite::_mm_set1_epi8(1);
+    #[cfg(not(target_arch = "x86_64"))]
     let flag2_v = s2n_lite::_mm_set1_epi8(2);
+    #[cfg(not(target_arch = "x86_64"))]
     let flag3_v = s2n_lite::_mm_set1_epi8(3);
+    #[cfg(not(target_arch = "x86_64"))]
     let flag4_v = s2n_lite::_mm_set1_epi8(4);
+    #[cfg(not(target_arch = "x86_64"))]
     let flag8_v = s2n_lite::_mm_set1_epi8(0x08);
+    #[cfg(not(target_arch = "x86_64"))]
     let flag16_v = s2n_lite::_mm_set1_epi8(0x10);
+    #[cfg(not(target_arch = "x86_64"))]
     let flag32_v = s2n_lite::_mm_set1_epi8(0x20);
+    #[cfg(not(target_arch = "x86_64"))]
     let flag64_v = s2n_lite::_mm_set1_epi8(0x40);
     #[cfg(target_arch = "x86_64")]
     let (
@@ -400,6 +508,24 @@ pub fn ksw_extd2_sse(
     let mut last_en = -1i32;
     let wl = w;
     let wr = w;
+    #[cfg(target_arch = "x86_64")]
+    let u_ptr = u.as_mut_ptr();
+    #[cfg(target_arch = "x86_64")]
+    let v_ptr = v.as_mut_ptr();
+    #[cfg(target_arch = "x86_64")]
+    let x_ptr = x.as_mut_ptr();
+    #[cfg(target_arch = "x86_64")]
+    let y_ptr = y.as_mut_ptr();
+    #[cfg(target_arch = "x86_64")]
+    let x2_ptr = x2.as_mut_ptr();
+    #[cfg(target_arch = "x86_64")]
+    let y2_ptr = y2.as_mut_ptr();
+    #[cfg(target_arch = "x86_64")]
+    let s_ptr = s.as_mut_ptr();
+    #[cfg(target_arch = "x86_64")]
+    let sf_qr_ptr = sf_qr.as_ptr();
+    #[cfg(target_arch = "x86_64")]
+    let p_ptr = p.as_mut_ptr();
 
     for r in 0..(qlen + tlen - 1) {
         let r_i32 = r as i32;
@@ -428,11 +554,22 @@ pub fn ksw_extd2_sse(
 
         let (x1, x21, v1) = if st > 0 {
             if st - 1 >= last_st && st - 1 <= last_en {
-                (
-                    x[(st - 1) as usize],
-                    x2[(st - 1) as usize],
-                    v[(st - 1) as usize],
-                )
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    (
+                        *x_ptr.add((st - 1) as usize),
+                        *x2_ptr.add((st - 1) as usize),
+                        *v_ptr.add((st - 1) as usize),
+                    )
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    (
+                        x[(st - 1) as usize],
+                        x2[(st - 1) as usize],
+                        v[(st - 1) as usize],
+                    )
+                }
             } else {
                 (neg_qe, neg_qe2, neg_qe)
             }
@@ -449,9 +586,7 @@ pub fn ksw_extd2_sse(
             (neg_qe, neg_qe2, boundary)
         };
         if en >= r_i32 {
-            y[r] = neg_qe;
-            y2[r] = neg_qe2;
-            u[r] = if r == 0 {
+            let boundary = if r == 0 {
                 neg_qe
             } else if r_i32 < long_thres {
                 (-e_i32) as i8 as u8
@@ -460,6 +595,18 @@ pub fn ksw_extd2_sse(
             } else {
                 (-e2_i32) as i8 as u8
             };
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                *y_ptr.add(r) = neg_qe;
+                *y2_ptr.add(r) = neg_qe2;
+                *u_ptr.add(r) = boundary;
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                y[r] = neg_qe;
+                y2[r] = neg_qe2;
+                u[r] = boundary;
+            }
         }
 
         if (flag & KSW_EZ_GENERIC_SC) == 0 {
@@ -469,15 +616,15 @@ pub fn ksw_extd2_sse(
                 let q_usize = (qr_off as i32 + qlen as i32 - 1 - r_i32 + score_t) as usize;
                 #[cfg(target_arch = "x86_64")]
                 unsafe {
-                    let sq = loadu128_u8(&sf_qr, t_usize);
-                    let stq = loadu128_u8(&sf_qr, q_usize);
+                    let sq = loadu128_u8_ptr(sf_qr_ptr, t_usize);
+                    let stq = loadu128_u8_ptr(sf_qr_ptr, q_usize);
                     let eq = std::arch::x86_64::_mm_cmpeq_epi8(sq, stq);
                     let sq_wild = std::arch::x86_64::_mm_cmpeq_epi8(sq, wildcard_v_n);
                     let st_wild = std::arch::x86_64::_mm_cmpeq_epi8(stq, wildcard_v_n);
                     let wild = std::arch::x86_64::_mm_or_si128(sq_wild, st_wild);
                     let mut score = blendv_epi8_native(sc_mis_v_n, sc_mch_v_n, eq);
                     score = blendv_epi8_native(score, sc_n_v_n, wild);
-                    storeu128_u8(&mut s, t_usize, score);
+                    storeu128_u8_ptr(s_ptr, t_usize, score);
                 }
                 #[cfg(not(target_arch = "x86_64"))]
                 {
@@ -508,6 +655,8 @@ pub fn ksw_extd2_sse(
             off[r] = st;
             off_end[r] = en;
         }
+        #[cfg(target_arch = "x86_64")]
+        let mut p_row_idx = r * n_col_ * 16;
         let mut x1_lane = x1;
         let mut x21_lane = x21;
         let mut v1_lane = v1;
@@ -515,16 +664,16 @@ pub fn ksw_extd2_sse(
             let base = block as usize * 16;
             #[cfg(target_arch = "x86_64")]
             unsafe {
-                let old_x = loadu128_u8(&x, base);
-                let old_y = loadu128_u8(&y, base);
-                let old_x2 = loadu128_u8(&x2, base);
-                let old_y2 = loadu128_u8(&y2, base);
-                let old_u = loadu128_u8(&u, base);
-                let old_v = loadu128_u8(&v, base);
+                let old_x = loada128_u8_ptr(x_ptr, base);
+                let old_y = loada128_u8_ptr(y_ptr, base);
+                let old_x2 = loada128_u8_ptr(x2_ptr, base);
+                let old_y2 = loada128_u8_ptr(y2_ptr, base);
+                let old_u = loada128_u8_ptr(u_ptr, base);
+                let old_v = loada128_u8_ptr(v_ptr, base);
                 let old_x_tail = m128i_lane15_u8(old_x);
                 let old_x2_tail = m128i_lane15_u8(old_x2);
                 let old_v_tail = m128i_lane15_u8(old_v);
-                let s_block = loadu128_u8(&s, base);
+                let s_block = loada128_u8_ptr(s_ptr, base);
                 let xt1 = std::arch::x86_64::_mm_or_si128(
                     std::arch::x86_64::_mm_slli_si128::<1>(old_x),
                     std::arch::x86_64::_mm_cvtsi32_si128(x1_lane as i32),
@@ -581,8 +730,8 @@ pub fn ksw_extd2_sse(
                     z = max_epi8_native(z, b2);
                 }
                 z = min_epi8_native(z, sc_mch_v_n);
-                storeu128_u8(&mut u, base, std::arch::x86_64::_mm_sub_epi8(z, vt1));
-                storeu128_u8(&mut v, base, std::arch::x86_64::_mm_sub_epi8(z, ut));
+                storea128_u8_ptr(u_ptr, base, std::arch::x86_64::_mm_sub_epi8(z, vt1));
+                storea128_u8_ptr(v_ptr, base, std::arch::x86_64::_mm_sub_epi8(z, ut));
                 let z_gap = std::arch::x86_64::_mm_sub_epi8(z, q_v_n);
                 let z_gap2 = std::arch::x86_64::_mm_sub_epi8(z, q2_v_n);
                 a = std::arch::x86_64::_mm_sub_epi8(a, z_gap);
@@ -590,30 +739,30 @@ pub fn ksw_extd2_sse(
                 a2 = std::arch::x86_64::_mm_sub_epi8(a2, z_gap2);
                 b2 = std::arch::x86_64::_mm_sub_epi8(b2, z_gap2);
                 if !with_cigar {
-                    storeu128_u8(
-                        &mut x,
+                    storea128_u8_ptr(
+                        x_ptr,
                         base,
                         std::arch::x86_64::_mm_sub_epi8(max_epi8_native(a, zero_v_n), qe_v_n),
                     );
-                    storeu128_u8(
-                        &mut y,
+                    storea128_u8_ptr(
+                        y_ptr,
                         base,
                         std::arch::x86_64::_mm_sub_epi8(max_epi8_native(b, zero_v_n), qe_v_n),
                     );
-                    storeu128_u8(
-                        &mut x2,
+                    storea128_u8_ptr(
+                        x2_ptr,
                         base,
                         std::arch::x86_64::_mm_sub_epi8(max_epi8_native(a2, zero_v_n), qe2_v_n),
                     );
-                    storeu128_u8(
-                        &mut y2,
+                    storea128_u8_ptr(
+                        y2_ptr,
                         base,
                         std::arch::x86_64::_mm_sub_epi8(max_epi8_native(b2, zero_v_n), qe2_v_n),
                     );
                 } else if (flag & KSW_EZ_RIGHT) == 0 {
                     let tmp = std::arch::x86_64::_mm_cmpgt_epi8(a, zero_v_n);
-                    storeu128_u8(
-                        &mut x,
+                    storea128_u8_ptr(
+                        x_ptr,
                         base,
                         std::arch::x86_64::_mm_sub_epi8(
                             std::arch::x86_64::_mm_and_si128(tmp, a),
@@ -625,8 +774,8 @@ pub fn ksw_extd2_sse(
                         std::arch::x86_64::_mm_and_si128(tmp, flag8_v_n),
                     );
                     let tmp = std::arch::x86_64::_mm_cmpgt_epi8(b, zero_v_n);
-                    storeu128_u8(
-                        &mut y,
+                    storea128_u8_ptr(
+                        y_ptr,
                         base,
                         std::arch::x86_64::_mm_sub_epi8(
                             std::arch::x86_64::_mm_and_si128(tmp, b),
@@ -638,8 +787,8 @@ pub fn ksw_extd2_sse(
                         std::arch::x86_64::_mm_and_si128(tmp, flag16_v_n),
                     );
                     let tmp = std::arch::x86_64::_mm_cmpgt_epi8(a2, zero_v_n);
-                    storeu128_u8(
-                        &mut x2,
+                    storea128_u8_ptr(
+                        x2_ptr,
                         base,
                         std::arch::x86_64::_mm_sub_epi8(
                             std::arch::x86_64::_mm_and_si128(tmp, a2),
@@ -651,8 +800,8 @@ pub fn ksw_extd2_sse(
                         std::arch::x86_64::_mm_and_si128(tmp, flag32_v_n),
                     );
                     let tmp = std::arch::x86_64::_mm_cmpgt_epi8(b2, zero_v_n);
-                    storeu128_u8(
-                        &mut y2,
+                    storea128_u8_ptr(
+                        y2_ptr,
                         base,
                         std::arch::x86_64::_mm_sub_epi8(
                             std::arch::x86_64::_mm_and_si128(tmp, b2),
@@ -663,12 +812,11 @@ pub fn ksw_extd2_sse(
                         d,
                         std::arch::x86_64::_mm_and_si128(tmp, flag64_v_n),
                     );
-                    let p_idx = (r * n_col_ + block as usize - st_block as usize) * 16;
-                    storeu128_u8(&mut p, p_idx, d);
+                    storea128_u8_ptr(p_ptr, p_row_idx, d);
                 } else {
                     let tmp = std::arch::x86_64::_mm_cmpgt_epi8(zero_v_n, a);
-                    storeu128_u8(
-                        &mut x,
+                    storea128_u8_ptr(
+                        x_ptr,
                         base,
                         std::arch::x86_64::_mm_sub_epi8(
                             std::arch::x86_64::_mm_andnot_si128(tmp, a),
@@ -680,8 +828,8 @@ pub fn ksw_extd2_sse(
                         std::arch::x86_64::_mm_andnot_si128(tmp, flag8_v_n),
                     );
                     let tmp = std::arch::x86_64::_mm_cmpgt_epi8(zero_v_n, b);
-                    storeu128_u8(
-                        &mut y,
+                    storea128_u8_ptr(
+                        y_ptr,
                         base,
                         std::arch::x86_64::_mm_sub_epi8(
                             std::arch::x86_64::_mm_andnot_si128(tmp, b),
@@ -693,8 +841,8 @@ pub fn ksw_extd2_sse(
                         std::arch::x86_64::_mm_andnot_si128(tmp, flag16_v_n),
                     );
                     let tmp = std::arch::x86_64::_mm_cmpgt_epi8(zero_v_n, a2);
-                    storeu128_u8(
-                        &mut x2,
+                    storea128_u8_ptr(
+                        x2_ptr,
                         base,
                         std::arch::x86_64::_mm_sub_epi8(
                             std::arch::x86_64::_mm_andnot_si128(tmp, a2),
@@ -706,8 +854,8 @@ pub fn ksw_extd2_sse(
                         std::arch::x86_64::_mm_andnot_si128(tmp, flag32_v_n),
                     );
                     let tmp = std::arch::x86_64::_mm_cmpgt_epi8(zero_v_n, b2);
-                    storeu128_u8(
-                        &mut y2,
+                    storea128_u8_ptr(
+                        y2_ptr,
                         base,
                         std::arch::x86_64::_mm_sub_epi8(
                             std::arch::x86_64::_mm_andnot_si128(tmp, b2),
@@ -718,24 +866,25 @@ pub fn ksw_extd2_sse(
                         d,
                         std::arch::x86_64::_mm_andnot_si128(tmp, flag64_v_n),
                     );
-                    let p_idx = (r * n_col_ + block as usize - st_block as usize) * 16;
-                    storeu128_u8(&mut p, p_idx, d);
+                    storea128_u8_ptr(p_ptr, p_row_idx, d);
                 }
                 x1_lane = old_x_tail;
                 x21_lane = old_x2_tail;
                 v1_lane = old_v_tail;
+                p_row_idx += 16;
                 continue;
             }
-            let old_x = unsafe { load16_at(&x, base) };
-            let old_y = unsafe { load16_at(&y, base) };
-            let old_x2 = unsafe { load16_at(&x2, base) };
-            let old_y2 = unsafe { load16_at(&y2, base) };
-            let old_u = unsafe { load16_at(&u, base) };
-            let old_v = unsafe { load16_at(&v, base) };
-            let old_x_tail = old_x[15];
-            let old_x2_tail = old_x2[15];
-            let old_v_tail = old_v[15];
+            #[cfg(not(target_arch = "x86_64"))]
             {
+                let old_x = unsafe { load16_at(&x, base) };
+                let old_y = unsafe { load16_at(&y, base) };
+                let old_x2 = unsafe { load16_at(&x2, base) };
+                let old_y2 = unsafe { load16_at(&y2, base) };
+                let old_u = unsafe { load16_at(&u, base) };
+                let old_v = unsafe { load16_at(&v, base) };
+                let old_x_tail = old_x[15];
+                let old_x2_tail = old_x2[15];
+                let old_v_tail = old_v[15];
                 let s_block = unsafe { load16_at(&s, base) };
                 let xt1 = s2n_lite::_mm_or_si128(
                     s2n_lite::_mm_slli_si128::<1>(old_x),
@@ -925,27 +1074,57 @@ pub fn ksw_extd2_sse(
                 max_h_mut = unsafe { *h_ptr.add(en0 as usize) };
                 max_t_mut = en0;
                 let en1 = st0 + (en0 - st0) / 4 * 4;
+                #[cfg(target_arch = "x86_64")]
+                let mut max_h_v = unsafe { std::arch::x86_64::_mm_set1_epi32(max_h_mut) };
+                #[cfg(target_arch = "x86_64")]
+                let mut max_t_v = unsafe { std::arch::x86_64::_mm_set1_epi32(max_t_mut) };
+                #[cfg(not(target_arch = "x86_64"))]
                 let mut max_h_v = s2n_lite::_mm_set1_epi32(max_h_mut);
+                #[cfg(not(target_arch = "x86_64"))]
                 let mut max_t_v = s2n_lite::_mm_set1_epi32(max_t_mut);
                 let mut t = st0;
                 while t < en1 {
                     let base = t as usize;
-                    let mut h_v = unsafe { load_i32x4_at(&h, base) };
-                    let v_v = s2n_lite::_mm_setr_epi32(
-                        unsafe { *v_ptr.add(base) } as i8 as i32,
-                        unsafe { *v_ptr.add(base + 1) } as i8 as i32,
-                        unsafe { *v_ptr.add(base + 2) } as i8 as i32,
-                        unsafe { *v_ptr.add(base + 3) } as i8 as i32,
-                    );
-                    h_v = s2n_lite::_mm_add_epi32(h_v, v_v);
-                    unsafe { store_i32x4_at(&mut h, base, h_v) };
-                    let t_v = s2n_lite::_mm_set1_epi32(t);
-                    let gt = s2n_lite::_mm_cmpgt_epi32(h_v, max_h_v);
-                    max_h_v = s2n_lite::_mm_blendv_epi8(max_h_v, h_v, gt);
-                    max_t_v = s2n_lite::_mm_blendv_epi8(max_t_v, t_v, gt);
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        let mut h_v = loadu128_i32_ptr(h_ptr, base);
+                        let v_v = i8x4_to_i32x4_ptr(v_ptr, base);
+                        h_v = std::arch::x86_64::_mm_add_epi32(h_v, v_v);
+                        storeu128_i32_ptr(h_ptr, base, h_v);
+                        let t_v = std::arch::x86_64::_mm_set1_epi32(t);
+                        let gt = std::arch::x86_64::_mm_cmpgt_epi32(h_v, max_h_v);
+                        max_h_v = max_epi32_native(max_h_v, h_v);
+                        max_t_v = blendv_epi8_native(max_t_v, t_v, gt);
+                    }
+                    #[cfg(not(target_arch = "x86_64"))]
+                    {
+                        let mut h_v = unsafe { load_i32x4_at(&h, base) };
+                        let v_v = s2n_lite::_mm_setr_epi32(
+                            unsafe { *v_ptr.add(base) } as i8 as i32,
+                            unsafe { *v_ptr.add(base + 1) } as i8 as i32,
+                            unsafe { *v_ptr.add(base + 2) } as i8 as i32,
+                            unsafe { *v_ptr.add(base + 3) } as i8 as i32,
+                        );
+                        h_v = s2n_lite::_mm_add_epi32(h_v, v_v);
+                        unsafe { store_i32x4_at(&mut h, base, h_v) };
+                        let t_v = s2n_lite::_mm_set1_epi32(t);
+                        let gt = s2n_lite::_mm_cmpgt_epi32(h_v, max_h_v);
+                        max_h_v = s2n_lite::_mm_blendv_epi8(max_h_v, h_v, gt);
+                        max_t_v = s2n_lite::_mm_blendv_epi8(max_t_v, t_v, gt);
+                    }
                     t += 4;
                 }
+                #[cfg(target_arch = "x86_64")]
+                let (hh, tt) = unsafe {
+                    let mut hh = [0i32; 4];
+                    let mut tt = [0i32; 4];
+                    std::arch::x86_64::_mm_storeu_si128(hh.as_mut_ptr().cast(), max_h_v);
+                    std::arch::x86_64::_mm_storeu_si128(tt.as_mut_ptr().cast(), max_t_v);
+                    (hh, tt)
+                };
+                #[cfg(not(target_arch = "x86_64"))]
                 let hh = unsafe { i32x4_to_array(max_h_v) };
+                #[cfg(not(target_arch = "x86_64"))]
                 let tt = unsafe { i32x4_to_array(max_t_v) };
                 for lane in 0..4 {
                     if max_h_mut < hh[lane] {
@@ -1008,8 +1187,18 @@ pub fn ksw_extd2_sse(
         } else {
             if r > 0 {
                 if last_h0_t >= st0 && last_h0_t <= en0 && last_h0_t + 1 >= st0 && last_h0_t < en0 {
-                    let d0 = v[last_h0_t as usize] as i8 as i32;
-                    let d1 = u[(last_h0_t + 1) as usize] as i8 as i32;
+                    #[cfg(target_arch = "x86_64")]
+                    let (d0, d1) = unsafe {
+                        (
+                            *v_ptr.add(last_h0_t as usize) as i8 as i32,
+                            *u_ptr.add((last_h0_t + 1) as usize) as i8 as i32,
+                        )
+                    };
+                    #[cfg(not(target_arch = "x86_64"))]
+                    let (d0, d1) = (
+                        v[last_h0_t as usize] as i8 as i32,
+                        u[(last_h0_t + 1) as usize] as i8 as i32,
+                    );
                     if d0 > d1 {
                         h0 += d0;
                     } else {
@@ -1017,13 +1206,34 @@ pub fn ksw_extd2_sse(
                         last_h0_t += 1;
                     }
                 } else if last_h0_t >= st0 && last_h0_t <= en0 {
-                    h0 += v[last_h0_t as usize] as i8 as i32;
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        h0 += *v_ptr.add(last_h0_t as usize) as i8 as i32;
+                    }
+                    #[cfg(not(target_arch = "x86_64"))]
+                    {
+                        h0 += v[last_h0_t as usize] as i8 as i32;
+                    }
                 } else {
                     last_h0_t += 1;
-                    h0 += u[last_h0_t as usize] as i8 as i32;
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        h0 += *u_ptr.add(last_h0_t as usize) as i8 as i32;
+                    }
+                    #[cfg(not(target_arch = "x86_64"))]
+                    {
+                        h0 += u[last_h0_t as usize] as i8 as i32;
+                    }
                 }
             } else {
-                h0 = v[0] as i8 as i32 - h_qe;
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    h0 = *v_ptr as i8 as i32 - h_qe;
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    h0 = v[0] as i8 as i32 - h_qe;
+                }
                 last_h0_t = 0;
             }
             if (flag & KSW_EZ_APPROX_DROP) != 0
