@@ -288,4 +288,19 @@ target/release/minibwa-rs map -x lr --chain-only -t 4 ref_prefix reads.fq > chai
 
 # Citing
 
-TODO!
+If you use minibwa, please cite:
+
+> Li H, Homer N. Fast genomic read alignment with minibwa. *arXiv* preprint
+> arXiv:2606.15357 (2026). https://arxiv.org/abs/2606.15357
+
+```bibtex
+@article{Li2026minibwa,
+  title={Fast genomic read alignment with minibwa},
+  author={Li, Heng and Homer, Nils},
+  journal={arXiv preprint arXiv:2606.15357},
+  year={2026},
+  eprint={2606.15357},
+  archivePrefix={arXiv},
+  primaryClass={q-bio.GN}
+}
+```
