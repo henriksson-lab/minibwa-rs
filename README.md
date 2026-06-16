@@ -94,27 +94,31 @@ upstream C behavior here because the upstream behavior is undefined):
 ## Cargo Features
 
 `minibwa-rs` is a library crate by default. The command-line binary is optional
-and is disabled unless the `cli` feature is requested.
+and is disabled unless the `bin` feature is requested.
 
 ```toml
 [dependencies]
 minibwa-rs = "0.1"
 ```
 
-To build or install the CLI, enable the feature explicitly:
+To build or install the CLI binary, enable the `bin` feature:
 
 ```sh
-cargo build --release --features cli
-cargo install minibwa-rs --features cli
+cargo build --release --features bin
+cargo install minibwa-rs --features bin
 ```
 
-The same feature also exposes `minibwa_rs::cli` for library users that want to
-embed the command dispatcher instead of spawning a process.
+`bin` is a convenience feature that bundles `cli` and `mimalloc` (see below).
+The `cli` feature on its own exposes `minibwa_rs::cli` for library users that
+want to embed the command dispatcher instead of spawning a process; enabling
+`cli` alone does **not** pull in mimalloc, so library builds keep control of
+their own allocator.
 
-The packaged CLI binary uses `mimalloc` as its global allocator. This is
-intentional: minibwa's mapping path performs many short-lived allocations, and
-the original C benchmark builds also use mimalloc. Library users keep control of
-their process-wide allocator, but high-throughput applications should strongly
+The packaged CLI binary uses `mimalloc` as its global allocator, supplied via
+the `bin` feature. This is intentional: minibwa's mapping path performs many
+short-lived allocations, and the original C benchmark builds also use mimalloc.
+The `#[global_allocator]` only applies to the binary crate, never to library
+consumers. High-throughput applications embedding the library should strongly
 consider enabling mimalloc in their own binary:
 
 ```rust
@@ -144,7 +148,7 @@ not implemented.
 For local development from this repository:
 
 ```sh
-cargo run --release --features cli -- map -t 4 ref_prefix reads.fq > out.paf
+cargo run --release --features bin -- map -t 4 ref_prefix reads.fq > out.paf
 ```
 
 ## Library Examples
@@ -254,7 +258,7 @@ fn main() {
 Build the binary with the optional feature:
 
 ```sh
-cargo build --release --features cli
+cargo build --release --features bin
 ```
 
 Build an index:
