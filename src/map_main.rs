@@ -1,8 +1,8 @@
 #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
 use crate::bseq::{
-    mb_bseq1_t, mb_bseq_close, mb_bseq_file_t, mb_bseq_open, mb_bseq_read, mb_bseq_read_frag,
-    mb_qname_same,
+    mb_bseq1_t, mb_bseq_close, mb_bseq_file_t, mb_bseq_open_with_plain_fastq_batch, mb_bseq_read,
+    mb_bseq_read_frag, mb_qname_same,
 };
 use crate::bwt::mb_sai_v;
 use crate::format::{mb_fmt_sam_hdr, mb_format};
@@ -769,7 +769,7 @@ pub fn mb_open_bseqs(n: i32, fn_: &[&str]) -> Option<Vec<mb_bseq_file_t>> {
     let mut fp = Vec::with_capacity(n.max(0) as usize);
     for i in 0..n.max(0) as usize {
         let name = c_str(fn_[i]);
-        let Some(f) = mb_bseq_open(Some(name)) else {
+        let Some(f) = mb_bseq_open_with_plain_fastq_batch(Some(name), n == 1) else {
             let reason = std::fs::File::open(name)
                 .err()
                 .and_then(|e| e.raw_os_error())

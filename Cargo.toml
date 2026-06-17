@@ -26,6 +26,7 @@ cli = []
 # Feature for building the shipped binary: CLI plus the mimalloc allocator.
 # Library users who only want the CLI surface enable `cli` (no mimalloc).
 bin = ["cli", "mimalloc"]
+plain-fastq-batch-io = []
 mimalloc = ["dep:mimalloc"]
 stage-time = []
 
