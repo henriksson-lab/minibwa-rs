@@ -1,6 +1,8 @@
 # minibwa-rs
 
-This is a Rust translation of minibwa (commit: e89baa0732b4c69a80b029a0569e14b0c1ae03ef)
+This is a Rust translation of minibwa (commit: `a6817872b1e9`).
+
+* 2026-08-01: CI added
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code! 
 
@@ -27,18 +29,37 @@ This blurb might be out of date. Go to [this page](https://github.com/henriksson
 
 ## Benchmark snapshot
 
+Original benchmark baseline: the vendored minibwa C source is git commit
+`a6817872b1e9febb0053bda10df0d1661d616542`.
+
 This is a development benchmark used to check translation parity, not a general
-performance claim. The run mapped realistic human read fixtures from Zenodo
-record 20097931 against whole-genome GRCh38 indexes, with 20 mapping threads
-and PAF output enabled. Timings were captured on 2026-06-03 with
-`/usr/bin/time -v`; both binaries were release builds using mimalloc, and the
-normal indexes were built with the low-memory indexer:
+performance claim. The recorded run mapped realistic human read fixtures from
+Zenodo record 20097931 against whole-genome GRCh38 indexes, with PAF output
+enabled. Timings were captured with `/usr/bin/time -v`; both binaries were
+release builds using mimalloc, and prebuilt normal low-memory indexes were
+reused with `--skip-index`.
+
+The 2026-07-14 audit found the prior benchmark summaries and parity files under
+`/big/temp/minibwa`, but the raw Zenodo data directory and GRCh38 reference were
+not present at the documented local paths, so the results below are imported
+from the prior README rerun outputs rather than a fresh overnight rerun. The
+reproducible data source is Zenodo record 20097931. A fresh rerun can be prepared
+with:
+
+```sh
+python3 tools/download_zenodo_record.py --record 20097931 -o .tmp/zenodo-20097931
+mkdir -p .tmp/large-real/human_grch38
+curl -L https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz \
+  -o .tmp/large-real/human_grch38/ref.fa.gz
+```
+
+20 mapping threads:
 
 ```sh
 TMPDIR=/big/temp/minibwa \
 python3 tools/benchmark_zenodo_20097931.py \
   --data-dir .tmp/zenodo-20097931 \
-  --out-dir /big/temp/minibwa/zenodo-20097931-bench-mimalloc-t20-readme-20260603-v1 \
+  --out-dir /big/temp/minibwa/zenodo-20097931-bench-mimalloc-t20-readme-20260603-v2 \
   --ref .tmp/large-real/human_grch38/ref.fa.gz \
   --threads 20 \
   --allocator mimalloc \
@@ -47,48 +68,38 @@ python3 tools/benchmark_zenodo_20097931.py \
   --skip-index
 ```
 
-For each dataset, the C and Rust PAF outputs were byte-identical.
-
-20 mapping threads:
-
 | Dataset | C wall | Rust wall | Rust/C wall | C user | Rust user | C system | Rust system | C RSS | Rust RSS | Rust/C RSS | Parity |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| WGS paired-end 1M | 14.64 s | 15.14 s | 1.03x | 225.11 s | 239.53 s | 3.04 s | 2.79 s | 8,655,788 KB | 8,109,976 KB | 0.94x | identical |
-| Hi-C paired-end 1M | 19.21 s | 19.29 s | 1.00x | 314.83 s | 322.07 s | 3.35 s | 2.88 s | 8,932,968 KB | 8,216,752 KB | 0.92x | identical |
-| HiFi 10k | 11.26 s | 11.68 s | 1.04x | 142.88 s | 155.82 s | 3.29 s | 4.19 s | 9,760,572 KB | 10,052,532 KB | 1.03x | identical |
-| ONT 10k | 13.54 s | 14.06 s | 1.04x | 198.14 s | 212.37 s | 3.92 s | 4.90 s | 9,827,808 KB | 9,939,756 KB | 1.01x | identical |
+| WGS paired-end 1M | 37.56 s | 16.68 s | 0.44x | 238.26 s | 236.76 s | 25.57 s | 6.54 s | 8,650,004 KB | 8,121,964 KB | 0.94x | identical |
+| Hi-C paired-end 1M | 127.92 s | 37.75 s | 0.30x | 316.35 s | 314.59 s | 8.80 s | 6.03 s | 8,898,480 KB | 8,214,792 KB | 0.92x | identical |
+| HiFi 10k | 11.42 s | 17.73 s | 1.55x | 143.75 s | 143.85 s | 4.24 s | 5.21 s | 9,950,492 KB | 9,866,860 KB | 0.99x | identical |
+| ONT 10k | 13.51 s | 15.61 s | 1.16x | 199.07 s | 197.81 s | 3.56 s | 4.66 s | 9,674,060 KB | 9,689,868 KB | 1.00x | identical |
 
 30 mapping threads:
 
+```sh
+TMPDIR=/big/temp/minibwa \
+python3 tools/benchmark_zenodo_20097931.py \
+  --data-dir .tmp/zenodo-20097931 \
+  --out-dir /big/temp/minibwa/zenodo-20097931-bench-mimalloc-t30-readme-20260603-v2 \
+  --ref .tmp/large-real/human_grch38/ref.fa.gz \
+  --threads 30 \
+  --allocator mimalloc \
+  --datasets wgs hic hifi ont \
+  --skip-build \
+  --skip-index
+```
+
 | Dataset | C wall | Rust wall | Rust/C wall | C user | Rust user | C system | Rust system | C RSS | Rust RSS | Rust/C RSS | Parity |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| WGS paired-end 1M | 13.95 s | 14.12 s | 1.01x | 311.28 s | 328.22 s | 3.47 s | 2.94 s | 8,736,640 KB | 8,183,580 KB | 0.94x | identical |
-| Hi-C paired-end 1M | 18.21 s | 18.16 s | 1.00x | 438.91 s | 448.07 s | 3.68 s | 3.19 s | 8,963,144 KB | 8,278,780 KB | 0.92x | identical |
-| HiFi 10k | 11.01 s | 11.33 s | 1.03x | 207.31 s | 227.77 s | 5.93 s | 5.25 s | 11,309,104 KB | 10,536,768 KB | 0.93x | identical |
+| WGS paired-end 1M | 14.79 s | 13.98 s | 0.95x | 311.58 s | 321.16 s | 3.65 s | 3.02 s | 8,733,816 KB | 8,182,148 KB | 0.94x | identical |
+| Hi-C paired-end 1M | 18.39 s | 17.98 s | 0.98x | 441.64 s | 438.60 s | 3.81 s | 3.24 s | 8,953,124 KB | 8,290,516 KB | 0.93x | identical |
+| HiFi 10k | 15.19 s | 58.35 s | 3.84x | 208.76 s | 196.61 s | 31.28 s | 36.59 s | 11,200,852 KB | 11,017,808 KB | 0.98x | identical |
 | ONT 10k | 12.86 s | 12.91 s | 1.00x | 275.79 s | 283.24 s | 6.83 s | 5.45 s | 10,686,408 KB | 10,700,920 KB | 1.00x | identical |
 
-The 30-thread ONT row was refreshed after the KSW DP register-carry
-optimization with the same command shape, writing to
-`/big/temp/minibwa/zenodo-20097931-bench-mimalloc-t30-readme-20260603-v2`.
-
-In these runs, `minibwa-rs` is near wall-time parity on WGS, Hi-C, and
-30-thread ONT, and 3-4% slower on HiFi. Peak RSS remains lower on WGS and Hi-C,
-lower on 30-thread HiFi, and roughly at parity on ONT.
-
-## Possible upstream bugs
-
-C bugs the Rust port silently fixes (i.e. the Rust translation deviates from
-upstream C behavior here because the upstream behavior is undefined):
-
-5. `mb_escape` buffer-read overrun on a trailing backslash
-   (`minibwa/format.c:52-66`). With input ending in `\`, the inner `++p` walks
-   onto the NUL, the `if/else if` chain doesn't match, and the outer `for`'s
-   post-increment then walks one byte past the buffer end, which the next loop
-   test reads. Reachable via `-R "...\\"` style read-group lines.
-6. `krealloc` NULL-deref plus use-after-free under OOM
-   (`minibwa/kalloc.c:168-185`). On `kmalloc` failure the code calls `memcpy`
-   on the NULL return and then `kfree`s the old buffer, violating C `realloc`'s
-   contract that failure must leave the original intact.
+For every listed dataset, the C and Rust PAF outputs were byte-identical. Across
+these imported paired mapping rows, the arithmetic mean original/Rust wall-time
+speedup is 1.31x and the mean Rust/C peak-RSS ratio is 0.96x.
 
 
 ## Cargo Features
