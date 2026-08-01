@@ -2,7 +2,7 @@
 
 This is a Rust translation of minibwa (commit: `a6817872b1e9`).
 
-* 2026-08-01: CI added
+* 2026-08-01: CI added; fix for dependency
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code! 
 

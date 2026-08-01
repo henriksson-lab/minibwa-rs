@@ -46,7 +46,7 @@ required-features = ["cli"]
 flate2 = "1"
 libc = "0.2"
 libm = "0.2"
-libsais-rs = { version = "0.2", path = "../libsais" }
+libsais-rs = "0.2.2"
 rayon = "1.10"
 
 [target.'cfg(not(any(windows, target_arch = "wasm32")))'.dependencies]
