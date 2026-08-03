@@ -97,6 +97,7 @@ pub mod lchain;
 pub mod main;
 pub mod map_algo;
 pub mod map_main;
+pub mod mapped_u64;
 pub mod mbpriv;
 pub mod options;
 pub mod pe;

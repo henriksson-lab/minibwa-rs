@@ -50,7 +50,7 @@ pub fn run_with_writers<W: Write, E: Write>(
         let (ret, out) = crate::main::usage(true, 0);
         write_to(stdout, &out)?;
         ret
-    } else if c_str_eq(&argv[1], "map") || c_str_eq(&argv[1], "mem") {
+    } else if c_str_eq(&argv[1], "map") {
         let mut buffered_stdout = BufWriter::with_capacity(1 << 20, stdout);
         let (ret, out) = crate::map_main::main_map_write(&argv[1..], &mut buffered_stdout);
         buffered_stdout.flush()?;
@@ -60,6 +60,17 @@ pub fn run_with_writers<W: Write, E: Write>(
             write_to(stderr, &out)?;
         }
         skip_main_footer = ret == 0 && out == format!("{}\n", crate::main::MB_VERSION);
+        command_ret = Some(ret);
+        0
+    } else if c_str_eq(&argv[1], "mem") {
+        let mut buffered_stdout = BufWriter::with_capacity(1 << 20, stdout);
+        let (ret, out) = crate::map_main::main_mem_write(&argv[1..], &mut buffered_stdout);
+        buffered_stdout.flush()?;
+        if !out.is_empty() && (ret == 0 || out.starts_with("@HD\t")) {
+            write_to(buffered_stdout.get_mut(), &out)?;
+        } else if !out.is_empty() {
+            write_to(stderr, &out)?;
+        }
         command_ret = Some(ret);
         0
     } else if c_str_eq(&argv[1], "fastmap") {
@@ -108,6 +119,13 @@ pub fn run_with_writers<W: Write, E: Write>(
     } else if c_str_eq(&argv[1], "gensa") {
         let (ret, out) = crate::index::main_gensa(&argv[1..]);
         write_command_result(ret, &out, stdout, stderr)?;
+        command_ret = Some(ret);
+        0
+    } else if c_str_eq(&argv[1], "getref") {
+        let mut buffered_stdout = BufWriter::with_capacity(1 << 20, stdout);
+        let (ret, err) = crate::main::main_getref_write(&argv[1..], &mut buffered_stdout);
+        buffered_stdout.flush()?;
+        write_to(stderr, &err)?;
         command_ret = Some(ret);
         0
     } else if c_str_eq(&argv[1], "bench") {

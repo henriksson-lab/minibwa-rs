@@ -10,7 +10,7 @@ fn cli_prints_translated_top_level_usage_and_version() {
     let usage = Command::new(rust_bin).output().unwrap();
     assert_eq!(usage.status.code(), Some(0));
     let usage_stdout = String::from_utf8(usage.stdout).unwrap();
-    assert!(usage_stdout.starts_with("Usage: minibwt <command> <arguments>\n"));
+    assert!(usage_stdout.starts_with("Usage: minibwa <command> <arguments>\n"));
     assert!(usage_stdout.contains("  index      index reference FASTA\n"));
     assert!(usage.stderr.is_empty());
 
@@ -23,10 +23,7 @@ fn cli_prints_translated_top_level_usage_and_version() {
 
     let version = Command::new(rust_bin).arg("version").output().unwrap();
     assert_eq!(version.status.code(), Some(0));
-    assert_eq!(
-        String::from_utf8(version.stdout).unwrap(),
-        "0.0-r352-dirty\n"
-    );
+    assert_eq!(String::from_utf8(version.stdout).unwrap(), "0.6-r416\n");
     assert!(version.stderr.is_empty());
 }
 
@@ -595,14 +592,28 @@ fn cli_index_truncated_binary_assertions_match_original() {
     ] {
         let rust = Command::new(rust_bin).args(&args).output().unwrap();
         let original = Command::new(original_bin).args(&args).output().unwrap();
-        assert_eq!(rust.status.signal(), Some(6), "rust signal for {args:?}");
         assert_eq!(
+            rust.status.signal(),
             original.status.signal(),
-            Some(6),
-            "original signal for {args:?}"
+            "signal for {args:?}"
+        );
+        assert_eq!(
+            rust.status.code(),
+            original.status.code(),
+            "status code for {args:?}"
         );
         assert_eq!(rust.stdout, original.stdout, "stdout for {args:?}");
-        assert_eq!(rust.stderr, original.stderr, "stderr for {args:?}");
+        if rust.status.signal().is_none() && rust.status.code() == Some(0) {
+            let rust_stderr = String::from_utf8(rust.stderr).unwrap();
+            let original_stderr = String::from_utf8(original.stderr).unwrap();
+            for stderr in [&rust_stderr, &original_stderr] {
+                assert!(stderr.starts_with("[M::main] Version: 0.6-r416\n"));
+                assert!(stderr.contains("[M::main] CMD:"));
+                assert!(stderr.contains("[M::main] Real time:"));
+            }
+        } else {
+            assert_eq!(rust.stderr, original.stderr, "stderr for {args:?}");
+        }
     }
 
     let _ = std::fs::remove_dir_all(dir);
@@ -1049,6 +1060,7 @@ fn cli_map_chain_only_stdout_matches_original_on_real_index_single_read() {
 
     let args = [
         "map",
+        "-f",
         "--chain-only",
         "-t",
         "1",
@@ -1086,7 +1098,17 @@ fn cli_map_stdin_stdout_matches_original() {
     let input = b">stdin_read\nACTCACCTGAGTTGTAAAAAACTCCAGTTGACACAAAATAGACTACGAAAGTGGCTTTAACATATCTGAACACACAATAGCTAAGACCCAAACTGGGATTAGATACCCCACTATGCTTAGCCCTAAACCTCAACAGTTAAATCAACAAAAC\n";
 
     let mut rust_child = Command::new(rust_bin)
-        .args(["map", "--chain-only", "-t", "1", "-K", "1k,1k", &index, "-"])
+        .args([
+            "map",
+            "-f",
+            "--chain-only",
+            "-t",
+            "1",
+            "-K",
+            "1k,1k",
+            &index,
+            "-",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1096,7 +1118,17 @@ fn cli_map_stdin_stdout_matches_original() {
     let rust = rust_child.wait_with_output().unwrap();
 
     let mut original_child = Command::new(original_bin)
-        .args(["map", "--chain-only", "-t", "1", "-K", "1k,1k", &index, "-"])
+        .args([
+            "map",
+            "-f",
+            "--chain-only",
+            "-t",
+            "1",
+            "-K",
+            "1k,1k",
+            &index,
+            "-",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1125,6 +1157,7 @@ fn cli_map_debug_seed_anchor_stderr_matches_original_on_real_index_single_read()
 
     let args = [
         "map",
+        "-f",
         "--dbg-qname",
         "--dbg-seed",
         "--dbg-anchor",
@@ -1207,7 +1240,8 @@ fn cli_map_debug_alignment_stderr_matches_original_on_real_index_reads() {
         "map",
         "--dbg-aln-pe",
         "-a",
-        "--pe-predef",
+        "-I",
+        "400,100,800,50",
         "-t",
         "1",
         "-K",
@@ -1314,6 +1348,7 @@ fn cli_map_warns_like_original_for_unbalanced_paired_inputs() {
 
     let args = [
         "map",
+        "-f",
         "--chain-only",
         "-t",
         "1",
@@ -1352,6 +1387,7 @@ fn cli_map_warns_like_original_for_empty_sequence_name() {
 
     let args = [
         "map",
+        "-f",
         "--chain-only",
         "-t",
         "1",
@@ -1409,6 +1445,7 @@ fn cli_map_warns_like_original_for_truncated_fastq_quality() {
         let reads_s = reads.to_string_lossy().into_owned();
         let args = [
             "map",
+            "-f",
             "--chain-only",
             "-t",
             "1",
@@ -1814,7 +1851,7 @@ fn cli_map_converts_u_to_t_like_original() {
     .unwrap();
     let reads_s = reads.to_string_lossy().into_owned();
 
-    for extra in [Vec::<&str>::new(), vec!["-a"], vec!["--chain-only"]] {
+    for extra in [Vec::<&str>::new(), vec!["-a"], vec!["-f", "--chain-only"]] {
         let mut args = vec!["map"];
         args.extend(extra);
         args.extend(["-t", "1", "-K", "1k,1k", &index, &reads_s]);
@@ -1940,7 +1977,11 @@ fn cli_map_unmapped_output_matches_original() {
     .unwrap();
     let reads_s = reads.to_string_lossy().into_owned();
 
-    for extra in [vec!["--chain-only"], vec!["--chain-only", "-u"], vec!["-a"]] {
+    for extra in [
+        vec!["-f", "--chain-only"],
+        vec!["-f", "--chain-only", "-u"],
+        vec!["-a"],
+    ] {
         let mut args = vec!["map"];
         args.extend(extra);
         args.extend(["-t", "1", "-K", "1k,1k", &index, &reads_s]);
@@ -2010,7 +2051,7 @@ fn cli_map_missing_query_file_diagnostic_matches_original() {
     ));
     let missing = missing.to_string_lossy().into_owned();
 
-    let args = ["map", "--chain-only", &index, &missing];
+    let args = ["map", "-f", "--chain-only", &index, &missing];
     let rust = Command::new(rust_bin).args(args).output().unwrap();
     let original = Command::new(original_bin).args(args).output().unwrap();
     assert_eq!(rust.status.code(), Some(0));
@@ -2022,8 +2063,8 @@ fn cli_map_missing_query_file_diagnostic_matches_original() {
     let original_stderr = String::from_utf8(original.stderr).unwrap();
     assert!(rust_stderr.contains(&expected));
     assert!(original_stderr.contains(&expected));
-    assert!(rust_stderr.contains("[M::main] Version: 0.0-r352-dirty\n"));
-    assert!(original_stderr.contains("[M::main] Version: 0.0-r352-dirty\n"));
+    assert!(rust_stderr.contains("[M::main] Version: 0.6-r416\n"));
+    assert!(original_stderr.contains("[M::main] Version: 0.6-r416\n"));
     assert!(!rust_stderr.contains("os error"));
     assert!(!original_stderr.contains("os error"));
 }
@@ -2090,7 +2131,7 @@ fn cli_map_output_open_failure_footer_matches_original() {
         .join("out.paf");
     let out = out.to_string_lossy().into_owned();
 
-    let args = ["map", "--chain-only", "-o", &out, &index, &reads];
+    let args = ["map", "-f", "--chain-only", "-o", &out, &index, &reads];
     let rust = Command::new(rust_bin).args(args).output().unwrap();
     let original = Command::new(original_bin).args(args).output().unwrap();
     assert_eq!(rust.status.code(), Some(0));
@@ -2099,8 +2140,8 @@ fn cli_map_output_open_failure_footer_matches_original() {
 
     let rust_stderr = String::from_utf8(rust.stderr).unwrap();
     let original_stderr = String::from_utf8(original.stderr).unwrap();
-    assert!(rust_stderr.contains("[M::main] Version: 0.0-r352-dirty\n"));
-    assert!(original_stderr.contains("[M::main] Version: 0.0-r352-dirty\n"));
+    assert!(rust_stderr.contains("[M::main] Version: 0.6-r416\n"));
+    assert!(original_stderr.contains("[M::main] Version: 0.6-r416\n"));
 }
 
 #[test]
@@ -2114,7 +2155,7 @@ fn cli_map_long_preset_matches_original_on_real_index_single_read() {
     for extra in [
         vec!["--long"],
         vec!["--long", "-a"],
-        vec!["--long", "--chain-only"],
+        vec!["--long", "-f", "--chain-only"],
     ] {
         let mut args = vec!["map"];
         args.extend(extra);
@@ -3189,7 +3230,7 @@ fn cli_index_meth_outputs_match_original_for_small_fasta() {
     for extra in [
         Vec::<&str>::new(),
         vec!["-a"],
-        vec!["--chain-only"],
+        vec!["-f", "--chain-only"],
         vec!["--outn=1"],
     ] {
         let mut rust_args = vec!["map".to_string(), "--meth".to_string()];

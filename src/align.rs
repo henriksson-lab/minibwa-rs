@@ -295,8 +295,7 @@ pub fn mm_update_cigar_eqx(r: &mut mb_hit_t, qseq: &[u8], tseq: &[u8]) {
     let Some(p0) = r.p.as_ref() else {
         return;
     };
-    let mut n_eqx = 0u32;
-    let mut n_m = 0u32;
+    let mut n_x = 0u32;
     let mut toff = 0usize;
     let mut qoff = 0usize;
     for &cg in p0.cigar().iter().take(p0.n_cigar as usize) {
@@ -305,27 +304,25 @@ pub fn mm_update_cigar_eqx(r: &mut mb_hit_t, qseq: &[u8], tseq: &[u8]) {
         if op == MB_CIGAR_MATCH {
             while len > 0 {
                 let mut l = 0usize;
-                while l < len && qseq[qoff + l] == tseq[toff + l] {
+                while l < len && qseq[qoff + l] == tseq[toff + l] && qseq[qoff + l] < 4 {
                     l += 1;
                 }
                 if l > 0 {
-                    n_eqx += 1;
                     len -= l;
                     toff += l;
                     qoff += l;
                 }
                 l = 0;
-                while l < len && qseq[qoff + l] != tseq[toff + l] {
+                while l < len && !(qseq[qoff + l] == tseq[toff + l] && qseq[qoff + l] < 4) {
                     l += 1;
                 }
                 if l > 0 {
-                    n_eqx += 1;
+                    n_x += 1;
                     len -= l;
                     toff += l;
                     qoff += l;
                 }
             }
-            n_m += 1;
         } else if op == MB_CIGAR_INS {
             qoff += len;
         } else if op == MB_CIGAR_DEL || op == MB_CIGAR_N_SKIP {
@@ -333,7 +330,7 @@ pub fn mm_update_cigar_eqx(r: &mut mb_hit_t, qseq: &[u8], tseq: &[u8]) {
         }
     }
     let p = r.p.as_mut().unwrap();
-    if n_eqx == n_m {
+    if n_x == 0 {
         let n_cigar = p.n_cigar as usize;
         for cg in p.cigar_mut().iter_mut().take(n_cigar) {
             let op = *cg & 0xf;
@@ -354,7 +351,7 @@ pub fn mm_update_cigar_eqx(r: &mut mb_hit_t, qseq: &[u8], tseq: &[u8]) {
         if op == MB_CIGAR_MATCH {
             while len > 0 {
                 let mut l = 0usize;
-                while l < len && qseq[qoff + l] == tseq[toff + l] {
+                while l < len && qseq[qoff + l] == tseq[toff + l] && qseq[qoff + l] < 4 {
                     l += 1;
                 }
                 if l > 0 {
@@ -364,7 +361,7 @@ pub fn mm_update_cigar_eqx(r: &mut mb_hit_t, qseq: &[u8], tseq: &[u8]) {
                 toff += l;
                 qoff += l;
                 l = 0;
-                while l < len && qseq[qoff + l] != tseq[toff + l] {
+                while l < len && !(qseq[qoff + l] == tseq[toff + l] && qseq[qoff + l] < 4) {
                     l += 1;
                 }
                 if l > 0 {
@@ -1629,7 +1626,7 @@ pub fn mb_event_identity(r: &mb_hit_t) -> f64 {
 }
 
 /// Original C static function `mb_recal_max_dp` from `minibwa/align.c:844`.
-pub fn mb_recal_max_dp(r: &mb_hit_t, b2: f64, match_sc: i32) -> i32 {
+pub fn mb_recal_max_dp(r: &mb_hit_t, b2: f64, match_sc: i32, qlen: i32) -> i32 {
     let Some(p) = &r.p else {
         return -1;
     };
@@ -1643,7 +1640,8 @@ pub fn mb_recal_max_dp(r: &mb_hit_t, b2: f64, match_sc: i32) -> i32 {
             n_gap += len as i32;
         }
     }
-    let n_mis = r.blen + p.n_ambi() as i32 - r.mlen - n_gap;
+    let mut n_mis = r.blen + p.n_ambi() as i32 - r.mlen - n_gap;
+    n_mis += ((qlen - (r.qe - r.qs)) as f64 / b2 + 0.499) as i32;
     (match_sc as f64 * (r.mlen as f64 - b2 * n_mis as f64 - gap_cost) + 0.499) as i32
 }
 
@@ -1693,7 +1691,7 @@ pub fn mb_update_dp_max(qlen: i32, n_regs: i32, regs: &mut [mb_hit_t], frac: f64
         if regs[i].p.is_none() {
             continue;
         }
-        let mut dp_max = mb_recal_max_dp(&regs[i], b2, a);
+        let mut dp_max = mb_recal_max_dp(&regs[i], b2, a, qlen);
         if dp_max < 0 {
             dp_max = 0;
         }
@@ -1875,6 +1873,8 @@ mod tests {
         assert_eq!(max_bw_from_mm(&opt, 5), 27);
 
         let hit = mb_hit_t {
+            qs: 0,
+            qe: 90,
             mlen: 80,
             blen: 100,
             p: Some(
@@ -1897,7 +1897,7 @@ mod tests {
         assert_eq!((n_gap, n_gapo), (8, 2));
         let identity = mb_event_identity(&hit);
         assert!(identity > 0.82 && identity < 0.84);
-        assert!(mb_recal_max_dp(&hit, 2.0, 2) > 0);
+        assert!(mb_recal_max_dp(&hit, 2.0, 2, 90) > 0);
     }
 
     #[test]
@@ -1933,8 +1933,34 @@ mod tests {
             },
         ];
         mb_update_dp_max(100, regs.len() as i32, &mut regs, 0.9, 2, 8);
-        assert_eq!(regs[0].p.as_ref().unwrap().dp_max, 80);
-        assert!(regs[1].p.as_ref().unwrap().dp_max < 80);
+        assert_eq!(regs[0].p.as_ref().unwrap().dp_max, 70);
+        assert!(regs[1].p.as_ref().unwrap().dp_max < 70);
+    }
+
+    #[test]
+    fn recal_max_dp_penalizes_clipped_query_bases() {
+        let base = mb_hit_t {
+            qs: 0,
+            qe: 80,
+            mlen: 80,
+            blen: 80,
+            p: Some(
+                mb_extra_t {
+                    dp_max: 160,
+                    ..Default::default()
+                }
+                .with_cigar(&[80 << 4 | MB_CIGAR_MATCH]),
+            ),
+            ..Default::default()
+        };
+        let mut clipped = base.clone();
+        clipped.qs = 10;
+        clipped.qe = 90;
+
+        let unclipped_score = mb_recal_max_dp(&base, 2.0, 2, 80);
+        let clipped_score = mb_recal_max_dp(&clipped, 2.0, 2, 100);
+        assert_eq!(unclipped_score, 160);
+        assert!(clipped_score < unclipped_score);
     }
 
     #[test]
@@ -2020,6 +2046,30 @@ mod tests {
                 1 << 4 | MB_CIGAR_X_MISMATCH,
                 1 << 4 | MB_CIGAR_EQ_MATCH,
                 1 << 4 | MB_CIGAR_X_MISMATCH,
+            ]
+        );
+    }
+
+    #[test]
+    fn eqx_update_counts_n_as_mismatch() {
+        let mut hit = mb_hit_t {
+            p: Some(
+                mb_extra_t {
+                    ..Default::default()
+                }
+                .with_cigar(&[5 << 4 | MB_CIGAR_MATCH]),
+            ),
+            ..Default::default()
+        };
+        let qseq = vec![0, 4, 4, 2, 3];
+        let tseq = vec![0, 4, 1, 2, 3];
+        mm_update_cigar_eqx(&mut hit, &qseq, &tseq);
+        assert_eq!(
+            hit.p.as_ref().unwrap().cigar()[..hit.p.as_ref().unwrap().n_cigar as usize].to_vec(),
+            vec![
+                1 << 4 | MB_CIGAR_EQ_MATCH,
+                2 << 4 | MB_CIGAR_X_MISMATCH,
+                2 << 4 | MB_CIGAR_EQ_MATCH,
             ]
         );
     }
@@ -2449,7 +2499,7 @@ mod tests {
                     off: 0,
                     ..Default::default()
                 }],
-                pac: vec![0],
+                pac: vec![0].into(),
                 ..Default::default()
             },
             bwt: mb_bwt_init(),

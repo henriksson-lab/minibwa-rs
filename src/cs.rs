@@ -233,7 +233,7 @@ pub fn mb_write_MD(km: (), s: &mut kstring_t, tseq: &[u8], qseq: &[u8], r: &mb_h
     let Some(p) = &r.p else {
         return;
     };
-    km_sprintf_lite(km, s, "\tMD:Z:", &[]);
+    km_sprintf_lite(km, s, "MD:Z:", &[]);
     let _tmp = vec![0u8; alloc_tmp(km, r)];
     let mut q_off = 0usize;
     let mut t_off = 0usize;
@@ -323,7 +323,7 @@ mod tests {
 
         let mut md = kstring_t::default();
         mb_write_MD((), &mut md, &t, &q, &hit);
-        assert_eq!(String::from_utf8_lossy(&md.s[..md.l]), "\tMD:Z:5");
+        assert_eq!(String::from_utf8_lossy(&md.s[..md.l]), "MD:Z:5");
     }
 
     #[test]

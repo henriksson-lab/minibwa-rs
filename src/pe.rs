@@ -1498,6 +1498,7 @@ pub fn mb_pair(
     qlen: [i32; 2],
     qseq: [&str; 2],
 ) {
+    const PE_BONUS: i32 = 4;
     let is_meth = ((opt.flag & MB_F_METH) != 0) as i32;
     let mut paux = mb_pairaux_t::default();
     if n_hit[0] == 0 && n_hit[1] == 0 {
@@ -1556,22 +1557,27 @@ pub fn mb_pair(
         }
     }
     if paux.n_pp != 0 {
-        let i0 = paux.i[0] as usize;
-        let i1 = paux.i[1] as usize;
         let mut dp_max_se = [0i32; 2];
+        let mut dp_max_se2 = [0i32; 2];
         for r in 0..2usize {
             for h in hit[r].iter().take(n_hit[r] as usize) {
                 let dp = h.p.as_ref().expect("mb_pair requires hit[r][i]->p").dp_max;
                 if dp_max_se[r] < dp {
+                    dp_max_se2[r] = dp_max_se[r];
                     dp_max_se[r] = dp;
+                } else if dp_max_se2[r] < dp {
+                    dp_max_se2[r] = dp;
                 }
             }
         }
         let score_se = dp_max_se[0] + dp_max_se[1];
+        let score_se2 = dp_max_se2[0] + dp_max_se2[1];
+        mb_sync_high_cov(n_hit[0], &mut hit[0]);
+        mb_sync_high_cov(n_hit[1], &mut hit[1]);
         if paux.score >= score_se - opt.pen_unpair * opt.a {
+            let i0 = paux.i[0] as usize;
+            let i1 = paux.i[1] as usize;
             let mut score2 = paux.sub_sc;
-            mb_sync_high_cov(n_hit[0], &mut hit[0]);
-            mb_sync_high_cov(n_hit[1], &mut hit[1]);
             let identity = (hit[0][i0].mlen + hit[1][i1].mlen) as f64
                 / (hit[0][i0].blen + hit[1][i1].blen) as f64;
             if (hit[0][i0].id != hit[0][i0].parent || hit[1][i1].id != hit[1][i1].parent)
@@ -1581,10 +1587,17 @@ pub fn mb_pair(
             }
             let frac_high =
                 hit[0][i0].frac_high() as f64 / 255.0 + hit[1][i1].frac_high() as f64 / 255.0;
-            let mut mapq_pe = (6.02 * identity * identity * (paux.score - score2) as f64
-                / opt.a as f64
+            let mut diff = paux.score - score2;
+            let cap = paux.score + PE_BONUS * opt.a - score_se2;
+            if diff > cap {
+                diff = cap;
+            }
+            let mut mapq_pe = (6.02 * identity * identity * diff as f64 / opt.a as f64
                 - 4.343 * ((paux.n_sub + 1) as f64).ln()
                 + 0.499) as i32;
+            if mapq_pe < 0 {
+                mapq_pe = 0;
+            }
             mapq_pe = (mapq_pe as f64 * (1.0 - 0.5 * frac_high) + 0.499) as i32;
             if min_seed_ratio < 50 {
                 let sr = min_seed_ratio as f64;
@@ -1593,11 +1606,17 @@ pub fn mb_pair(
             if mapq_pe > 60 {
                 mapq_pe = 60;
             }
-            if mapq_pe == 0 && paux.score > score2 {
+            if mapq_pe <= 0 && paux.score > score2 {
                 mapq_pe = 1;
             }
             for (r, &idx) in [i0, i1].iter().enumerate() {
-                if hit[r][idx].mapq < mapq_pe {
+                if n_hit[r] == 1 {
+                    if hit[r][idx].mapq < mapq_pe {
+                        hit[r][idx].mapq = mapq_pe;
+                    }
+                } else if hit[r][idx].mapq > mapq_pe {
+                    hit[r][idx].mapq = mapq_pe;
+                } else {
                     hit[r][idx].mapq =
                         (0.2 * hit[r][idx].mapq as f64 + 0.8 * mapq_pe as f64 + 0.499) as i32;
                 }
@@ -1630,6 +1649,16 @@ pub fn mb_pair(
                             }
                         }
                         hit[r][i].mapq = 0;
+                    }
+                }
+            }
+        } else {
+            let diff = score_se - opt.pen_unpair * opt.a - paux.score;
+            let mapq_pe = 6 * diff / opt.a;
+            for r in 0..2usize {
+                for h in hit[r].iter_mut().take(n_hit[r] as usize) {
+                    if h.mapq > mapq_pe {
+                        h.mapq = mapq_pe;
                     }
                 }
             }
@@ -2138,6 +2167,133 @@ mod tests {
         );
 
         let _ = hit;
+    }
+
+    #[test]
+    fn pair_caps_unpaired_mapq_against_best_pair() {
+        let l2b = l2b_t {
+            n_ctg: 1,
+            ctg: vec![crate::l2bit::l2b_ctg_t {
+                name: "ctg".into(),
+                len: 2000,
+                off: 0,
+                comm: None,
+            }],
+            ..Default::default()
+        };
+        let mut opt = mb_opt_t::default();
+        crate::options::mb_opt_init(&mut opt);
+        opt.max_rescue = 0;
+        let mut n_hit = [2, 2];
+        let mut hit = [
+            vec![
+                mb_hit_t {
+                    tid: 0,
+                    ts: 1000,
+                    te: 1050,
+                    id: 0,
+                    parent: 0,
+                    mlen: 50,
+                    blen: 50,
+                    mapq: 60,
+                    hash: 1,
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 100,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    ),
+                    ..Default::default()
+                },
+                mb_hit_t {
+                    tid: 0,
+                    ts: 100,
+                    te: 150,
+                    id: 1,
+                    parent: 1,
+                    mlen: 50,
+                    blen: 50,
+                    mapq: 60,
+                    hash: 2,
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 80,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    ),
+                    ..Default::default()
+                },
+            ],
+            vec![
+                mb_hit_t {
+                    tid: 0,
+                    ts: 1500,
+                    te: 1550,
+                    flags: mb_hit_t::flags_with(1, 0, 0, 0, 0, 0, 0, 0, 0),
+                    id: 0,
+                    parent: 0,
+                    mlen: 50,
+                    blen: 50,
+                    mapq: 60,
+                    hash: 4,
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 100,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    ),
+                    ..Default::default()
+                },
+                mb_hit_t {
+                    tid: 0,
+                    ts: 300,
+                    te: 350,
+                    flags: mb_hit_t::flags_with(1, 0, 0, 0, 0, 0, 0, 0, 0),
+                    id: 1,
+                    parent: 1,
+                    mlen: 50,
+                    blen: 50,
+                    mapq: 60,
+                    hash: 8,
+                    p: Some(
+                        mb_extra_t {
+                            dp_max: 80,
+                            ..Default::default()
+                        }
+                        .boxed(),
+                    ),
+                    ..Default::default()
+                },
+            ],
+        ];
+        let mut pes = [mb_pestat_t {
+            failed: 1,
+            ..Default::default()
+        }; 4];
+        pes[1] = mb_pestat_t {
+            lo: 200,
+            hi: 300,
+            failed: 0,
+            avg: 200.0,
+            std: 25.0,
+        };
+
+        mb_pair(
+            (),
+            &opt,
+            &l2b,
+            &mut n_hit,
+            &mut hit,
+            &pes,
+            [50, 50],
+            ["ACGT", "TGCA"],
+        );
+
+        assert!(hit[0][0].mapq < 60);
+        assert_eq!(hit[0][0].mapq, hit[1][0].mapq);
     }
 
     #[test]

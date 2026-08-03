@@ -46,11 +46,6 @@ fn raise_sigsegv_like_null_deref() -> ! {
     std::process::abort();
 }
 
-fn abort_bwt_init_from_raw_data_len_assert() -> ! {
-    eprintln!("minibwa: bwt.c:101: mb_bwt_init_from_raw: Assertion `k == bwt->data_len' failed.");
-    std::process::abort();
-}
-
 fn use_parallel_index_post(n_thread: i32, len: usize) -> bool {
     n_thread > 1 && len >= (1 << 20) && rayon::current_thread_index().is_some()
 }
@@ -416,8 +411,7 @@ pub fn mb_bwt_libsais(
     let step_usize = step as usize;
     let n_ssa = ((len as u64) + step) >> sa_shift;
     const FS: usize = 10000;
-    let use_32bit_sa =
-        std::env::var_os("MINIBWA_RS_INDEX_32BIT_SA").is_some() && len <= i32::MAX as usize - FS;
+    let use_32bit_sa = len + FS + 1 <= i32::MAX as usize;
     let (primary, mut ssa) = if use_32bit_sa {
         let mut a = vec![0i32; len + FS + 1];
         let rc = libsais_rs::libsais_omp(&seq, &mut a[1..], FS as i32, None, n_thread);
@@ -503,7 +497,7 @@ pub fn mb_bwt_libsais(
     drop(seq);
     bwt.sa_bit = sa_bit as u32;
     bwt.n_sa = n_ssa;
-    bwt.sa = ssa;
+    bwt.sa = ssa.into();
     bwt
 }
 
@@ -695,9 +689,6 @@ pub fn main_genbwt(argv: &[String]) -> (i32, String) {
     let Some(l2b) = l2b_load(c_arg(&args[o.ind as usize])) else {
         kom_panic("main_genbwt", "failed to open the input file.");
     };
-    if l2b.tot_len == 0 {
-        abort_bwt_init_from_raw_data_len_assert();
-    }
     let bwt = run_with_index_pool(n_thread, || {
         mb_bwt_libsais(&l2b, sa_bit, both_strand, 0, n_thread)
     });

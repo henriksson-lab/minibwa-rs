@@ -7,9 +7,11 @@ use crate::ketopt::{ketopt, ko_longopt_t, KETOPT_INIT};
 use crate::kommon::{
     kom_atoi, kom_cputime, kom_panic, kom_parse_num, kom_peakrss, kom_realtime, kom_splitmix64,
 };
-use crate::map_main::main_map;
+use crate::l2bit::{l2b_getseq, l2b_load};
+use crate::map_main::{main_map, main_mem};
+use std::io::Write;
 
-pub const MB_VERSION: &str = "0.0-r352-dirty";
+pub const MB_VERSION: &str = "0.6-r416";
 
 fn c_str_eq(s: &str, expected: &str) -> bool {
     let len = s.as_bytes().iter().position(|&c| c == 0).unwrap_or(s.len());
@@ -27,12 +29,13 @@ pub enum mb_bench_type_t {
 /// Original C static function `usage` from `minibwa/main.c:23`.
 pub fn usage(to_stdout: bool, is_long: i32) -> (i32, String) {
     let mut out = String::new();
-    out.push_str("Usage: minibwt <command> <arguments>\n");
+    out.push_str("Usage: minibwa <command> <arguments>\n");
     out.push_str("Commands:\n");
     if is_long != 0 {
         out.push_str("  General:\n");
         out.push_str("    index      index reference FASTA\n");
         out.push_str("    map        read alignment\n");
+        out.push_str("    mem        legacy bwa-mem CLI (not recommended)\n");
         out.push_str("    version    print the version number\n");
         out.push_str("  Separate indexing routines:\n");
         out.push_str("    fa2bit     convert FASTA to the long-2bit format\n");
@@ -43,11 +46,13 @@ pub fn usage(to_stdout: bool, is_long: i32) -> (i32, String) {
         out.push_str("  Debugging:\n");
         out.push_str("    bench      performance evaluation\n");
         out.push_str("    fastmap    test seeding strategies\n");
+        out.push_str("    getref     get the reference genome from .l2b\n");
         out.push_str("  Help:\n");
         out.push_str("    --help     print this help message\n");
     } else {
         out.push_str("  index      index reference FASTA\n");
         out.push_str("  map        read alignment\n");
+        out.push_str("  mem        legacy bwa-mem CLI (not recommended)\n");
         out.push_str("  version    print the version number\n");
     }
     (if to_stdout { 0 } else { 1 }, out)
@@ -62,8 +67,10 @@ pub fn main(argv: &[String]) -> i32 {
     }
     let ret = if c_str_eq(&argv[1], "index") {
         main_index(&argv[1..]).0
-    } else if c_str_eq(&argv[1], "map") || c_str_eq(&argv[1], "mem") {
+    } else if c_str_eq(&argv[1], "map") {
         main_map(&argv[1..]).0
+    } else if c_str_eq(&argv[1], "mem") {
+        main_mem(&argv[1..]).0
     } else if c_str_eq(&argv[1], "fa2bit") {
         main_fa2bit(&argv[1..]).0
     } else if c_str_eq(&argv[1], "genraw") {
@@ -74,6 +81,8 @@ pub fn main(argv: &[String]) -> i32 {
         main_genbwt(&argv[1..]).0
     } else if c_str_eq(&argv[1], "gensa") {
         main_gensa(&argv[1..]).0
+    } else if c_str_eq(&argv[1], "getref") {
+        main_getref(&argv[1..]).0
     } else if c_str_eq(&argv[1], "bench") {
         main_bench(&argv[1..]).0
     } else if c_str_eq(&argv[1], "fastmap") {
@@ -87,6 +96,46 @@ pub fn main(argv: &[String]) -> i32 {
     };
     let _ = (ret, kom_cputime(), kom_peakrss());
     0
+}
+
+pub fn usage_getref(to_stdout: bool) -> (i32, String) {
+    (
+        if to_stdout { 0 } else { 1 },
+        "Usage: minibwa getref <ref.l2b>\n".to_string(),
+    )
+}
+
+pub fn main_getref_write<W: Write>(argv: &[String], writer: &mut W) -> (i32, String) {
+    if argv.len() == 1 {
+        return usage_getref(false);
+    }
+    let Some(l2b) = l2b_load(&argv[1]) else {
+        kom_panic("main_getref", "failed to load the long-2bit reference.");
+    };
+    for (i, ctg) in l2b.ctg.iter().take(l2b.n_ctg as usize).enumerate() {
+        if writeln!(writer, ">{}", ctg.name).is_err() {
+            return (1, String::new());
+        }
+        let mut seq = vec![0u8; ctg.len as usize];
+        l2b_getseq(&l2b, i as i64, 0, ctg.len as i64, &mut seq);
+        for base in &mut seq {
+            *base = b"ACGTN"[*base as usize];
+        }
+        if writer.write_all(&seq).is_err() || writer.write_all(b"\n").is_err() {
+            return (1, String::new());
+        }
+    }
+    (0, String::new())
+}
+
+pub fn main_getref(argv: &[String]) -> (i32, String) {
+    let mut out = Vec::new();
+    let (ret, err) = main_getref_write(argv, &mut out);
+    if ret == 0 {
+        (ret, String::from_utf8(out).unwrap_or_default())
+    } else {
+        (ret, err)
+    }
 }
 
 /// Original C static function `usage_bench` from `minibwa/main.c:78`.
@@ -227,14 +276,31 @@ mod tests {
     fn usage_formats_short_and_long_command_lists() {
         let (ret, short) = usage(true, 0);
         assert_eq!(ret, 0);
-        assert!(short.contains("Usage: minibwt <command> <arguments>\n"));
+        assert!(short.contains("Usage: minibwa <command> <arguments>\n"));
         assert!(short.contains("  map        read alignment\n"));
+        assert!(short.contains("  mem        legacy bwa-mem CLI (not recommended)\n"));
         assert!(!short.contains("Separate indexing routines"));
 
         let (ret, long) = usage(false, 1);
         assert_eq!(ret, 1);
+        assert!(long.contains("    mem        legacy bwa-mem CLI (not recommended)\n"));
         assert!(long.contains("    genbwt     generate BWT+SSA from long-2bit with libsais\n"));
         assert!(long.contains("    fastmap    test seeding strategies\n"));
+        assert!(long.contains("    getref     get the reference genome from .l2b\n"));
+    }
+
+    #[test]
+    fn main_getref_emits_reference_fasta() {
+        let args = vec!["getref".to_string(), "minibwa/chrM-human.l2b".to_string()];
+        let (ret, out) = main_getref(&args);
+        assert_eq!(ret, 0);
+        assert!(out.starts_with(">chrM\n"));
+        let mut lines = out.lines();
+        assert_eq!(lines.next(), Some(">chrM"));
+        let seq = lines.next().expect("sequence line");
+        assert_eq!(seq.len(), 16569);
+        assert!(seq.bytes().all(|b| b"ACGTN".contains(&b)));
+        assert_eq!(lines.next(), None);
     }
 
     #[test]

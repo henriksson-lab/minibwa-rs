@@ -6,6 +6,8 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::mapped_u64::U64Storage;
+
 const L2B_MAGIC: &[u8; 4] = b"L2B\x01";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -45,7 +47,7 @@ pub struct l2b_t {
     pub m_mask: u64,
     pub ambi: Vec<l2b_intv_t>,
     pub mask: Vec<l2b_intv_t>,
-    pub pac: Vec<u64>,
+    pub pac: U64Storage,
     pub cat_name: Vec<u8>,
     pub cat_comm: Vec<u8>,
 }
@@ -54,25 +56,23 @@ pub struct l2b_t {
 pub fn l2b_pos2cid(l2b: &l2b_t, s: i64, len: i64, cst: &mut i64) -> i64 {
     let mut lo = 0i64;
     let mut hi = l2b.n_ctg as i64;
-    let mut mid = 0i64;
     while lo < hi {
-        mid = (lo + hi) / 2;
+        let mid = (lo + hi) / 2;
         let ctg = &l2b.ctg[mid as usize];
         if ctg.off as i64 <= s && s < (ctg.off + ctg.len) as i64 {
-            break;
+            *cst = s - ctg.off as i64;
+            return if s + len <= (ctg.off + ctg.len) as i64 {
+                mid
+            } else {
+                -1
+            };
         } else if s < ctg.off as i64 {
             hi = mid;
         } else {
-            lo = mid;
+            lo = mid + 1;
         }
     }
-    let ctg = &l2b.ctg[mid as usize];
-    *cst = s - ctg.off as i64;
-    if s + len <= (ctg.off + ctg.len) as i64 {
-        mid
-    } else {
-        -1
-    }
+    -1
 }
 
 /// Original C global function `l2b_intv2cid` from `minibwa/l2bit.c:9`.
@@ -826,20 +826,20 @@ pub fn l2b_load<P: AsRef<Path>>(fn_: P) -> Option<l2b_t> {
     }
     l2b.ambi = read_intv_vec_le(&mut *fp, n_ambi)?;
     l2b.mask = read_intv_vec_le(&mut *fp, n_mask)?;
-    l2b.pac = Vec::with_capacity(n_pac as usize);
-    let pac_bytes = unsafe {
-        std::slice::from_raw_parts_mut(l2b.pac.as_mut_ptr() as *mut u8, n_pac as usize * 8)
-    };
+    let mut pac = Vec::with_capacity(n_pac as usize);
+    let pac_bytes =
+        unsafe { std::slice::from_raw_parts_mut(pac.as_mut_ptr() as *mut u8, n_pac as usize * 8) };
     fp.read_exact(pac_bytes).ok()?;
     unsafe {
-        l2b.pac.set_len(n_pac as usize);
+        pac.set_len(n_pac as usize);
     }
     #[cfg(target_endian = "big")]
     {
-        for x in &mut l2b.pac {
+        for x in &mut pac {
             *x = u64::from_le(*x);
         }
     }
+    l2b.pac = pac.into();
     l2b.cat_name = vec![0; len_name as usize];
     l2b.cat_comm = vec![0; len_comm as usize];
     fp.read_exact(&mut l2b.cat_name).ok()?;
@@ -863,6 +863,121 @@ pub fn l2b_load<P: AsRef<Path>>(fn_: P) -> Option<l2b_t> {
         return None;
     }
     Some(l2b)
+}
+
+/// Original C global function `l2b_mmap` from `minibwa/l2bit.c`.
+pub fn l2b_load_mmap<P: AsRef<Path>>(fn_: P, preload: i32) -> Option<l2b_t> {
+    #[cfg(all(unix, not(target_arch = "wasm32"), target_endian = "little"))]
+    {
+        use crate::mapped_u64::{mapped_u64_slice, mmap_file};
+        use std::sync::Arc;
+
+        let fn_ = c_path(fn_);
+        let path = fn_.to_string_lossy();
+        if path == "-" {
+            return l2b_load(fn_);
+        }
+        let map = mmap_file(&fn_, preload)?;
+        let bytes = map.as_bytes();
+        if bytes.len() < 64 || &bytes[..4] != L2B_MAGIC {
+            return None;
+        }
+        let mut fields = [0u64; 7];
+        for i in 0..7usize {
+            let start = 8 + i * 8;
+            fields[i] = u64::from_le_bytes(bytes[start..start + 8].try_into().unwrap());
+        }
+        let (n_ctg, tot_len, n_ambi, n_mask, len_name, len_comm, n_pac) = (
+            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6],
+        );
+        let mut off_bytes = 64usize;
+        let mut l2b = l2b_t {
+            tot_len,
+            n_ctg,
+            m_ctg: n_ctg,
+            n_pac,
+            m_pac: n_pac,
+            n_ambi,
+            m_ambi: n_ambi,
+            n_mask,
+            m_mask: n_mask,
+            ..Default::default()
+        };
+        let mut ctg_off = 0u64;
+        for _ in 0..n_ctg {
+            if bytes.len() < off_bytes + 8 {
+                return None;
+            }
+            let len = u64::from_le_bytes(bytes[off_bytes..off_bytes + 8].try_into().unwrap());
+            off_bytes += 8;
+            l2b.ctg.push(l2b_ctg_t {
+                name: String::new(),
+                comm: None,
+                len,
+                off: ctg_off,
+            });
+            ctg_off += len;
+        }
+        if ctg_off != tot_len {
+            return None;
+        }
+        let ambi_bytes = (n_ambi as usize).checked_mul(16)?;
+        if bytes.len() < off_bytes + ambi_bytes {
+            return None;
+        }
+        for chunk in bytes[off_bytes..off_bytes + ambi_bytes].chunks_exact(16) {
+            l2b.ambi.push(l2b_intv_t {
+                st: u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
+                en: u64::from_le_bytes(chunk[8..16].try_into().unwrap()),
+            });
+        }
+        off_bytes += ambi_bytes;
+        let mask_bytes = (n_mask as usize).checked_mul(16)?;
+        if bytes.len() < off_bytes + mask_bytes {
+            return None;
+        }
+        for chunk in bytes[off_bytes..off_bytes + mask_bytes].chunks_exact(16) {
+            l2b.mask.push(l2b_intv_t {
+                st: u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
+                en: u64::from_le_bytes(chunk[8..16].try_into().unwrap()),
+            });
+        }
+        off_bytes += mask_bytes;
+        l2b.pac = mapped_u64_slice(Arc::clone(&map), off_bytes, n_pac as usize)?;
+        off_bytes += (n_pac as usize).checked_mul(std::mem::size_of::<u64>())?;
+        let name_len = len_name as usize;
+        let comm_len = len_comm as usize;
+        if bytes.len() < off_bytes + name_len + comm_len {
+            return None;
+        }
+        l2b.cat_name = bytes[off_bytes..off_bytes + name_len].to_vec();
+        off_bytes += name_len;
+        l2b.cat_comm = bytes[off_bytes..off_bytes + comm_len].to_vec();
+        let mut p_name = 0usize;
+        let mut p_comm = 0usize;
+        for i in 0..n_ctg as usize {
+            let name_end = p_name + l2b.cat_name[p_name..].iter().position(|&b| b == 0)?;
+            l2b.ctg[i].name = String::from_utf8_lossy(&l2b.cat_name[p_name..name_end]).into_owned();
+            p_name = name_end + 1;
+            if l2b.cat_comm[p_comm] != 0 {
+                let comm_end = p_comm + l2b.cat_comm[p_comm..].iter().position(|&b| b == 0)?;
+                l2b.ctg[i].comm =
+                    Some(String::from_utf8_lossy(&l2b.cat_comm[p_comm..comm_end]).into_owned());
+                p_comm = comm_end + 1;
+            } else {
+                p_comm += 1;
+            }
+        }
+        if p_name != name_len || p_comm != comm_len {
+            return None;
+        }
+        Some(l2b)
+    }
+    #[cfg(not(all(unix, not(target_arch = "wasm32"), target_endian = "little")))]
+    {
+        let _ = preload;
+        l2b_load(fn_)
+    }
 }
 
 /// Original C global function `l2b_save_pac` from `minibwa/l2bit.c:286`.
@@ -1009,6 +1124,24 @@ mod tests {
     }
 
     #[test]
+    fn mmap_load_matches_owned_l2b_loader() {
+        let owned = l2b_load("minibwa/chrM-human.l2b").expect("load owned l2b");
+        let mapped = l2b_load_mmap("minibwa/chrM-human.l2b", 0).expect("load mmap l2b");
+        assert_eq!(mapped.tot_len, owned.tot_len);
+        assert_eq!(mapped.n_ctg, owned.n_ctg);
+        assert_eq!(mapped.ctg, owned.ctg);
+        assert_eq!(mapped.ambi, owned.ambi);
+        assert_eq!(mapped.mask, owned.mask);
+        assert_eq!(mapped.pac, owned.pac);
+        assert_eq!(mapped.cat_name, owned.cat_name);
+        assert_eq!(mapped.cat_comm, owned.cat_comm);
+        #[cfg(all(unix, not(target_arch = "wasm32"), target_endian = "little"))]
+        {
+            assert!(mapped.pac.is_mapped());
+        }
+    }
+
+    #[test]
     fn public_file_helpers_stop_paths_at_embedded_nul_like_c() {
         let dir =
             std::env::temp_dir().join(format!("minibwa-rs-l2bit-api-nul-{}", std::process::id()));
@@ -1081,6 +1214,42 @@ mod tests {
             l2b_intv2cid(&l2b, 0, l2b.tot_len * 2 + 1, &mut cst, &mut rev),
             -3
         );
+    }
+
+    #[test]
+    fn pos2cid_returns_minus_one_for_positions_outside_contigs() {
+        let l2b = l2b_t {
+            n_ctg: 2,
+            ctg: vec![
+                l2b_ctg_t {
+                    name: "a".into(),
+                    comm: None,
+                    len: 10,
+                    off: 0,
+                },
+                l2b_ctg_t {
+                    name: "b".into(),
+                    comm: None,
+                    len: 5,
+                    off: 10,
+                },
+            ],
+            ..Default::default()
+        };
+        let mut cst = -1;
+        assert_eq!(l2b_pos2cid(&l2b, -1, 1, &mut cst), -1);
+        assert_eq!(l2b_pos2cid(&l2b, 15, 1, &mut cst), -1);
+        assert_eq!(l2b_pos2cid(&l2b, 8, 4, &mut cst), -1);
+        assert_eq!(l2b_pos2cid(&l2b, 10, 5, &mut cst), 1);
+        assert_eq!(cst, 0);
+    }
+
+    #[test]
+    fn pos2cid_empty_contig_list_returns_minus_one() {
+        let l2b = l2b_t::default();
+        let mut cst = -1;
+        assert_eq!(l2b_pos2cid(&l2b, 0, 1, &mut cst), -1);
+        assert_eq!(cst, -1);
     }
 
     #[test]

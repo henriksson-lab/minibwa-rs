@@ -39,6 +39,17 @@ fn c_strerror(errno: i32) -> String {
         .to_string()
 }
 
+fn einval() -> i32 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        libc::EINVAL
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        22
+    }
+}
+
 fn bwt_save_error_and_exit(path: &std::path::Path, err: std::io::Error) -> ! {
     let reason = err
         .raw_os_error()
@@ -56,7 +67,7 @@ fn bwt_packed_seek_error_and_exit(path: &std::path::Path) -> ! {
     eprintln!(
         "BWTIncConstructFromPacked() : Can't seek on {} : {}",
         path.display(),
-        c_strerror(libc::EINVAL)
+        c_strerror(einval())
     );
     std::process::exit(1);
 }
@@ -1981,7 +1992,7 @@ pub fn BWTIncConstructFromPacked(
         eprintln!(
             "BWTIncConstructFromPacked() : Can't seek on {} : {}",
             inputFileName.display(),
-            c_strerror(libc::EINVAL)
+            c_strerror(einval())
         );
         std::process::exit(1);
     }

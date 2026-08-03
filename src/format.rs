@@ -3,7 +3,7 @@
 use crate::bseq::mb_bseq1_t;
 use crate::kommon::{kom_sprintf_arg, kom_sprintf_lite, kstring_t, KOM_COMP_TABLE};
 use crate::l2bit::l2b_t;
-use crate::options::{MB_F_2ND_SEQ, MB_F_COPY_COMMENT, MB_F_SAM, MB_F_SUPP_SOFT};
+use crate::options::{mb_opt_t, MB_F_2ND_SEQ, MB_F_COPY_COMMENT, MB_F_PAF, MB_F_SUPP_SOFT};
 use crate::pe::{mb_hit_buf_t, mb_hit_t};
 use std::sync::{Mutex, OnceLock};
 
@@ -282,7 +282,7 @@ pub fn mb_fmt_sam_hdr(
     }
     if argv.len() > 1 {
         kom_sprintf_lite(str_, "\tCL:minibwa", &[]);
-        for arg in &argv[1..] {
+        for arg in argv {
             kom_sprintf_lite(str_, " %s", &[kom_sprintf_arg::s(arg)]);
         }
     }
@@ -435,7 +435,7 @@ pub fn mb_fmt_sam(
     n_hit: &[i32],
     hit: &[mb_hit_buf_t],
     hit_idx: i32,
-    opt_flag: u64,
+    opt: &mb_opt_t,
     seg_idx: i32,
     mate_qlen: i32,
 ) {
@@ -500,7 +500,7 @@ pub fn mb_fmt_sam(
         append_byte(s, b'\t');
         append_i32(s, r.mapq);
         append_byte(s, b'\t');
-        write_sam_cigar(s, flag, 0, t.l_seq as i32, r, opt_flag);
+        write_sam_cigar(s, flag, 0, t.l_seq as i32, r, opt.flag);
     } else if let Some(prev) = r_prev {
         this_tid = prev.tid as i32;
         this_pos = prev.ts as i32;
@@ -562,7 +562,7 @@ pub fn mb_fmt_sam(
 
     let seq = t.seq.as_bytes();
     if let Some(r) = r {
-        if (flag & 0x900) == 0 || (opt_flag & MB_F_SUPP_SOFT) != 0 {
+        if (flag & 0x900) == 0 || (opt.flag & MB_F_SUPP_SOFT) != 0 {
             sam_write_sq(s, seq, t.l_seq as i32, r.rev() as i32, r.rev() as i32);
             kom_sprintf_lite(s, "\t", &[]);
             if let Some(qual) = &t.qual {
@@ -570,7 +570,7 @@ pub fn mb_fmt_sam(
             } else {
                 kom_sprintf_lite(s, "*", &[]);
             }
-        } else if (flag & 0x100) != 0 && (opt_flag & MB_F_2ND_SEQ) == 0 {
+        } else if (flag & 0x100) != 0 && (opt.flag & MB_F_2ND_SEQ) == 0 {
             kom_sprintf_lite(s, "*\t*", &[]);
         } else {
             sam_write_sq(
@@ -615,12 +615,14 @@ pub fn mb_fmt_sam(
         kom_sprintf_lite(s, "\tFI:i:%d", &[kom_sprintf_arg::d(seg_idx)]);
     }
     if let Some(r) = r {
-        write_tags(s, r);
+        if r.p.is_some() {
+            write_tags(s, r);
+        }
         if n_seg > 1 {
             if let Some(next) = r_next {
                 if next.p.as_ref().is_some_and(|p| p.n_cigar > 0) && mate_qlen > 0 {
                     kom_sprintf_lite(s, "\tMC:Z:", &[]);
-                    write_sam_cigar(s, 0, 0, mate_qlen, next, opt_flag);
+                    write_sam_cigar(s, 0, 0, mate_qlen, next, opt.flag);
                     kom_sprintf_lite(s, "\tMQ:i:%d", &[kom_sprintf_arg::d(next.mapq)]);
                 }
             }
@@ -695,11 +697,52 @@ pub fn mb_fmt_sam(
                         );
                     }
                 }
+                if opt.xa_max > 0 {
+                    let mut n_xa = 0;
+                    for (i, q) in h.iter().take(n_h as usize).enumerate() {
+                        let Some(qextra) = q.p.as_ref() else {
+                            continue;
+                        };
+                        if i != self_idx
+                            && q.parent == self_idx as i32
+                            && (qextra.dp_max as f64) >= opt.out_s as f64 * extra.dp_max as f64
+                        {
+                            n_xa += 1;
+                        }
+                    }
+                    if n_xa > 0 {
+                        kom_sprintf_lite(s, "\tn2:i:%d", &[kom_sprintf_arg::d(n_xa)]);
+                    }
+                    if n_xa > 0 && n_xa <= opt.xa_max {
+                        kom_sprintf_lite(s, "\tXA:Z:", &[]);
+                        for (i, q) in h.iter().take(n_h as usize).enumerate() {
+                            let Some(qextra) = q.p.as_ref() else {
+                                continue;
+                            };
+                            if i != self_idx
+                                && q.parent == self_idx as i32
+                                && (qextra.dp_max as f64) >= opt.out_s as f64 * extra.dp_max as f64
+                            {
+                                append_cstr_str(s, &l2b.ctg[q.tid as usize].name);
+                                append_byte(s, b',');
+                                append_byte(s, if q.rev() != 0 { b'-' } else { b'+' });
+                                append_i32(s, q.ts as i32 + 1);
+                                append_byte(s, b',');
+                                write_sam_cigar(s, 0, 0, t.l_seq as i32, q, opt.flag);
+                                kom_sprintf_lite(
+                                    s,
+                                    ",%d;",
+                                    &[kom_sprintf_arg::d(q.blen - q.mlen + qextra.n_ambi() as i32)],
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    if (opt_flag & MB_F_COPY_COMMENT) != 0 {
+    if (opt.flag & MB_F_COPY_COMMENT) != 0 {
         if let Some(comment) = &t.comment {
             append_byte(s, b'\t');
             append_cstr_bytes(s, comment.as_bytes());
@@ -723,13 +766,13 @@ pub fn mb_format(
     n_hit: &[i32],
     hit: &[mb_hit_buf_t],
     hit_idx: i32,
-    opt_flag: u64,
+    opt: &mb_opt_t,
     seg_idx: i32,
     mate_qlen: i32,
 ) {
-    if (opt_flag & MB_F_SAM) != 0 {
+    if (opt.flag & MB_F_PAF) == 0 {
         mb_fmt_sam(
-            km, s, l2b, t, n_seg, n_hit, hit, hit_idx, opt_flag, seg_idx, mate_qlen,
+            km, s, l2b, t, n_seg, n_hit, hit, hit_idx, opt, seg_idx, mate_qlen,
         );
     } else {
         let p = if hit_idx >= 0 {
@@ -737,7 +780,7 @@ pub fn mb_format(
         } else {
             None
         };
-        mb_fmt_paf(s, l2b, t, p, opt_flag, n_seg, seg_idx);
+        mb_fmt_paf(s, l2b, t, p, opt.flag, n_seg, seg_idx);
     }
 }
 
@@ -758,6 +801,15 @@ mod tests {
             words.push(w);
         }
         words
+    }
+
+    fn opt_with_flag(flag: u64) -> mb_opt_t {
+        mb_opt_t {
+            flag,
+            xa_max: 5,
+            out_s: 0.8,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -880,7 +932,7 @@ mod tests {
             &[1],
             &[mb_hit_buf_t::from_vec(vec![hit])],
             0,
-            MB_F_SAM,
+            &opt_with_flag(0),
             0,
             0,
         );
@@ -939,7 +991,7 @@ mod tests {
             &[0],
             &[mb_hit_buf_t::from_vec(Vec::new())],
             -1,
-            MB_F_SAM | MB_F_COPY_COMMENT,
+            &opt_with_flag(MB_F_COPY_COMMENT),
             0,
             0,
         );
@@ -1012,7 +1064,7 @@ mod tests {
             &[1],
             &[mb_hit_buf_t::from_vec(vec![hit])],
             0,
-            MB_F_SAM | MB_F_COPY_COMMENT,
+            &opt_with_flag(MB_F_COPY_COMMENT),
             0,
             0,
         );
@@ -1049,7 +1101,7 @@ mod tests {
         assert!(got.contains("@SQ\tSN:chr1\tLN:100\n"));
         assert!(got.contains("@RG\tID:grp1\tSM:sample\n"));
         assert!(got.contains(
-            "@PG\tID:minibwa\tPN:minibwa\tVN:0.0-test\tCL:minibwa mem ref.fa reads.fq\n"
+            "@PG\tID:minibwa\tPN:minibwa\tVN:0.0-test\tCL:minibwa minibwa mem ref.fa reads.fq\n"
         ));
     }
 
@@ -1122,7 +1174,7 @@ mod tests {
             &[1],
             &[mb_hit_buf_t::from_vec(vec![hit])],
             0,
-            MB_F_SAM,
+            &opt_with_flag(0),
             0,
             0,
         );
@@ -1132,8 +1184,116 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn sam_mapped_hit_without_extra_fails_like_c_write_tags_deref() {
+    fn sam_primary_outputs_secondary_hits_to_xa_when_under_limit() {
+        let l2b = l2b_t {
+            n_ctg: 1,
+            ctg: vec![l2b_ctg_t {
+                name: "chr1".to_string(),
+                len: 100,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let read = mb_bseq1_t {
+            l_seq: 4,
+            name: "q1".into(),
+            seq: "ACGT".into(),
+            qual: Some("!!!!".into()),
+            ..Default::default()
+        };
+        let primary = mb_hit_t {
+            tid: 0,
+            ts: 0,
+            te: 4,
+            id: 0,
+            parent: 0,
+            qs: 0,
+            qe: 4,
+            mlen: 4,
+            blen: 4,
+            mapq: 60,
+            p: Some(
+                mb_extra_t {
+                    dp_score: 100,
+                    dp_max0: 100,
+                    dp_max: 100,
+                    ..Default::default()
+                }
+                .with_cigar(&[4 << 4 | MB_CIGAR_MATCH]),
+            ),
+            ..Default::default()
+        };
+        let secondary = mb_hit_t {
+            tid: 0,
+            ts: 10,
+            te: 14,
+            id: 1,
+            parent: 0,
+            qs: 0,
+            qe: 4,
+            mlen: 3,
+            blen: 4,
+            mapq: 20,
+            p: Some(
+                mb_extra_t {
+                    dp_score: 90,
+                    dp_max0: 90,
+                    dp_max: 90,
+                    ..Default::default()
+                }
+                .with_cigar(&[4 << 4 | MB_CIGAR_MATCH]),
+            ),
+            ..Default::default()
+        };
+
+        let mut out = kstring_t::default();
+        mb_format(
+            (),
+            &mut out,
+            &l2b,
+            &read,
+            1,
+            &[2],
+            &[mb_hit_buf_t::from_vec(vec![
+                primary.clone(),
+                secondary.clone(),
+            ])],
+            0,
+            &opt_with_flag(0),
+            0,
+            0,
+        );
+        let got = String::from_utf8_lossy(&out.s[..out.l]);
+        assert!(got.contains("\tn2:i:1\tXA:Z:"));
+        assert!(got.contains("\tXA:Z:chr1,+11,4M,1;\n"));
+
+        let mut opt = opt_with_flag(0);
+        opt.xa_max = 1;
+        let mut out = kstring_t::default();
+        mb_format(
+            (),
+            &mut out,
+            &l2b,
+            &read,
+            1,
+            &[3],
+            &[mb_hit_buf_t::from_vec(vec![
+                primary,
+                secondary.clone(),
+                secondary,
+            ])],
+            0,
+            &opt,
+            0,
+            0,
+        );
+        let got = String::from_utf8_lossy(&out.s[..out.l]);
+        assert!(got.contains("\tn2:i:2\n"));
+        assert!(!got.contains("\tXA:Z:"));
+    }
+
+    #[test]
+    fn sam_mapped_hit_without_extra_omits_optional_alignment_tags() {
         let l2b = l2b_t {
             n_ctg: 1,
             ctg: vec![l2b_ctg_t {
@@ -1173,9 +1333,15 @@ mod tests {
             &[1],
             &[mb_hit_buf_t::from_vec(vec![hit])],
             0,
-            MB_F_SAM,
+            &opt_with_flag(0),
             0,
             0,
         );
+        let got = String::from_utf8_lossy(&out.s[..out.l]);
+        assert!(got.starts_with("q1\t"));
+        assert!(got.contains("\tchr1\t1\t60\t"));
+        assert!(!got.contains("\tAS:i:"));
+        assert!(!got.contains("\tNM:i:"));
+        assert!(!got.contains("\tMD:Z:"));
     }
 }

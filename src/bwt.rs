@@ -4,6 +4,8 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::mapped_u64::U64Storage;
+
 const MB_MAGIC: &[u8; 4] = b"MBW\x02";
 const BWT_CNT_SHIFT: u32 = 56;
 const BWT_CNT_MASK: u64 = (1u64 << BWT_CNT_SHIFT) - 1;
@@ -32,13 +34,13 @@ pub struct mb_bwt_t {
     pub L2: [u64; 5],
     pub seq_len: u64,
     pub data_len: u64,
-    pub data: Vec<u64>,
+    pub data: U64Storage,
     pub cnt_table: [u32; 256],
     pub pre_len: u32,
     pub pre: Vec<mb_sai_t>,
     pub sa_bit: u32,
     pub n_sa: u64,
-    pub sa: Vec<u64>,
+    pub sa: U64Storage,
 }
 
 #[repr(C)]
@@ -145,13 +147,13 @@ pub fn mb_bwt_init() -> mb_bwt_t {
         L2: [0; 5],
         seq_len: 0,
         data_len: 0,
-        data: Vec::new(),
+        data: U64Storage::new(),
         cnt_table: [0; 256],
         pre_len: 0,
         pre: Vec::new(),
         sa_bit: u32::MAX,
         n_sa: 0,
-        sa: Vec::new(),
+        sa: U64Storage::new(),
     };
     bwt_gen_cnt_table(&mut bwt.cnt_table);
     bwt
@@ -183,7 +185,11 @@ pub fn mb_bwt_init_from_raw(is_byte: i32, raw: &[u8], len: u64, primary: u64) ->
     bwt.primary = primary;
     bwt.seq_len = len;
     bwt.data_len = mb_bwt_data_len(len);
-    bwt.data = Vec::with_capacity(bwt.data_len as usize);
+    bwt.data = U64Storage::with_capacity(bwt.data_len as usize);
+    if len == 0 {
+        bwt.data.resize(bwt.data_len as usize, 0);
+        return bwt;
+    }
 
     let mut last_c: Option<usize> = None;
     for i in 0..len {
@@ -1034,7 +1040,7 @@ pub fn mb_bwt_gen_sa(bwt: &mut mb_bwt_t, sa_bit: u32) {
     drop(std::mem::take(&mut bwt.sa));
     bwt.sa_bit = sa_bit;
     bwt.n_sa = (bwt.seq_len + (1u64 << sa_bit)) >> sa_bit;
-    bwt.sa = uninit_u64_vec(bwt.n_sa as usize);
+    bwt.sa = uninit_u64_vec(bwt.n_sa as usize).into();
 
     let mut isa = 0u64;
     let mut sa = bwt.seq_len;
@@ -1381,14 +1387,72 @@ pub fn mb_bwt_load<P: AsRef<Path>>(fn_: P) -> Option<mb_bwt_t> {
     }
     bwt.seq_len = bwt.L2[4];
     bwt.data_len = mb_bwt_data_len(bwt.seq_len);
-    bwt.data = read_huge_u64_vec(&mut fp, bwt.data_len)?;
+    bwt.data = read_huge_u64_vec(&mut fp, bwt.data_len)?.into();
     let mut n_sa = [0u8; 8];
     let _ = fp.read(&mut n_sa);
     bwt.n_sa = u64::from_le_bytes(n_sa);
     if bwt.sa_bit != u32::MAX && bwt.n_sa > 0 {
-        bwt.sa = read_huge_u64_vec_uninit(&mut fp, bwt.n_sa)?;
+        let step = 1u64.checked_shl(bwt.sa_bit).unwrap_or(0);
+        if step == 0 {
+            return None;
+        }
+        let expected_n_sa = (bwt.seq_len + step) >> bwt.sa_bit;
+        if bwt.n_sa != expected_n_sa {
+            return None;
+        }
+        bwt.sa = read_huge_u64_vec_uninit(&mut fp, bwt.n_sa)?.into();
     }
     Some(bwt)
+}
+
+/// Original C global function `mb_bwt_mmap` from `minibwa/bwt.c`.
+pub fn mb_bwt_load_mmap<P: AsRef<Path>>(fn_: P, preload: i32) -> Option<mb_bwt_t> {
+    #[cfg(all(unix, not(target_arch = "wasm32"), target_endian = "little"))]
+    {
+        use crate::mapped_u64::{mapped_u64_slice, mmap_file};
+        use std::sync::Arc;
+
+        let map = mmap_file(c_path(fn_), preload)?;
+        let bytes = map.as_bytes();
+        if bytes.len() < 56 || &bytes[..4] != MB_MAGIC {
+            return None;
+        }
+        let mut bwt = mb_bwt_init();
+        bwt.sa_bit = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        bwt.primary = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        for i in 1..5usize {
+            let start = 8 + i * 8;
+            bwt.L2[i] = u64::from_le_bytes(bytes[start..start + 8].try_into().unwrap());
+        }
+        bwt.seq_len = bwt.L2[4];
+        bwt.data_len = mb_bwt_data_len(bwt.seq_len);
+        let data_off = 48usize;
+        let data_bytes = (bwt.data_len as usize).checked_mul(std::mem::size_of::<u64>())?;
+        let n_sa_off = data_off.checked_add(data_bytes)?;
+        if bytes.len() < n_sa_off + 8 {
+            return None;
+        }
+        bwt.data = mapped_u64_slice(Arc::clone(&map), data_off, bwt.data_len as usize)?;
+        bwt.n_sa = u64::from_le_bytes(bytes[n_sa_off..n_sa_off + 8].try_into().unwrap());
+        if bwt.sa_bit != u32::MAX && bwt.n_sa > 0 {
+            let step = 1u64.checked_shl(bwt.sa_bit).unwrap_or(0);
+            if step == 0 {
+                return None;
+            }
+            let expected_n_sa = (bwt.seq_len + step) >> bwt.sa_bit;
+            if bwt.n_sa != expected_n_sa {
+                return None;
+            }
+            let sa_off = n_sa_off + 8;
+            bwt.sa = mapped_u64_slice(map, sa_off, bwt.n_sa as usize)?;
+        }
+        Some(bwt)
+    }
+    #[cfg(not(all(unix, not(target_arch = "wasm32"), target_endian = "little")))]
+    {
+        let _ = preload;
+        mb_bwt_load(fn_)
+    }
 }
 
 #[cfg(test)]
@@ -1464,7 +1528,7 @@ mod tests {
         bwt.seq_len = bwt.L2[4];
         bwt.data_len = mb_bwt_data_len(bwt.seq_len);
         let data_start = 48usize;
-        bwt.data = Vec::with_capacity(bwt.data_len as usize);
+        bwt.data = U64Storage::with_capacity(bwt.data_len as usize);
         for i in 0..bwt.data_len as usize {
             let start = data_start + i * 8;
             bwt.data.push(u64::from_le_bytes(
@@ -1576,6 +1640,24 @@ mod tests {
     }
 
     #[test]
+    fn mmap_load_matches_owned_bwt_loader() {
+        let owned = mb_bwt_load("minibwa/chrM-human.mbw").expect("load owned BWT");
+        let mapped = mb_bwt_load_mmap("minibwa/chrM-human.mbw", 0).expect("load mmap BWT");
+        assert_eq!(mapped.primary, owned.primary);
+        assert_eq!(mapped.L2, owned.L2);
+        assert_eq!(mapped.seq_len, owned.seq_len);
+        assert_eq!(mapped.data, owned.data);
+        assert_eq!(mapped.sa_bit, owned.sa_bit);
+        assert_eq!(mapped.n_sa, owned.n_sa);
+        assert_eq!(mapped.sa, owned.sa);
+        #[cfg(all(unix, not(target_arch = "wasm32"), target_endian = "little"))]
+        {
+            assert!(mapped.data.is_mapped());
+            assert!(mapped.sa.is_mapped());
+        }
+    }
+
+    #[test]
     fn public_file_helpers_stop_paths_at_embedded_nul_like_c() {
         let bwt = mb_bwt_load("minibwa/chrM-human.mbw").expect("load chrM-human.mbw");
         let dir =
@@ -1637,6 +1719,33 @@ mod tests {
         assert_eq!(loaded.data, vec![0; loaded.data_len as usize]);
         assert_eq!(loaded.n_sa, 0);
         assert!(loaded.sa.is_empty());
+    }
+
+    #[test]
+    fn init_from_raw_empty_input_returns_zero_filled_bwt() {
+        let bwt = mb_bwt_init_from_raw(1, &[], 0, 0);
+        assert_eq!(bwt.seq_len, 0);
+        assert_eq!(bwt.data_len, mb_bwt_data_len(0));
+        assert_eq!(bwt.data, vec![0; bwt.data_len as usize]);
+        assert_eq!(bwt.L2, [0; 5]);
+    }
+
+    #[test]
+    fn load_rejects_mbw_with_wrong_sa_sample_count() {
+        let mut bwt = mb_bwt_init_from_raw(1, &[0, 1, 2, 3], 4, 2);
+        mb_bwt_gen_sa(&mut bwt, 1);
+        let path = std::env::temp_dir().join(format!(
+            "minibwa-rs-wrong-sa-count-{}.mbw",
+            std::process::id()
+        ));
+        assert_eq!(mb_bwt_save(&path, &bwt), 0);
+        let mut bytes = std::fs::read(&path).expect("read saved BWT");
+        let n_sa_off = 4 + 4 + 40 + bwt.data_len as usize * 8;
+        let wrong_n_sa = (bwt.n_sa + 1).to_le_bytes();
+        bytes[n_sa_off..n_sa_off + 8].copy_from_slice(&wrong_n_sa);
+        std::fs::write(&path, bytes).expect("write corrupted BWT");
+        assert!(mb_bwt_load(&path).is_none());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

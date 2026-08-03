@@ -1,10 +1,10 @@
 #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
 use crate::align::mb_align_skeleton_with_scratch;
-use crate::bwt::{mb_bwt_cache, mb_bwt_load, mb_bwt_t, mb_sai_t};
+use crate::bwt::{mb_bwt_cache, mb_bwt_load, mb_bwt_load_mmap, mb_bwt_t, mb_sai_t};
 use crate::bwt::{mb_sai_v, mb_sai_v_clear};
 use crate::kommon::KOM_NT4_TABLE;
-use crate::l2bit::{l2b_load, l2b_meth_t, l2b_t};
+use crate::l2bit::{l2b_load, l2b_load_mmap, l2b_meth_convert, l2b_meth_t, l2b_t};
 use crate::lchain::{mb128_t, mb_anchor_t, mb_lchain_dp, radix_sort_mb128x};
 use crate::mbpriv::{
     mb_cstr_prefix, mb_hash64, mb_hash_str, mb_is_sr_mode, KOM_DBG_FLAG, MB_DBG_ANCHOR,
@@ -90,6 +90,25 @@ pub fn mb_idx_load(prefix: &str, is_meth: i32) -> Option<mb_idx_t> {
             (t_cache - t0).as_secs_f64() * 1000.0
         );
     }
+    Some(mb_idx_t {
+        is_meth: (is_meth != 0) as i32,
+        l2b,
+        bwt,
+    })
+}
+
+/// Original C global function `mb_idx_load_mmap` from `minibwa/map-algo.c`.
+///
+pub fn mb_idx_load_mmap(prefix: &str, is_meth: i32, preload: i32) -> Option<mb_idx_t> {
+    let prefix = c_str(prefix);
+    let l2b = l2b_load_mmap(format!("{prefix}.l2b"), preload)?;
+    let bwt_name = if is_meth != 0 {
+        format!("{prefix}.meth.mbw")
+    } else {
+        format!("{prefix}.mbw")
+    };
+    let mut bwt = mb_bwt_load_mmap(bwt_name, preload)?;
+    mb_bwt_cache(&mut bwt, 10);
     Some(mb_idx_t {
         is_meth: (is_meth != 0) as i32,
         l2b,
@@ -316,6 +335,22 @@ mod tests {
     }
 
     #[test]
+    fn idx_load_mmap_matches_owned_loader() {
+        let owned = mb_idx_load("minibwa/chrM-human", 0).expect("load owned index");
+        let mapped = mb_idx_load_mmap("minibwa/chrM-human", 0, 0).expect("load mmap index");
+        assert_eq!(mapped.is_meth, owned.is_meth);
+        assert_eq!(mapped.l2b, owned.l2b);
+        assert_eq!(mapped.bwt.primary, owned.bwt.primary);
+        assert_eq!(mapped.bwt.L2, owned.bwt.L2);
+        assert_eq!(mapped.bwt.seq_len, owned.bwt.seq_len);
+        assert_eq!(mapped.bwt.data, owned.bwt.data);
+        assert_eq!(mapped.bwt.n_sa, owned.bwt.n_sa);
+        assert_eq!(mapped.bwt.sa, owned.bwt.sa);
+        assert_eq!(mapped.bwt.pre_len, owned.bwt.pre_len);
+        assert_eq!(mapped.bwt.pre, owned.bwt.pre);
+    }
+
+    #[test]
     fn idx_load_prefix_stops_at_embedded_nul_like_c() {
         let idx = mb_idx_load("minibwa/chrM-human\0hidden", 0).expect("load index");
         assert_eq!(idx.is_meth, 0);
@@ -389,6 +424,44 @@ mod tests {
             assert_eq!(n_hit[i], n_single);
             assert_eq!(hits[i].len(), single.len());
         }
+    }
+
+    #[test]
+    fn methylation_api_calls_require_methylation_index() {
+        let idx = mb_idx_load("minibwa/chrM-human", 0).expect("load index");
+        let mut opt = mb_opt_t::default();
+        mb_opt_init(&mut opt);
+        opt.flag |= MB_F_METH | MB_F_NO_ALN;
+        opt.flag &= !MB_F_PE;
+        let seq = "GATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT";
+
+        let mut n_single = -1;
+        let single = mb_map(
+            &opt,
+            &idx,
+            seq.len() as i32,
+            seq,
+            1,
+            &mut n_single,
+            None,
+            Some("meth-single"),
+        );
+        assert!(single.is_empty());
+        assert_eq!(n_single, 0);
+
+        let mut n_hit = [123];
+        let batch = mb_map_batch(
+            &opt,
+            &idx,
+            1,
+            &[seq.len() as i32],
+            &[seq],
+            &mut n_hit,
+            None,
+            Some(&["meth-batch"]),
+        );
+        assert!(batch.is_empty());
+        assert_eq!(n_hit[0], 123);
     }
 
     #[test]
@@ -1778,6 +1851,10 @@ pub fn mb_map(
     } else {
         l2b_meth_t::L2B_METH_G2A
     };
+    if mt != l2b_meth_t::L2B_METH_NONE && idx.is_meth == 0 {
+        *n_hit_ = 0;
+        return Vec::new();
+    }
     let mut owned;
     let b = if let Some(b) = b0 {
         b
@@ -1787,11 +1864,17 @@ pub fn mb_map(
     };
     let mut opt_adap = mb_opt_t::default();
     mb_opt_adap(opt, qlen, &mut opt_adap);
-    let seq = seq0
+    if mt != l2b_meth_t::L2B_METH_NONE {
+        opt_adap.flag |= MB_F_METH;
+    }
+    let mut seq = seq0
         .bytes()
         .take(qlen as usize)
         .map(|c| crate::kommon::KOM_NT4_TABLE[c as usize])
         .collect::<Vec<_>>();
+    if mt != l2b_meth_t::L2B_METH_NONE {
+        l2b_meth_convert(mt, qlen as i64, &mut seq);
+    }
     let mut u = mb_sai_v::default();
     mb_seed_intv(
         (),
@@ -1845,6 +1928,10 @@ pub fn mb_map_batch(
     if n_seq <= 0 {
         return Vec::new();
     }
+    let is_meth = ((opt.flag & MB_F_METH) != 0) as i32;
+    if is_meth != 0 && idx.is_meth == 0 {
+        return Vec::new();
+    }
     let mut owned;
     let b = if let Some(b) = b0 {
         b
@@ -1871,6 +1958,13 @@ pub fn mb_map_batch(
             }
             for k in 0..sb_n as usize {
                 let idx_k = sb_st as usize + k;
+                let mt = if is_meth == 0 {
+                    l2b_meth_t::L2B_METH_NONE
+                } else if is_pe == 0 || (idx_k & 1) == 0 {
+                    l2b_meth_t::L2B_METH_C2T
+                } else {
+                    l2b_meth_t::L2B_METH_G2A
+                };
                 seq4[k].clear();
                 seq4[k].extend(
                     seq[idx_k]
@@ -1878,6 +1972,9 @@ pub fn mb_map_batch(
                         .take(qlen[idx_k] as usize)
                         .map(|c| KOM_NT4_TABLE[c as usize]),
                 );
+                if mt != l2b_meth_t::L2B_METH_NONE {
+                    l2b_meth_convert(mt, qlen[idx_k] as i64, &mut seq4[k]);
+                }
                 sai[k] = mb_sai_v::default();
             }
             let mut seq4_refs = seq4[..sb_n as usize]
@@ -1902,18 +1999,13 @@ pub fn mb_map_batch(
                 let idx_k = sb_st as usize + k;
                 let mut opt_adap = mb_opt_t::default();
                 mb_opt_adap(opt, qlen[idx_k], &mut opt_adap);
-                let mut mt = l2b_meth_t::L2B_METH_NONE;
-                if (opt.flag & MB_F_METH) != 0 {
-                    mt = if is_pe != 0 {
-                        if (idx_k & 1) == 0 {
-                            l2b_meth_t::L2B_METH_C2T
-                        } else {
-                            l2b_meth_t::L2B_METH_G2A
-                        }
-                    } else {
-                        l2b_meth_t::L2B_METH_C2T
-                    };
-                }
+                let mt = if is_meth == 0 {
+                    l2b_meth_t::L2B_METH_NONE
+                } else if is_pe == 0 || (idx_k & 1) == 0 {
+                    l2b_meth_t::L2B_METH_C2T
+                } else {
+                    l2b_meth_t::L2B_METH_G2A
+                };
                 let name = qname.and_then(|names| names.get(idx_k).copied());
                 hit[idx_k] = mb_map_sai(
                     &opt_adap,

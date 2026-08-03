@@ -1,6 +1,6 @@
 #![allow(unused_variables, dead_code, non_snake_case, non_camel_case_types)]
 
-pub const MB_F_SAM: u64 = 0x1;
+pub const MB_F_PAF: u64 = 0x1;
 pub const MB_F_NO_UNMAP: u64 = 0x2;
 pub const MB_F_COPY_COMMENT: u64 = 0x4;
 pub const MB_F_PE: u64 = 0x8;
@@ -61,7 +61,9 @@ pub struct mb_opt_t {
     pub sb_seq: i32,
     pub n_thread: i32,
     pub out_n: i32,
+    pub out_s: f32,
     pub seed: i32,
+    pub xa_max: i32,
     pub mb_size: i64,
     pub max_mb_size: i64,
     pub max_sw_mat: i64,
@@ -100,6 +102,8 @@ pub fn mb_opt_reset(opt: &mut mb_opt_t) {
     opt.sb_seq = 24;
     opt.n_thread = 1;
     opt.seed = 11;
+    opt.out_s = 0.8;
+    opt.xa_max = 5;
     opt.max_sw_mat = 100000000;
     opt.cap_kalloc = 1i64 << 28;
     opt.max_mb_size = 1000000000;

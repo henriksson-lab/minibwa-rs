@@ -58,6 +58,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--ref", type=Path, default=DEFAULT_REF)
+    parser.add_argument(
+        "--index-root",
+        type=Path,
+        default=None,
+        help=(
+            "when --skip-index is set, read prebuilt indexes from this benchmark "
+            "directory instead of --out-dir"
+        ),
+    )
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--rust-bin", type=Path, default=Path("target/release/minibwa-rs"))
     parser.add_argument("--c-bin", type=Path, default=Path("minibwa/minibwa"))
@@ -114,7 +123,7 @@ def build(args: argparse.Namespace) -> None:
         return
     rust_features = args.rust_features
     if rust_features is None:
-        rust_features = "cli,mimalloc" if args.allocator == "mimalloc" else "cli"
+        rust_features = "bin" if args.allocator == "mimalloc" else "cli"
     cargo_cmd = ["cargo", "build", "--release", "--features", rust_features]
     make_cmd = ["make", "-C", "minibwa"]
     if args.allocator == "system":
@@ -126,7 +135,7 @@ def build(args: argparse.Namespace) -> None:
 def build_metadata(args: argparse.Namespace) -> dict[str, str | None]:
     rust_features = args.rust_features
     if rust_features is None:
-        rust_features = "cli,mimalloc" if args.allocator == "mimalloc" else "cli"
+        rust_features = "bin" if args.allocator == "mimalloc" else "cli"
     return {
         "allocator": args.allocator,
         "rust_features": rust_features,
@@ -371,6 +380,8 @@ def run_map(
     cmd = [str(bin_path), "map"]
     if args.sam:
         cmd.append("-a")
+    else:
+        cmd.append("-f")
     cmd.extend(spec["extra"])
     cmd.extend(["-t", str(args.threads), str(index_prefix)])
     cmd.extend(str(path) for path in spec["reads"])
@@ -429,7 +440,10 @@ def main() -> int:
     args.data_dir = args.data_dir.resolve()
     args.out_dir = args.out_dir.resolve()
     args.ref = args.ref.resolve()
-    require(args.ref)
+    if args.index_root is not None:
+        args.index_root = args.index_root.resolve()
+    if not args.skip_index:
+        require(args.ref)
 
     build(args)
     require(args.c_bin)
@@ -447,10 +461,11 @@ def main() -> int:
     parities: list[Parity] = []
 
     if args.skip_index:
-        c_normal = args.out_dir / "index" / "c" / "ref.normal"
-        rust_normal = args.out_dir / "index" / "rust" / "ref.normal"
-        c_meth = args.out_dir / "index" / "c" / "ref.meth"
-        rust_meth = args.out_dir / "index" / "rust" / "ref.meth"
+        index_root = args.index_root if args.index_root is not None else args.out_dir
+        c_normal = index_root / "index" / "c" / "ref.normal"
+        rust_normal = index_root / "index" / "rust" / "ref.normal"
+        c_meth = index_root / "index" / "c" / "ref.meth"
+        rust_meth = index_root / "index" / "rust" / "ref.meth"
         require_index(c_normal, "normal")
         require_index(rust_normal, "normal")
         if any(spec["index"] == "meth" for spec in plan.values()):

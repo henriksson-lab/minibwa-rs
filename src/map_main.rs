@@ -5,7 +5,7 @@ use crate::bseq::{
     mb_qname_same,
 };
 use crate::bwt::mb_sai_v;
-use crate::format::{mb_fmt_sam_hdr, mb_format};
+use crate::format::{mb_escape, mb_fmt_sam_hdr, mb_format};
 use crate::ketopt::{ketopt, ko_longopt_t, KETOPT_INIT};
 use crate::kommon::{
     kom_atof, kom_panic, kom_parse_num, kom_percent_cpu, kom_realtime, kom_strtol, kstring_t,
@@ -15,7 +15,8 @@ use crate::kthread::kt_for_parallel;
 use crate::l2bit::l2b_meth_t;
 use crate::main::MB_VERSION;
 use crate::map_algo::{
-    mb_idx_load, mb_idx_t, mb_map_sai, mb_tbuf_destroy, mb_tbuf_init, mb_tbuf_reset, mb_tbuf_t,
+    mb_idx_load, mb_idx_load_mmap, mb_idx_t, mb_map_sai, mb_tbuf_destroy, mb_tbuf_init,
+    mb_tbuf_reset, mb_tbuf_t,
 };
 use crate::mbpriv::{
     mb_cstr_prefix, KOM_DBG_FLAG, MB_DBG_ALN_PE, MB_DBG_ALN_SEQ, MB_DBG_ANCHOR, MB_DBG_AN_POS,
@@ -23,14 +24,16 @@ use crate::mbpriv::{
 };
 use crate::options::{
     mb_opt_adap, mb_opt_init, mb_opt_preset, mb_opt_t, MB_F_ADAP, MB_F_COPY_COMMENT, MB_F_EQX,
-    MB_F_LONG, MB_F_METH, MB_F_NO_ALN, MB_F_NO_KALLOC, MB_F_NO_PAIRING, MB_F_NO_UNMAP, MB_F_PE,
-    MB_F_PE_PREDEF, MB_F_PRIMARY5, MB_F_SAM, MB_F_SUPP_SOFT, MB_F_WRITE_CS, MB_F_WRITE_DS,
+    MB_F_LONG, MB_F_METH, MB_F_NO_ALN, MB_F_NO_KALLOC, MB_F_NO_PAIRING, MB_F_NO_UNMAP, MB_F_PAF,
+    MB_F_PE, MB_F_PE_PREDEF, MB_F_PRIMARY5, MB_F_SUPP_SOFT, MB_F_WRITE_CS, MB_F_WRITE_DS,
     MB_F_WRITE_MD,
 };
 use crate::pe::{mb_hit_buf_t, mb_hit_t, mb_pair, mb_pestat, mb_pestat_t};
 use crate::seed::mb_seed_intv_batch;
+use flate2::bufread::MultiGzDecoder;
 use rayon::ThreadPool;
 use std::cell::RefCell;
+use std::io::{BufRead, BufReader};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::{fs, io::BufWriter, io::Write};
@@ -452,7 +455,7 @@ pub fn worker_pipeline<'a, 'w, 'p>(
     const MIN_READ_CNT: i32 = 40000;
     let opt = p.opt;
     if step == 0 {
-        let with_qual = ((opt.flag & MB_F_SAM) != 0) as i32;
+        let with_qual = ((opt.flag & MB_F_PAF) == 0) as i32;
         let with_comment = ((opt.flag & MB_F_COPY_COMMENT) != 0) as i32;
         let frag_mode = (p.n_fp > 1 || (opt.flag & MB_F_PE) != 0) as i32;
         let mut n_seq = 0;
@@ -689,6 +692,20 @@ pub fn worker_pipeline<'a, 'w, 'p>(
                     for j in 0..s.n_hit[i] as usize {
                         let h = &s.hit[i][j];
                         if h.parent == h.id || n_sec < opt.out_n {
+                            if h.parent != h.id {
+                                let p_hit = &s.hit[i][h.parent as usize];
+                                if let (Some(parent), Some(extra)) =
+                                    (p_hit.p.as_ref(), h.p.as_ref())
+                                {
+                                    if (extra.dp_max as f64)
+                                        < opt.out_s as f64 * parent.dp_max as f64
+                                    {
+                                        continue;
+                                    }
+                                } else if (h.score as f64) < opt.out_s as f64 * p_hit.score as f64 {
+                                    continue;
+                                }
+                            }
                             mb_format(
                                 (),
                                 &mut out,
@@ -698,7 +715,7 @@ pub fn worker_pipeline<'a, 'w, 'p>(
                                 &s.n_hit[seg_st..seg_en],
                                 &s.hit[seg_st..seg_en],
                                 j as i32,
-                                opt.flag,
+                                opt,
                                 (i - seg_st) as i32,
                                 mate_qlen,
                             );
@@ -717,7 +734,7 @@ pub fn worker_pipeline<'a, 'w, 'p>(
                         &s.n_hit[seg_st..seg_en],
                         &s.hit[seg_st..seg_en],
                         -1,
-                        opt.flag,
+                        opt,
                         (i - seg_st) as i32,
                         mate_qlen,
                     );
@@ -810,6 +827,7 @@ pub fn mb_map_file(
     n: i32,
     fn_: &[&str],
     fn_out: Option<&str>,
+    hdr: Option<&str>,
 ) -> (i32, String) {
     let worker_pool = if opt.n_thread > 1 {
         Some(
@@ -821,7 +839,7 @@ pub fn mb_map_file(
     } else {
         None
     };
-    mb_map_file_with_pool(opt, idx, n, fn_, fn_out, worker_pool.as_ref())
+    mb_map_file_with_pool(opt, idx, n, fn_, fn_out, hdr, worker_pool.as_ref())
 }
 
 pub fn mb_map_file_with_pool(
@@ -830,6 +848,7 @@ pub fn mb_map_file_with_pool(
     n: i32,
     fn_: &[&str],
     fn_out: Option<&str>,
+    hdr: Option<&str>,
     worker_pool: Option<&ThreadPool>,
 ) -> (i32, String) {
     if n < 1 {
@@ -864,43 +883,86 @@ pub fn mb_map_file_with_pool(
     } else {
         None
     };
-    let run = |fp: Vec<mb_bseq_file_t>, output_writer: Option<&mut dyn Write>| -> (i32, String) {
-        if worker_pool.is_some() {
-            return std::thread::scope(|scope| {
-                let (read_tx, read_rx) = mpsc::sync_channel(2);
-                let (map_tx, map_rx) = mpsc::sync_channel(2);
-                scope.spawn(move || {
-                    let mut read_pl = pipeline_t {
-                        n_fp: n,
-                        n_threads: if opt.n_thread <= 2 { opt.n_thread } else { 3 },
-                        n_base: 0,
-                        n_seq: 0,
-                        mb_size: opt.mb_size,
-                        opt,
-                        fp,
-                        idx,
-                        worker_pool,
-                        output: String::new(),
-                        output_writer: None,
-                        output_error: false,
-                    };
-                    while let Some(s0) = worker_pipeline(&mut read_pl, 0, None) {
-                        let send_result = crate::stage_time::measure(
-                            crate::stage_time::Bucket::PipeReadSend,
-                            || read_tx.send(s0),
-                        );
-                        if send_result.is_err() {
-                            break;
+    let run =
+        |fp: Vec<mb_bseq_file_t>, mut output_writer: Option<&mut dyn Write>| -> (i32, String) {
+            let header = hdr.unwrap_or("");
+            if let Some(writer) = output_writer.as_mut() {
+                if !header.is_empty() && writer.write_all(header.as_bytes()).is_err() {
+                    return (-1, String::new());
+                }
+            }
+            if worker_pool.is_some() {
+                return std::thread::scope(|scope| {
+                    let (read_tx, read_rx) = mpsc::sync_channel(2);
+                    let (map_tx, map_rx) = mpsc::sync_channel(2);
+                    scope.spawn(move || {
+                        let mut read_pl = pipeline_t {
+                            n_fp: n,
+                            n_threads: if opt.n_thread <= 2 { opt.n_thread } else { 3 },
+                            n_base: 0,
+                            n_seq: 0,
+                            mb_size: opt.mb_size,
+                            opt,
+                            fp,
+                            idx,
+                            worker_pool,
+                            output: String::new(),
+                            output_writer: None,
+                            output_error: false,
+                        };
+                        while let Some(s0) = worker_pipeline(&mut read_pl, 0, None) {
+                            let send_result = crate::stage_time::measure(
+                                crate::stage_time::Bucket::PipeReadSend,
+                                || read_tx.send(s0),
+                            );
+                            if send_result.is_err() {
+                                break;
+                            }
                         }
-                    }
-                    let fp = std::mem::take(&mut read_pl.fp);
-                    for f in fp {
-                        mb_bseq_close(Some(f));
-                    }
-                    crate::stage_time::flush_local();
-                });
-                scope.spawn(move || {
-                    let mut map_pl = pipeline_t {
+                        let fp = std::mem::take(&mut read_pl.fp);
+                        for f in fp {
+                            mb_bseq_close(Some(f));
+                        }
+                        crate::stage_time::flush_local();
+                    });
+                    scope.spawn(move || {
+                        let mut map_pl = pipeline_t {
+                            n_fp: n,
+                            n_threads: if opt.n_thread <= 2 { opt.n_thread } else { 3 },
+                            n_base: 0,
+                            n_seq: 0,
+                            mb_size: opt.mb_size,
+                            opt,
+                            fp: Vec::new(),
+                            idx,
+                            worker_pool,
+                            output: String::new(),
+                            output_writer: None,
+                            output_error: false,
+                        };
+                        loop {
+                            let recv_result = crate::stage_time::measure(
+                                crate::stage_time::Bucket::PipeMapRecv,
+                                || read_rx.recv(),
+                            );
+                            let Ok(s0) = recv_result else {
+                                break;
+                            };
+                            if let Some(s1) = worker_pipeline(&mut map_pl, 1, Some(s0)) {
+                                let mut s1 = s1;
+                                release_step_tbuf(&mut s1);
+                                let send_result = crate::stage_time::measure(
+                                    crate::stage_time::Bucket::PipeMapSend,
+                                    || map_tx.send(s1),
+                                );
+                                if send_result.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        crate::stage_time::flush_local();
+                    });
+                    let mut out_pl = pipeline_t {
                         n_fp: n,
                         n_threads: if opt.n_thread <= 2 { opt.n_thread } else { 3 },
                         n_base: 0,
@@ -910,112 +972,84 @@ pub fn mb_map_file_with_pool(
                         fp: Vec::new(),
                         idx,
                         worker_pool,
-                        output: String::new(),
-                        output_writer: None,
+                        output: if output_writer.is_none() {
+                            header.to_string()
+                        } else {
+                            String::new()
+                        },
+                        output_writer,
                         output_error: false,
                     };
                     loop {
                         let recv_result = crate::stage_time::measure(
-                            crate::stage_time::Bucket::PipeMapRecv,
-                            || read_rx.recv(),
+                            crate::stage_time::Bucket::PipeOutRecv,
+                            || map_rx.recv(),
                         );
-                        let Ok(s0) = recv_result else {
+                        let Ok(s1) = recv_result else {
                             break;
                         };
-                        if let Some(s1) = worker_pipeline(&mut map_pl, 1, Some(s0)) {
-                            let mut s1 = s1;
-                            release_step_tbuf(&mut s1);
-                            let send_result = crate::stage_time::measure(
-                                crate::stage_time::Bucket::PipeMapSend,
-                                || map_tx.send(s1),
-                            );
-                            if send_result.is_err() {
-                                break;
-                            }
+                        worker_pipeline(&mut out_pl, 2, Some(s1));
+                        if out_pl.output_error {
+                            break;
                         }
                     }
                     crate::stage_time::flush_local();
-                });
-                let mut out_pl = pipeline_t {
-                    n_fp: n,
-                    n_threads: if opt.n_thread <= 2 { opt.n_thread } else { 3 },
-                    n_base: 0,
-                    n_seq: 0,
-                    mb_size: opt.mb_size,
-                    opt,
-                    fp: Vec::new(),
-                    idx,
-                    worker_pool,
-                    output: String::new(),
-                    output_writer,
-                    output_error: false,
-                };
-                loop {
-                    let recv_result =
-                        crate::stage_time::measure(crate::stage_time::Bucket::PipeOutRecv, || {
-                            map_rx.recv()
-                        });
-                    let Ok(s1) = recv_result else {
-                        break;
-                    };
-                    worker_pipeline(&mut out_pl, 2, Some(s1));
                     if out_pl.output_error {
-                        break;
-                    }
-                }
-                crate::stage_time::flush_local();
-                if out_pl.output_error {
-                    (-1, String::new())
-                } else if let Some(writer) = out_pl.output_writer.as_mut() {
-                    if writer.flush().is_err() {
                         (-1, String::new())
+                    } else if let Some(writer) = out_pl.output_writer.as_mut() {
+                        if writer.flush().is_err() {
+                            (-1, String::new())
+                        } else {
+                            (0, out_pl.output)
+                        }
                     } else {
                         (0, out_pl.output)
                     }
-                } else {
-                    (0, out_pl.output)
-                }
-            });
-        }
-        let mut pl = pipeline_t {
-            n_fp: n,
-            n_threads: if opt.n_thread <= 2 { opt.n_thread } else { 3 },
-            n_base: 0,
-            n_seq: 0,
-            mb_size: opt.mb_size,
-            opt,
-            fp,
-            idx,
-            worker_pool,
-            output: String::new(),
-            output_writer,
-            output_error: false,
-        };
-        while let Some(s0) = worker_pipeline(&mut pl, 0, None) {
-            let Some(s1) = worker_pipeline(&mut pl, 1, Some(s0)) else {
-                break;
-            };
-            worker_pipeline(&mut pl, 2, Some(s1));
-            if pl.output_error {
-                break;
+                });
             }
-        }
-        let fp = std::mem::take(&mut pl.fp);
-        for f in fp {
-            mb_bseq_close(Some(f));
-        }
-        if pl.output_error {
-            (-1, String::new())
-        } else if let Some(writer) = pl.output_writer.as_mut() {
-            if writer.flush().is_err() {
+            let mut pl = pipeline_t {
+                n_fp: n,
+                n_threads: if opt.n_thread <= 2 { opt.n_thread } else { 3 },
+                n_base: 0,
+                n_seq: 0,
+                mb_size: opt.mb_size,
+                opt,
+                fp,
+                idx,
+                worker_pool,
+                output: if output_writer.is_none() {
+                    header.to_string()
+                } else {
+                    String::new()
+                },
+                output_writer,
+                output_error: false,
+            };
+            while let Some(s0) = worker_pipeline(&mut pl, 0, None) {
+                let Some(s1) = worker_pipeline(&mut pl, 1, Some(s0)) else {
+                    break;
+                };
+                worker_pipeline(&mut pl, 2, Some(s1));
+                if pl.output_error {
+                    break;
+                }
+            }
+            let fp = std::mem::take(&mut pl.fp);
+            for f in fp {
+                mb_bseq_close(Some(f));
+            }
+            if pl.output_error {
                 (-1, String::new())
+            } else if let Some(writer) = pl.output_writer.as_mut() {
+                if writer.flush().is_err() {
+                    (-1, String::new())
+                } else {
+                    (0, pl.output)
+                }
             } else {
                 (0, pl.output)
             }
-        } else {
-            (0, pl.output)
-        }
-    };
+        };
     if let Some(writer) = output_writer {
         return run(fp, Some(writer));
     }
@@ -1032,13 +1066,55 @@ pub fn mb_map_file_with_pool(
     run(fp, None)
 }
 
+fn mb_insert_hdr(str_: &str) -> String {
+    let str_ = c_str(str_);
+    let bytes = str_.as_bytes();
+    if bytes.first() == Some(&b'@') && bytes.len() > 4 {
+        return format!("{}\n", mb_escape(str_));
+    }
+    if bytes.first() == Some(&b'@') {
+        return String::new();
+    }
+
+    let Ok(fp) = fs::File::open(str_) else {
+        return String::new();
+    };
+    let mut buffered = BufReader::new(fp);
+    let is_gzip = buffered
+        .fill_buf()
+        .is_ok_and(|buf| buf.starts_with(&[0x1f, 0x8b]));
+    let mut reader: Box<dyn BufRead> = if is_gzip {
+        Box::new(BufReader::new(MultiGzDecoder::new(buffered)))
+    } else {
+        Box::new(buffered)
+    };
+    let mut out = String::new();
+    let mut line = Vec::new();
+    while reader
+        .read_until(b'\n', &mut line)
+        .ok()
+        .filter(|&n| n > 0)
+        .is_some()
+    {
+        while line.last().is_some_and(|&b| b == b'\n' || b == b'\r') {
+            line.pop();
+        }
+        if line.first() == Some(&b'@') && line.len() > 4 && line.get(3) == Some(&b'\t') {
+            out.push_str(&String::from_utf8_lossy(&line));
+            out.push('\n');
+        }
+        line.clear();
+    }
+    out
+}
+
 /// Original C static function `usage` from `minibwa/map-main.c:296`.
 pub fn usage(to_stdout: bool, opt: &mb_opt_t) -> (i32, String) {
     let mut out = String::new();
     out.push_str("Usage: minibwa map [options] <in.idx> <in.fastq>\n");
     out.push_str("Options:\n");
     out.push_str("  Common:\n");
-    out.push_str("    -a               output SAM (PAF by default)\n");
+    out.push_str("    -f               output PAF (SAM by default)\n");
     out.push_str(&format!(
         "    -t INT           number of worker threads [{}]\n",
         opt.n_thread
@@ -1109,22 +1185,41 @@ pub fn usage(to_stdout: bool, opt: &mb_opt_t) -> (i32, String) {
         opt.min_dp_max
     ));
     out.push_str("  Paired-end:\n");
-    out.push_str("    -P               skip pairing and mate resuce\n");
+    out.push_str("    -P               skip pairing and mate rescue\n");
     out.push_str(&format!(
         "    --rescue=INT     mate rescue for up to INT candidates; 0 to skip rescue [{}]\n",
         opt.max_rescue
     ));
+    out.push_str("    -I INT[,INT[,INT[,INT]]]\n");
+    out.push_str(
+        "                     mean, stddev, max and min of isize distribution [inferred]\n",
+    );
     out.push_str("  Input/Output:\n");
     out.push_str("    -o FILE          output file name [stdout]\n");
     out.push_str("    -u               don't output unmapped reads\n");
-    out.push_str("    --outn=INT       output up to INT secondary alignments [0]\n");
+    out.push_str("    --outn=NUM       output up to {NUM,-N} secondary alignments [0]\n");
+    out.push_str(&format!(
+        "    --outs=FLOAT     output a secondary hit if score at least FLOAT*bestScore [{}]\n",
+        opt.out_s
+    ));
+    out.push_str(&format!(
+        "    --xa=NUM         if <=NUM hits with score >{}% of the best hit, output them to XA [{}]\n",
+        opt.out_s * 100.0,
+        opt.xa_max
+    ));
     out.push_str("    -y               copy FASTA/Q comments to output\n");
     out.push_str("    -Y               use soft clipping for supplementary alignments\n");
+    out.push_str(
+        "    -H STR           if STR starts with @, insert to header; or insert lines in file STR []\n",
+    );
     out.push_str(
         "    -5               take the alignment with the smallest query position as primary\n",
     );
     out.push_str(
         "    -K NUM1[,NUM2]   process NUM1-NUM2 bp of query sequences in a batch [100m,1g]\n",
+    );
+    out.push_str(
+        "    --mmap[=lite]    load the index via memory mapped files (slower mapping) []\n",
     );
     out.push_str("    --version        print version number\n");
     out.push_str("    --help           print this help message\n");
@@ -1179,10 +1274,29 @@ fn c_atof_f32(s: &str) -> f32 {
     kom_atof(s) as f32
 }
 
+fn set_ins_size(opt: &mut mb_opt_t, arg: &str) {
+    let fields = c_str(arg).split(',').collect::<Vec<_>>();
+    opt.pe_avg = fields.first().map_or(0, |x| c_atof_f32(x).round() as i32);
+    opt.pe_std = fields
+        .get(1)
+        .map_or((opt.pe_avg as f32 * 0.1).round() as i32, |x| {
+            c_atof_f32(x).round() as i32
+        });
+    opt.pe_hi = fields
+        .get(2)
+        .map_or(opt.pe_avg + opt.pe_std * 4, |x| c_atoi_i32(x));
+    opt.pe_lo = fields
+        .get(3)
+        .map_or(opt.pe_avg - opt.pe_std * 4, |x| c_atoi_i32(x));
+    if opt.pe_lo < 1 {
+        opt.pe_lo = 1;
+    }
+    opt.flag |= MB_F_PE_PREDEF;
+}
+
 /// Original C global function `main_map` from `minibwa/map-main.c:351`.
 pub fn main_map(argv: &[String]) -> (i32, String) {
-    let has_output_writer = MAIN_MAP_OUTPUT_WRITER.with(|writer| writer.borrow().is_some());
-    let opt_str = "x:o:k:c:m:p:A:B:U:b:O:E:t:K:N:PyYR:aul:w:W:g:5s:";
+    let opt_str = "x:o:k:c:m:p:A:B:U:b:O:E:t:K:N:PyYR:H:aul:w:W:g:5s:fI:";
     let long_options = [
         ko_longopt_t {
             name: Some("kalloc".into()),
@@ -1193,11 +1307,6 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
             name: Some("outn".into()),
             has_arg: 1,
             val: 302,
-        },
-        ko_longopt_t {
-            name: Some("pe-predef".into()),
-            has_arg: 2,
-            val: 303,
         },
         ko_longopt_t {
             name: Some("rescue".into()),
@@ -1238,6 +1347,26 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
             name: Some("hic".into()),
             has_arg: 0,
             val: 311,
+        },
+        ko_longopt_t {
+            name: Some("xa".into()),
+            has_arg: 1,
+            val: 312,
+        },
+        ko_longopt_t {
+            name: Some("mmap".into()),
+            has_arg: 2,
+            val: 313,
+        },
+        ko_longopt_t {
+            name: Some("xa-ratio".into()),
+            has_arg: 1,
+            val: 314,
+        },
+        ko_longopt_t {
+            name: Some("outs".into()),
+            has_arg: 1,
+            val: 315,
         },
         ko_longopt_t {
             name: Some("dbg-aln-seq".into()),
@@ -1315,6 +1444,9 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
     }
     let mut fn_out: Option<String> = None;
     let mut rg_line: Option<String> = None;
+    let mut hdr_ins = String::new();
+    let mut use_mmap = 0;
+    let mut mmap_preload = 1;
     o = KETOPT_INIT.clone();
     loop {
         let c = ketopt(&mut o, argc, &mut args, 1, opt_str, Some(&long_options));
@@ -1347,7 +1479,9 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
         } else if c == 'W' as i32 {
             mo.bw_long = kom_parse_num(arg).0 as i32;
         } else if c == 'a' as i32 {
-            mo.flag |= MB_F_SAM;
+            mo.flag &= !MB_F_PAF;
+        } else if c == 'f' as i32 {
+            mo.flag |= MB_F_PAF;
         } else if c == 'u' as i32 {
             mo.flag |= MB_F_NO_UNMAP;
         } else if c == 'y' as i32 {
@@ -1366,6 +1500,10 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
             mo.n_thread = c_atoi_i32(arg);
         } else if c == 'R' as i32 {
             rg_line = Some(arg.to_string());
+        } else if c == 'H' as i32 {
+            hdr_ins = mb_insert_hdr(arg);
+        } else if c == 'I' as i32 {
+            set_ins_size(&mut mo, arg);
         } else if c == 'K' as i32 {
             let (x, used) = kom_parse_num(arg);
             mo.mb_size = x;
@@ -1412,9 +1550,7 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
                 eprint!("{warning}");
             }
         } else if c == 302 {
-            mo.out_n = c_atoi_i32(arg);
-        } else if c == 303 {
-            mo.flag |= MB_F_PE_PREDEF;
+            mo.out_n = kom_parse_num(arg).0 as i32;
         } else if c == 304 {
             mo.max_rescue = c_atoi_i32(arg);
         } else if c == 305 {
@@ -1439,6 +1575,15 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
             mo.flag |= MB_F_METH;
         } else if c == 311 {
             mo.flag |= MB_F_PRIMARY5 | MB_F_NO_PAIRING;
+        } else if c == 312 {
+            mo.xa_max = kom_parse_num(arg).0 as i32;
+        } else if c == 313 {
+            use_mmap = 1;
+            if o.arg.is_some() && c_str_eq(arg, "lite") {
+                mmap_preload = 0;
+            }
+        } else if c == 314 || c == 315 {
+            mo.out_s = c_atof_f32(arg);
         } else if c == 601 {
             KOM_DBG_FLAG.fetch_or(MB_DBG_ALN_SEQ, Ordering::Relaxed);
         } else if c == 602 {
@@ -1464,7 +1609,13 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
         let (ret, text) = usage(false, &mo);
         return (ret, text);
     }
-    let Some(idx) = mb_idx_load(&args[o.ind as usize], ((mo.flag & MB_F_METH) != 0) as i32) else {
+    let is_meth = ((mo.flag & MB_F_METH) != 0) as i32;
+    let idx = if use_mmap != 0 {
+        mb_idx_load_mmap(&args[o.ind as usize], is_meth, mmap_preload)
+    } else {
+        mb_idx_load(&args[o.ind as usize], is_meth)
+    };
+    let Some(idx) = idx else {
         kom_panic("main_map", "failed to load the index.");
     };
     eprintln!(
@@ -1476,8 +1627,7 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let mut out = String::new();
-    if (mo.flag & MB_F_SAM) != 0 {
+    let hdr_text = if (mo.flag & MB_F_PAF) == 0 {
         let mut hdr = kstring_t::default();
         let argv_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         if mb_fmt_sam_hdr(
@@ -1490,28 +1640,244 @@ pub fn main_map(argv: &[String]) -> (i32, String) {
         {
             return (1, String::new());
         }
-        if has_output_writer {
-            let write_ok = MAIN_MAP_OUTPUT_WRITER.with(|writer| {
-                // SAFETY: main_map_write installs this pointer only for the
-                // synchronous dynamic extent of this main_map call.
-                writer
-                    .borrow()
-                    .map(|ptr| unsafe { (&mut *ptr).write_all(&hdr.s[..hdr.l]).is_ok() })
-                    .unwrap_or(false)
-            });
-            if !write_ok {
-                return (-1, String::new());
-            }
+        if !hdr_ins.is_empty() {
+            hdr.s.truncate(hdr.l);
+            hdr.s.extend_from_slice(hdr_ins.as_bytes());
+            hdr.l = hdr.s.len();
+            hdr.m = hdr.s.len();
+        }
+        Some(String::from_utf8_lossy(&hdr.s[..hdr.l]).into_owned())
+    } else {
+        None
+    };
+    let writes_to_stdout = fn_out.as_deref().is_none_or(|name| c_str_eq(name, "-"));
+    let (_ret, body) = mb_map_file(
+        &mo,
+        &idx,
+        inputs.len() as i32,
+        &inputs,
+        fn_out.as_deref(),
+        hdr_text.as_deref(),
+    );
+    (
+        0,
+        if writes_to_stdout {
+            body
         } else {
-            out.push_str(&String::from_utf8_lossy(&hdr.s[..hdr.l]));
+            String::new()
+        },
+    )
+}
+
+pub fn usage_mem(to_stdout: bool, opt: &mb_opt_t) -> (i32, String) {
+    let mut out = String::new();
+    out.push_str("Usage: minibwa mem [options] <in.idx> <in.fastq>\n");
+    out.push_str("Options:\n");
+    out.push_str("  Algorithm:\n");
+    out.push_str(&format!(
+        "    -t INT         number of threads [{}]\n",
+        opt.n_thread
+    ));
+    out.push_str(&format!(
+        "    -k INT         minimum seed length [{}]\n",
+        opt.min_len
+    ));
+    out.push_str(&format!("    -w NUM         bandwidth [{}]\n", opt.bw));
+    out.push_str("    *r FLOAT       inside seed ratio []\n");
+    out.push_str("    *y INT         seed occurrence for the 3rd round seeding []\n");
+    out.push_str(&format!(
+        "    -c NUM         max seed occurrences [{}]\n",
+        opt.max_occ
+    ));
+    out.push_str(&format!(
+        "    -D FLOAT       mask level [{}]\n",
+        opt.mask_level
+    ));
+    out.push_str(&format!(
+        "    -W INT         min chaining score [{}]\n",
+        opt.min_chain_score
+    ));
+    out.push_str(&format!(
+        "    -m INT         mate rescue for up to INT candidates; 0 to skip rescue [{}]\n",
+        opt.max_rescue
+    ));
+    out.push_str("    -S             skip mate rescue\n");
+    out.push_str("    -P             skip pairing\n");
+    out.push_str("  Scoring:\n");
+    out.push_str("    *A INT         matching score []\n");
+    out.push_str("    *B INT         mismatching penalty []\n");
+    out.push_str("    *O INT         gap open penalty []\n");
+    out.push_str("    *E INT         gap extension penalty []\n");
+    out.push_str("    *L INT         end bonus []\n");
+    out.push_str("    *U INT         penalty for an unpaired read pair []\n");
+    out.push_str("    *d INT         off-diagonal X-dropoff []\n");
+    out.push_str("    *x STR         preset []\n");
+    out.push_str("  Input/output:\n");
+    out.push_str("    *p             smart pairing\n");
+    out.push_str(
+        "    -R STR         SAM read group line in a format like '@RG\\tID:foo\\tSM:bar' []\n",
+    );
+    out.push_str(
+        "    -H STR         if STR starts with @, insert to header; or insert lines in file STR []\n",
+    );
+    out.push_str("    -o FILE        output file name [stdout]\n");
+    out.push_str("    *j             treat ALT contigs as part of the primary assembly\n");
+    out.push_str(
+        "    -5             take the alignment with the smallest query position as primary\n",
+    );
+    out.push_str("    *q             don't modify mapQ of supplementary alignments\n");
+    out.push_str("    *K NUM         batch size []\n");
+    out.push_str(
+        "    -v INT         verbose level: 1=error, 2=warning, 3=message, 4+=debugging [3]\n",
+    );
+    out.push_str(&format!(
+        "    -T INT         suppress alignment with DP score lower than INT*{{-A}} [{}]\n",
+        opt.min_dp_max
+    ));
+    out.push_str(&format!(
+        "    -h INT         max secondary alignments at the XA tag [{}]\n",
+        opt.xa_max
+    ));
+    out.push_str(&format!(
+        "    -z FLOAT       skip XA if score < FLOAT*bestScore [{}]\n",
+        opt.out_s
+    ));
+    out.push_str("    -a             output all alignments\n");
+    out.push_str("    -C             copy FASTA/Q comments to output\n");
+    out.push_str("    *V             output the reference FASTA header in the XR tag\n");
+    out.push_str("    -Y             use soft clipping for supplementary alignments\n");
+    out.push_str("    *M             mark shorter split hits as secondary\n");
+    out.push_str("    -I INT[,INT[,INT[,INT]]]\n");
+    out.push_str("                   mean, stddev, max and min of isize distribution [inferred]\n");
+    out.push_str("    *u             output XB instead of XA\n");
+    out.push_str("Notes:\n");
+    out.push_str("  - \"minibwa mem\" aims to match the \"bwa mem\" command-line interface\n");
+    out.push_str("  - '*' options are ignored as they are missing or incompatible with minibwa\n");
+    out.push_str("  - minibwa and bwa-mem may output different alignments\n");
+    (if to_stdout { 0 } else { 1 }, out)
+}
+
+pub fn main_mem(argv: &[String]) -> (i32, String) {
+    let opt_str = "t:k:w:d:r:y:c:D:W:m:SPA:B:O:E:L:U:x:pR:H:o:j5qK:v:T:h:z:aCVYMuI:";
+    let argc = argv.len() as i32;
+    let mut args = argv.to_vec();
+    let mut o = KETOPT_INIT.clone();
+    let mut mo = mb_opt_t::default();
+    mb_opt_init(&mut mo);
+    mo.flag |= MB_F_WRITE_MD;
+    let mut fn_out: Option<String> = None;
+    let mut rg_line: Option<String> = None;
+    let mut hdr_ins = String::new();
+    loop {
+        let c = ketopt(&mut o, argc, &mut args, 1, opt_str, None);
+        if c < 0 {
+            break;
+        }
+        let arg = o.arg.as_deref().unwrap_or("");
+        if c == 't' as i32 {
+            mo.n_thread = c_atoi_i32(arg);
+        } else if c == 'k' as i32 {
+            mo.min_len = c_atoi_i32(arg);
+        } else if c == 'w' as i32 {
+            mo.bw = kom_parse_num(arg).0 as i32;
+        } else if c == 'r' as i32 || c == 'y' as i32 {
+        } else if c == 'W' as i32 {
+            mo.min_chain_score = c_atoi_i32(arg);
+        } else if c == 'c' as i32 {
+            mo.max_occ = kom_parse_num(arg).0 as i32;
+        } else if c == 'D' as i32 {
+            mo.mask_level = c_atof_f32(arg);
+        } else if c == 'm' as i32 {
+            mo.max_rescue = c_atoi_i32(arg);
+        } else if c == 'S' as i32 {
+            mo.max_rescue = 0;
+        } else if c == 'P' as i32 {
+            mo.flag |= MB_F_NO_PAIRING;
+        } else if matches!(
+            c as u8 as char,
+            'A' | 'B' | 'O' | 'E' | 'L' | 'U' | 'd' | 'x' | 'p' | 'j' | 'q' | 'K' | 'V' | 'M' | 'u'
+        ) {
+        } else if c == 'a' as i32 {
+            mo.out_n = 1_000_000;
+        } else if c == 'h' as i32 {
+            mo.xa_max = c_atoi_i32(arg);
+        } else if c == 'z' as i32 {
+            mo.out_s = c_atof_f32(arg);
+        } else if c == 'R' as i32 {
+            rg_line = Some(arg.to_string());
+        } else if c == 'H' as i32 {
+            hdr_ins = mb_insert_hdr(arg);
+        } else if c == 'o' as i32 {
+            fn_out = Some(arg.to_string());
+        } else if c == '5' as i32 {
+            mo.flag |= MB_F_PRIMARY5;
+        } else if c == 'v' as i32 {
+        } else if c == 'T' as i32 {
+            mo.min_dp_max = c_atoi_i32(arg);
+        } else if c == 'C' as i32 {
+            mo.flag |= MB_F_COPY_COMMENT;
+        } else if c == 'Y' as i32 {
+            mo.flag |= MB_F_SUPP_SOFT;
+        } else if c == 'I' as i32 {
+            set_ins_size(&mut mo, arg);
+        } else if c == ':' as i32 || c == '?' as i32 {
+            let (ret, text) = usage_mem(false, &mo);
+            return (ret, text);
         }
     }
-    let writes_to_stdout = fn_out.as_deref().is_none_or(|name| c_str_eq(name, "-"));
-    let (_ret, body) = mb_map_file(&mo, &idx, inputs.len() as i32, &inputs, fn_out.as_deref());
-    if writes_to_stdout && !has_output_writer {
-        out.push_str(&body);
+    if argc - o.ind < 2 {
+        let (ret, text) = usage_mem(false, &mo);
+        return (ret, text);
     }
-    (0, out)
+
+    let Some(idx) = mb_idx_load(&args[o.ind as usize], ((mo.flag & MB_F_METH) != 0) as i32) else {
+        kom_panic("main_mem", "failed to load the index.");
+    };
+    eprintln!(
+        "[M::main_mem::{:.3}*{:.2}] index loaded",
+        kom_realtime(),
+        kom_percent_cpu()
+    );
+    let mut hdr = kstring_t::default();
+    let argv_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    if mb_fmt_sam_hdr(
+        &mut hdr,
+        Some(&idx.l2b),
+        rg_line.as_deref(),
+        Some(MB_VERSION),
+        &argv_refs,
+    ) < 0
+    {
+        return (1, String::new());
+    }
+    if !hdr_ins.is_empty() {
+        hdr.s.truncate(hdr.l);
+        hdr.s.extend_from_slice(hdr_ins.as_bytes());
+        hdr.l = hdr.s.len();
+        hdr.m = hdr.s.len();
+    }
+    let inputs = args[o.ind as usize + 1..]
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let hdr_text = String::from_utf8_lossy(&hdr.s[..hdr.l]).into_owned();
+    let writes_to_stdout = fn_out.as_deref().is_none_or(|name| c_str_eq(name, "-"));
+    let (_ret, body) = mb_map_file(
+        &mo,
+        &idx,
+        inputs.len() as i32,
+        &inputs,
+        fn_out.as_deref(),
+        Some(&hdr_text),
+    );
+    (
+        0,
+        if writes_to_stdout {
+            body
+        } else {
+            String::new()
+        },
+    )
 }
 
 pub fn main_map_write(argv: &[String], output_writer: &mut dyn Write) -> (i32, String) {
@@ -1524,6 +1890,18 @@ pub fn main_map_write(argv: &[String], output_writer: &mut dyn Write) -> (i32, S
         };
         let old = writer.replace(Some(output_writer));
         let ret = main_map(argv);
+        writer.replace(old);
+        ret
+    })
+}
+
+pub fn main_mem_write(argv: &[String], output_writer: &mut dyn Write) -> (i32, String) {
+    MAIN_MAP_OUTPUT_WRITER.with(|writer| {
+        let output_writer = unsafe {
+            std::mem::transmute::<&mut dyn Write, *mut (dyn Write + 'static)>(output_writer)
+        };
+        let old = writer.replace(Some(output_writer));
+        let ret = main_mem(argv);
         writer.replace(old);
         ret
     })
@@ -1542,11 +1920,44 @@ mod tests {
         let (ret, out) = usage(true, &opt);
         assert_eq!(ret, 0);
         assert!(out.contains("Usage: minibwa map [options] <in.idx> <in.fastq>\n"));
+        assert!(out.contains("    -f               output PAF (SAM by default)\n"));
         assert!(out.contains(&format!(
             "    -k INT           min seed length [{}]\n",
             opt.min_len
         )));
+        assert!(
+            out.contains("    --outn=NUM       output up to {NUM,-N} secondary alignments [0]\n")
+        );
+        assert!(out.contains(
+            "    --outs=FLOAT     output a secondary hit if score at least FLOAT*bestScore [0.8]\n"
+        ));
+        assert!(out.contains("    --xa=NUM         if <=NUM hits with score >80% of the best hit, output them to XA [5]\n"));
+        assert!(out.contains("    -P               skip pairing and mate rescue\n"));
+        assert!(out.contains("    -I INT[,INT[,INT[,INT]]]\n"));
+        assert!(out.contains(
+            "    --mmap[=lite]    load the index via memory mapped files (slower mapping) []\n"
+        ));
         assert!(out.contains("    --help           print this help message\n"));
+    }
+
+    #[test]
+    fn main_map_accepts_xa_and_numeric_outn_options() {
+        let args = vec![
+            "map".to_string(),
+            "--xa".to_string(),
+            "1k".to_string(),
+            "--outn".to_string(),
+            "2k".to_string(),
+            "--outs".to_string(),
+            "0.7".to_string(),
+            "--xa-ratio".to_string(),
+            "0.6".to_string(),
+            "-I".to_string(),
+            "500,50,700,300".to_string(),
+        ];
+        let (ret, out) = main_map(&args);
+        assert_eq!(ret, 1);
+        assert!(out.starts_with("Usage: minibwa map [options] <in.idx> <in.fastq>\n"));
     }
 
     #[test]
@@ -1569,14 +1980,241 @@ mod tests {
         opt.flag |= MB_F_COPY_COMMENT;
         let reads_s = reads.to_string_lossy().into_owned();
 
-        let result =
-            std::panic::catch_unwind(|| mb_map_file(&opt, &idx, 1, &[reads_s.as_str()], None));
+        let result = std::panic::catch_unwind(|| {
+            mb_map_file(&opt, &idx, 1, &[reads_s.as_str()], None, None)
+        });
         assert!(result.is_ok());
         let (ret, out) = result.unwrap();
         assert_eq!(ret, 0);
         assert!(out.contains("cc:Z:"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn main_map_outputs_sam_by_default_and_paf_with_f() {
+        let index = "minibwa/chrM-human".to_string();
+        let reads = "minibwa/test/chrM-read_1.fa.gz".to_string();
+        let base_args = vec![
+            "map".to_string(),
+            "-t".to_string(),
+            "1".to_string(),
+            "-K".to_string(),
+            "1k,1k".to_string(),
+            index.clone(),
+            reads.clone(),
+        ];
+        let (ret, sam) = main_map(&base_args);
+        assert_eq!(ret, 0);
+        assert!(sam.starts_with("@HD\tVN:1.6\tSO:unsorted\tGO:query\n"));
+
+        let paf_args = vec![
+            "map".to_string(),
+            "-f".to_string(),
+            "-t".to_string(),
+            "1".to_string(),
+            "-K".to_string(),
+            "1k,1k".to_string(),
+            index,
+            reads,
+        ];
+        let (ret, paf) = main_map(&paf_args);
+        assert_eq!(ret, 0);
+        assert!(!paf.starts_with("@HD\t"));
+        assert!(paf
+            .lines()
+            .next()
+            .is_some_and(|line| line.split('\t').count() >= 12));
+    }
+
+    #[test]
+    fn main_map_accepts_mmap_option() {
+        let index = "minibwa/chrM-human".to_string();
+        let reads = "minibwa/test/chrM-read_1.fa.gz".to_string();
+        let base_args = vec![
+            "map".to_string(),
+            "-f".to_string(),
+            "-t".to_string(),
+            "1".to_string(),
+            "-K".to_string(),
+            "1k,1k".to_string(),
+            index.clone(),
+            reads.clone(),
+        ];
+        let mmap_args = vec![
+            "map".to_string(),
+            "--mmap".to_string(),
+            "-f".to_string(),
+            "-t".to_string(),
+            "1".to_string(),
+            "-K".to_string(),
+            "1k,1k".to_string(),
+            index,
+            reads,
+        ];
+        let (base_ret, base_out) = main_map(&base_args);
+        let (mmap_ret, mmap_out) = main_map(&mmap_args);
+        assert_eq!(base_ret, 0);
+        assert_eq!(mmap_ret, 0);
+        assert_eq!(mmap_out, base_out);
+    }
+
+    #[test]
+    fn main_map_accepts_mmap_lite_option() {
+        let index = "minibwa/chrM-human".to_string();
+        let reads = "minibwa/test/chrM-read_1.fa.gz".to_string();
+        let base_args = vec![
+            "map".to_string(),
+            "-f".to_string(),
+            "-t".to_string(),
+            "1".to_string(),
+            "-K".to_string(),
+            "1k,1k".to_string(),
+            index.clone(),
+            reads.clone(),
+        ];
+        let mmap_args = vec![
+            "map".to_string(),
+            "--mmap=lite".to_string(),
+            "-f".to_string(),
+            "-t".to_string(),
+            "1".to_string(),
+            "-K".to_string(),
+            "1k,1k".to_string(),
+            index,
+            reads,
+        ];
+        let (base_ret, base_out) = main_map(&base_args);
+        let (mmap_ret, mmap_out) = main_map(&mmap_args);
+        assert_eq!(base_ret, 0);
+        assert_eq!(mmap_ret, 0);
+        assert_eq!(mmap_out, base_out);
+    }
+
+    #[test]
+    fn main_map_inserts_escaped_literal_header_line_with_h() {
+        let args = vec![
+            "map".to_string(),
+            "-H".to_string(),
+            "@CO\\tliteral\\\\header".to_string(),
+            "-t".to_string(),
+            "1".to_string(),
+            "-K".to_string(),
+            "1k,1k".to_string(),
+            "minibwa/chrM-human".to_string(),
+            "minibwa/test/chrM-read_1.fa.gz".to_string(),
+        ];
+        let (ret, out) = main_map(&args);
+        assert_eq!(ret, 0);
+        assert!(out.contains("@PG\tID:minibwa\tPN:minibwa"));
+        assert!(out.contains("@CO\tliteral\\header\n"));
+    }
+
+    #[test]
+    fn main_map_output_file_gets_sam_header() {
+        let dir = std::env::temp_dir().join(format!("minibwa-rs-map-sam-o-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let reads = dir.join("reads.fq");
+        let out_path = dir.join("out.sam");
+        std::fs::write(
+            &reads,
+            b"@r0\nGATCACAGGTCTATCACCCTATTAACCACTCACGGGAGCTCTCCATGCAT\n+\nFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\n",
+        )
+        .expect("write reads");
+        let args = vec![
+            "map".to_string(),
+            "-t".to_string(),
+            "1".to_string(),
+            "-K".to_string(),
+            "1k,1k".to_string(),
+            "-o".to_string(),
+            out_path.to_string_lossy().into_owned(),
+            "minibwa/chrM-human".to_string(),
+            reads.to_string_lossy().into_owned(),
+        ];
+        let (ret, returned) = main_map(&args);
+        assert_eq!(ret, 0);
+        assert!(returned.is_empty());
+        let written = std::fs::read_to_string(&out_path).expect("read output");
+        assert!(written.starts_with("@HD\tVN:1.6\tSO:unsorted\tGO:query\n"));
+        assert!(written.contains("\nr0\t"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn main_mem_outputs_sam_with_md_by_default_and_accepts_bwa_style_options() {
+        let args = vec![
+            "mem".to_string(),
+            "-t".to_string(),
+            "1".to_string(),
+            "-k".to_string(),
+            "19".to_string(),
+            "-w".to_string(),
+            "100".to_string(),
+            "-r".to_string(),
+            "1.5".to_string(),
+            "-A".to_string(),
+            "1".to_string(),
+            "-B".to_string(),
+            "4".to_string(),
+            "-T".to_string(),
+            "1".to_string(),
+            "-h".to_string(),
+            "3".to_string(),
+            "-z".to_string(),
+            "0.7".to_string(),
+            "-H".to_string(),
+            "@CO\\tmem-mode".to_string(),
+            "minibwa/chrM-human".to_string(),
+            "minibwa/test/chrM-read_1.fa.gz".to_string(),
+        ];
+        let (ret, out) = main_mem(&args);
+        assert_eq!(ret, 0);
+        assert!(out.starts_with("@HD\tVN:1.6\tSO:unsorted\tGO:query\n"));
+        assert!(out.contains("@CO\tmem-mode\n"));
+        assert!(out.contains("\tMD:Z:"));
+    }
+
+    #[test]
+    fn usage_mem_formats_bwa_compatible_options() {
+        let mut opt = mb_opt_t::default();
+        mb_opt_init(&mut opt);
+        let (ret, out) = usage_mem(true, &opt);
+        assert_eq!(ret, 0);
+        assert!(out.starts_with("Usage: minibwa mem [options] <in.idx> <in.fastq>\n"));
+        assert!(out.contains("    -h INT         max secondary alignments at the XA tag [5]\n"));
+        assert!(out.contains("    -I INT[,INT[,INT[,INT]]]\n"));
+        assert!(out.contains(
+            "  - \"minibwa mem\" aims to match the \"bwa mem\" command-line interface\n"
+        ));
+    }
+
+    #[test]
+    fn insert_hdr_reads_valid_plain_and_gzip_header_file_lines() {
+        let dir =
+            std::env::temp_dir().join(format!("minibwa-rs-header-lines-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let plain = dir.join("headers.sam");
+        std::fs::write(
+            &plain,
+            b"@CO\tplain\n@SQ\tkept\n@bad\nnot-header\n@RG no-tab\n",
+        )
+        .expect("write header file");
+        assert_eq!(
+            mb_insert_hdr(plain.to_string_lossy().as_ref()),
+            "@CO\tplain\n@SQ\tkept\n"
+        );
+
+        let gzip = dir.join("headers.sam.gz");
+        {
+            let fp = fs::File::create(&gzip).expect("create gzip header file");
+            let mut enc = flate2::write::GzEncoder::new(fp, flate2::Compression::default());
+            enc.write_all(b"@CO\tgz\nignored\n")
+                .expect("write gzip header");
+            enc.finish().expect("finish gzip header");
+        }
+        assert_eq!(mb_insert_hdr(gzip.to_string_lossy().as_ref()), "@CO\tgz\n");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1641,7 +2279,7 @@ mod tests {
         let idx = mb_idx_load("minibwa/chrM-human", 0).expect("load index");
         let mut opt = mb_opt_t::default();
         mb_opt_init(&mut opt);
-        opt.flag |= MB_F_NO_ALN;
+        opt.flag |= MB_F_NO_ALN | MB_F_PAF;
         opt.mb_size = 1000;
         opt.max_mb_size = 1000;
         let mut fq = std::env::temp_dir();
@@ -1656,7 +2294,7 @@ mod tests {
             )
             .unwrap();
         let path = fq.to_string_lossy().into_owned();
-        let (ret, out) = mb_map_file(&opt, &idx, 1, &[path.as_str()], None);
+        let (ret, out) = mb_map_file(&opt, &idx, 1, &[path.as_str()], None, None);
         assert_eq!(ret, 0);
         assert!(out.contains("r0\t"));
         assert!(out.contains("\tchrM\t"));
@@ -1668,7 +2306,7 @@ mod tests {
         let idx = mb_idx_load("minibwa/chrM-human", 0).expect("load index");
         let mut opt = mb_opt_t::default();
         mb_opt_init(&mut opt);
-        opt.flag |= MB_F_NO_ALN;
+        opt.flag |= MB_F_NO_ALN | MB_F_PAF;
         opt.mb_size = 1000;
         opt.max_mb_size = 1000;
         let mut fq = std::env::temp_dir();
@@ -1683,7 +2321,7 @@ mod tests {
             )
             .unwrap();
         let path = fq.to_string_lossy().into_owned() + "\0hidden";
-        let (ret, out) = mb_map_file(&opt, &idx, 1, &[path.as_str()], None);
+        let (ret, out) = mb_map_file(&opt, &idx, 1, &[path.as_str()], None, None);
         assert_eq!(ret, 0);
         assert!(out.contains("r0\t"));
         assert!(out.contains("\tchrM\t"));
@@ -1706,12 +2344,14 @@ mod tests {
         let path = fq.to_string_lossy().into_owned();
         let base_args = vec![
             "map".to_string(),
+            "-f".to_string(),
             "--chain-only".to_string(),
             "minibwa/chrM-human".to_string(),
             path.clone(),
         ];
         let dash_args = vec![
             "map".to_string(),
+            "-f".to_string(),
             "--chain-only".to_string(),
             "-o".to_string(),
             "-".to_string(),
@@ -1743,12 +2383,14 @@ mod tests {
         let path = fq.to_string_lossy().into_owned();
         let base_args = vec![
             "map".to_string(),
+            "-f".to_string(),
             "--chain-only".to_string(),
             "minibwa/chrM-human".to_string(),
             path.clone(),
         ];
         let dash_args = vec![
             "map".to_string(),
+            "-f".to_string(),
             "--chain-only".to_string(),
             "-o".to_string(),
             "-\0hidden".to_string(),
@@ -1779,6 +2421,7 @@ mod tests {
             .unwrap();
         let args = vec![
             "map".to_string(),
+            "-f".to_string(),
             "--chain-only".to_string(),
             "-o".to_string(),
             "-".to_string(),
@@ -1798,7 +2441,7 @@ mod tests {
         let idx = mb_idx_load("minibwa/chrM-human", 0).expect("load index");
         let mut opt = mb_opt_t::default();
         mb_opt_init(&mut opt);
-        opt.flag |= MB_F_NO_ALN;
+        opt.flag |= MB_F_NO_ALN | MB_F_PAF;
         opt.mb_size = 20;
         opt.max_mb_size = 20;
         let mut fq = std::env::temp_dir();
@@ -1813,7 +2456,7 @@ mod tests {
             )
             .unwrap();
         let path = fq.to_string_lossy().into_owned();
-        let (ret, out) = mb_map_file(&opt, &idx, 1, &[path.as_str()], None);
+        let (ret, out) = mb_map_file(&opt, &idx, 1, &[path.as_str()], None, None);
         assert_eq!(ret, 0);
         assert!(out.contains("r0\t"));
         assert!(out.contains("r1\t"));
@@ -1835,6 +2478,7 @@ mod tests {
             .unwrap();
         let args = vec![
             "map".to_string(),
+            "-f".to_string(),
             "--chain-only".to_string(),
             "-K".to_string(),
             "1k,1k".to_string(),

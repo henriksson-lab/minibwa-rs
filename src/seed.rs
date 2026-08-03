@@ -160,7 +160,7 @@ pub fn mb_seed_sort_dedup(u: &mut mb_sai_v) {
         if i == u.n || u.a[i].x[0] != u.a[i0].x[0] {
             if i - i0 > 1 {
                 radix_sort_mb_sai_by_key::<1>(&mut u.a[i0..i]);
-                u.a[..u.n].reverse();
+                u.a[i0..i].reverse();
                 let mut k0 = i0;
                 let mut k = i0 + 1;
                 while k <= i {
@@ -787,6 +787,51 @@ mod tests {
             b.sort_by_key(|x| (x.x[0], x.size, x.info));
             assert_eq!(b, a);
         }
+    }
+
+    #[test]
+    fn seed_sort_dedup_reverses_only_current_x0_group() {
+        let mut u = mb_sai_v {
+            n: 5,
+            m: 5,
+            a: vec![
+                mb_sai_t {
+                    x: [2, 0],
+                    size: 2,
+                    info: 20,
+                },
+                mb_sai_t {
+                    x: [1, 0],
+                    size: 1,
+                    info: 10,
+                },
+                mb_sai_t {
+                    x: [2, 0],
+                    size: 5,
+                    info: 50,
+                },
+                mb_sai_t {
+                    x: [1, 0],
+                    size: 3,
+                    info: 30,
+                },
+                mb_sai_t {
+                    x: [1, 0],
+                    size: 3,
+                    info: 25,
+                },
+            ],
+        };
+        mb_seed_sort_dedup(&mut u);
+        let keys =
+            u.a.iter()
+                .take(u.n)
+                .map(|x| (x.x[0], x.size, x.info))
+                .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![(1, 3, 25), (1, 3, 30), (1, 1, 10), (2, 5, 50), (2, 2, 20)]
+        );
     }
 
     #[test]
